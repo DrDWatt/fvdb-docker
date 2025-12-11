@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Workflow Detection</title>
+</head>
+<body>
+    <h1>Workflow Test</h1>
+    <button onclick="testWorkflows()">Check Workflows</button>
+    <pre id="output"></pre>
+    
+    <script>
+        async function testWorkflows() {
+            const output = document.getElementById('output');
+            output.textContent = 'Checking...\n';
+            
+            try {
+                const response = await fetch('http://localhost:8003/workflow/list');
+                const data = await response.json();
+                output.textContent += 'Success!\n';
+                output.textContent += JSON.stringify(data, null, 2);
+            } catch (error) {
+                output.textContent += 'Error: ' + error.message + '\n';
+                output.textContent += error.stack;
+            }
+        }
+        
+        // Auto-run on load
+        testWorkflows();
+    </script>
+</body>
+</html>

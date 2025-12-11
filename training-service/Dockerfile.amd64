@@ -1,0 +1,62 @@
+# Dockerfile for x86_64/AMD64 - Uses pre-built wheels (WORKS IMMEDIATELY)
+FROM nvidia/cuda:12.6.0-cudnn-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=$CUDA_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-dev \
+    python3-pip \
+    build-essential \
+    cmake \
+    ninja-build \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    libeigen3-dev \
+    libboost-all-dev \
+    libtbb-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python symlinks
+RUN ln -sf /usr/bin/python3.12 /usr/bin/python && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python3
+
+# Install PyTorch (pre-built wheels available for x86_64)
+RUN python -m pip install --break-system-packages \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+
+# Install fVDB (pre-built wheels available for x86_64)
+RUN python -m pip install --break-system-packages fvdb fvdb-reality-capture
+
+# Install FastAPI and dependencies
+RUN python -m pip install --break-system-packages \
+    fastapi \
+    uvicorn[standard] \
+    python-multipart \
+    aiofiles \
+    pydantic \
+    requests \
+    pillow \
+    opencv-python-headless \
+    matplotlib
+
+WORKDIR /app
+
+COPY training_service.py /app/
+COPY requirements.txt /app/
+
+RUN mkdir -p /app/data /app/uploads /app/outputs /app/models
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["uvicorn", "training_service:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

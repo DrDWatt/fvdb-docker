@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  fvdb-training-gpu:
+    image: fvdb-training-gpu:latest
+    container_name: fvdb-training-gpu
+    runtime: nvidia
+    command: ["python3", "-m", "uvicorn", "training_service:app", "--host", "0.0.0.0", "--port", "8000"]
+    shm_size: '8gb'
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONPATH=/fvdb-reality-capture:/host-fvdb:/host-fvdb/lib/python3.12/site-packages:/app
+      - PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/cuda/bin:/host-fvdb/bin
+      - LD_LIBRARY_PATH=/host-fvdb/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+      - UCX_TLS=^dc,ud
+      - UCX_ERROR_SIGNALS=
+      - CURL_CA_BUNDLE=
+      - REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount host fVDB conda environment
+      - /home/dwatkins3/miniforge3/envs/fvdb:/host-fvdb:ro
+      # Mount fvdb-reality-capture source (editable install)
+      - /home/dwatkins3/fvdb-reality-capture:/fvdb-reality-capture:ro
+      # Data directories
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+      # Optional: mount training service code for live updates
+      - ./training-service/training_service.py:/app/training_service.py:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+networks:
+  default:
+    name: fvdb-training-net

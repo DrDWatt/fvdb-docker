@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  training:
+    build:
+      context: ./training-service
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: fvdb-training:latest
+    container_name: fvdb-training
+    ports:
+      - "8000:8000"
+    volumes:
+      - training-data:/app/data
+      - training-uploads:/app/uploads
+      - training-outputs:/app/outputs
+      - shared-models:/app/models
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  rendering:
+    build:
+      context: ./rendering-service
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: fvdb-rendering:latest
+    container_name: fvdb-rendering
+    ports:
+      - "8001:8001"
+    volumes:
+      - shared-models:/app/models
+      - rendering-outputs:/app/outputs
+      - rendering-cache:/app/cache
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      - training
+
+volumes:
+  training-data:
+    driver: local
+  training-uploads:
+    driver: local
+  training-outputs:
+    driver: local
+  shared-models:
+    driver: local
+  rendering-outputs:
+    driver: local
+  rendering-cache:
+    driver: local
+
+networks:
+  default:
+    name: fvdb-network

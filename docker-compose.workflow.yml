@@ -1,0 +1,190 @@
+services:
+  # COLMAP Processing Service
+  colmap-service:
+    build:
+      context: ./colmap-service
+      dockerfile: Dockerfile
+    image: colmap-service:source
+    container_name: colmap-processor
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./colmap-data/uploads:/app/uploads
+      - ./colmap-data/processing:/app/processing
+      - ./colmap-data/outputs:/app/outputs
+      - ./colmap-data/temp:/app/temp
+      # Mount service code for live updates
+      - ./colmap-service/colmap_service.py:/app/colmap_service.py:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    runtime: nvidia
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 2s
+    networks:
+      - workflow-net
+
+  # Training Service (GPU-enabled)
+  training-service:
+    image: fvdb-training-gpu:latest
+    container_name: fvdb-training-gpu
+    runtime: nvidia
+    command: ["python3", "-m", "uvicorn", "training_service:app", "--host", "0.0.0.0", "--port", "8000"]
+    shm_size: '8gb'
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONPATH=/fvdb-reality-capture:/host-fvdb/lib/python3.12/site-packages:/app
+      - PATH=/host-fvdb/bin:/usr/local/cuda-13.0/bin:/usr/local/bin:/usr/bin:/bin
+      - LD_LIBRARY_PATH=/host-fvdb/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cublas/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/cuda-13.0/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+      - CUDA_HOME=/usr/local/cuda-13.0
+      - TORCH_CUDA_ARCH_LIST=12.1
+      - UCX_TLS=^dc,ud
+      - UCX_ERROR_SIGNALS=
+      # SSL settings - use system certs, disable verification only if needed
+      - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+      - REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      - CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      # Torch hub cache for pretrained models
+      - TORCH_HOME=/app/.cache/torch
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount host fVDB conda environment
+      - /home/dwatkins3/miniforge3/envs/fvdb:/host-fvdb:ro
+      # Mount fvdb-reality-capture source
+      - /home/dwatkins3/fvdb-reality-capture:/fvdb-reality-capture:ro
+      # Mount CUDA 13.0 from host
+      - /usr/local/cuda-13.0:/usr/local/cuda-13.0:ro
+      # SHARED: COLMAP outputs become training data
+      - ./colmap-data/outputs:/app/data
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+      - ./cache/torch:/app/.cache/torch
+      # Training service code
+      - ./training-service/training_service.py:/app/training_service.py:ro
+      - ./training-service/train_subprocess.py:/app/train_subprocess.py:ro
+      - ./training-service/static:/app/static:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 2s
+    networks:
+      - workflow-net
+
+  # Rendering Service
+  rendering-service:
+    image: fvdb-rendering-minimal:latest
+    container_name: fvdb-rendering
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./models:/app/models
+      - ./rendering-service/rendering_service_clean.py:/app/rendering_service.py:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 2s
+    networks:
+      - workflow-net
+
+  # USD Pipeline Service
+  usd-pipeline:
+    image: fvdb-docker-usd-pipeline:latest
+    container_name: usd-pipeline
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./models:/app/models
+      - ./usd-outputs:/app/outputs
+    restart: unless-stopped
+    networks:
+      - workflow-net
+
+  # Streaming Server (Workflow UI)
+  streaming-server:
+    image: omniverse-streaming-server:latest
+    container_name: streaming-server
+    network_mode: "host"
+    volumes:
+      - ./models:/app/models
+      - ./streaming-server/workflow.html:/app/workflow.html:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 2s
+
+  # fVDB Image-based Viewer (renders to PNG, no Vulkan video encoding needed)
+  fvdb-viewer:
+    image: fvdb-training-gpu:latest
+    container_name: fvdb-viewer
+    runtime: nvidia
+    ports:
+      - "8085:8085"
+    volumes:
+      - /home/dwatkins3/miniforge3/envs/fvdb:/host-fvdb:ro
+      - /usr/local/cuda-13.0:/usr/local/cuda-13.0:ro
+      - ./models:/app/models
+      - ./fvdb-viewer/image_viewer_service.py:/app/image_viewer_service.py:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTHONPATH=/host-fvdb/lib/python3.12/site-packages
+      - PATH=/host-fvdb/bin:/usr/local/cuda-13.0/bin:/usr/local/bin:/usr/bin:/bin
+      - LD_LIBRARY_PATH=/host-fvdb/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cublas/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/cuda-13.0/lib64
+      - MODEL_DIR=/app/models
+      - VIEWER_PORT=8085
+    command: ["python3", "/app/image_viewer_service.py"]
+    restart: unless-stopped
+    depends_on:
+      - training-service
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - workflow-net
+
+networks:
+  workflow-net:
+    driver: bridge
+
+volumes:
+  colmap-data:
+  training-data:

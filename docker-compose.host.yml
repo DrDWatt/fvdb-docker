@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  training:
+    build:
+      context: ./training-service
+      dockerfile: Dockerfile.host
+    image: localhost:7000/fvdb-training:latest
+    container_name: fvdb-training
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount entire conda environment
+      - /home/dwatkins3/miniforge3/envs/fvdb:/opt/conda:ro
+      # Mount fvdb-reality-capture source (editable install)
+      - /home/dwatkins3/fvdb-reality-capture:/opt/fvdb-reality-capture:ro
+      # Data volumes
+      - training-data:/app/data
+      - training-uploads:/app/uploads
+      - training-outputs:/app/outputs
+      - shared-models:/app/models
+    # Shared memory for PyTorch DataLoader multiprocessing (DGX optimized)
+    shm_size: '8gb'
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTHONPATH=/opt/fvdb-reality-capture:/opt/conda/lib/python3.12/site-packages
+      - LD_LIBRARY_PATH=/opt/conda/lib:/usr/local/cuda/lib64
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  rendering:
+    build:
+      context: ./rendering-service
+      dockerfile: Dockerfile.host
+    image: localhost:7000/fvdb-rendering:latest
+    container_name: fvdb-rendering
+    ports:
+      - "8001:8001"
+    volumes:
+      # Mount entire conda environment
+      - /home/dwatkins3/miniforge3/envs/fvdb:/opt/conda:ro
+      # Data volumes
+      - shared-models:/app/models
+      - rendering-outputs:/app/outputs
+      - rendering-cache:/app/cache
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTHONPATH=/opt/conda/lib/python3.12/site-packages
+      - LD_LIBRARY_PATH=/opt/conda/lib:/usr/local/cuda/lib64
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      - training
+
+volumes:
+  training-data:
+  training-uploads:
+  training-outputs:
+  shared-models:
+  rendering-outputs:
+  rendering-cache:
+
+networks:
+  default:
+    name: fvdb-network

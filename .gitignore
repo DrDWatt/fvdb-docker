@@ -1,0 +1,53 @@
+# Build artifacts and logs
+*.log
+*.pyc
+__pycache__/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Cache directories
+cache/
+.cache/
+*.cache
+
+# Data directories (large files)
+data/
+colmap-data/uploads/
+colmap-data/processing/
+colmap-data/temp/
+uploads/
+outputs/
+usd-outputs/
+models/*.ply
+models/*.pt
+models/*.pth
+test-models/
+
+# Environment
+.env
+.venv/
+venv/
+*.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker volumes (managed separately)
+shared/
+
+# SSL certificates (sensitive)
+streaming-server/cert.pem
+streaming-server/key.pem
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp

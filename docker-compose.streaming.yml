@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  rendering:
+    build:
+      context: ./rendering-service
+      dockerfile: Dockerfile.arm64
+    image: fvdb-rendering-arm64:latest
+    container_name: fvdb-rendering
+    ports:
+      - "8001:8001"    # REST API
+      - "49100:49100"  # WebRTC signaling
+      - "8890:8890"    # fVDB viewer
+    volumes:
+      - ./test-models:/app/models:ro
+      - shared-models:/app/shared-models
+      - rendering-outputs:/app/outputs
+      - rendering-cache:/app/cache
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - STREAMING_ENABLED=true
+      - SIGNALING_PORT=49100
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - bridge
+
+volumes:
+  shared-models:
+    driver: local
+  rendering-outputs:
+    driver: local
+  rendering-cache:
+    driver: local
+
+networks:
+  bridge:
+    external: true
+    name: bridge

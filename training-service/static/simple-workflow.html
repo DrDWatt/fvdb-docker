@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Model Training Workflow</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1000px; margin: 0 auto; }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        h1 { color: #667eea; margin-bottom: 10px; }
+        h2 { color: #333; margin-bottom: 15px; font-size: 1.3rem; }
+        .upload-form { display: flex; flex-direction: column; gap: 15px; }
+        .form-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        label { font-weight: 600; color: #555; font-size: 0.9rem; }
+        input, select {
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 1rem;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .btn:hover:not(:disabled) { transform: translateY(-2px); }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .workflow-list { display: flex; flex-direction: column; gap: 10px; }
+        .workflow-item {
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .workflow-item:hover { background: #e9ecef; transform: translateX(5px); }
+        .workflow-item.selected { background: #e7f0ff; border-left-color: #4c6ef5; }
+        .workflow-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .workflow-title { font-weight: 600; font-size: 1.1rem; color: #333; }
+        .badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .badge.active { background: #667eea; color: white; }
+        .badge.completed { background: #10b981; color: white; }
+        .badge.failed { background: #ef4444; color: white; }
+        .workflow-details { font-size: 0.9rem; color: #666; }
+        .stage-list { margin-top: 15px; }
+        .stage {
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 4px solid #e0e0e0;
+        }
+        .stage.active { border-left-color: #667eea; background: #f0f4ff; }
+        .stage.completed { border-left-color: #10b981; background: #f0fdf4; }
+        .stage-header { display: flex; justify-content: between; align-items: center; margin-bottom: 8px; }
+        .stage-title { font-weight: 600; font-size: 1rem; }
+        .progress-bar {
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s;
+        }
+        .stage-details { font-size: 0.9rem; color: #666; margin-top: 5px; }
+        .logs {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 15px;
+        }
+        .log-line { margin-bottom: 4px; }
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-left: 8px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-value { font-size: 2rem; font-weight: 700; }
+        .stat-label { font-size: 0.85rem; opacity: 0.9; margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>🚀 3D Model Training Workflow</h1>
+            <p style="color: #666;">Upload video → Extract frames → COLMAP → Train Gaussian Splat → Download model</p>
+        </div>
+
+        <div class="card">
+            <h2>🎬 Video Workflow</h2>
+            <p style="color: #666; margin-bottom: 15px;">Upload a video - frames will be extracted automatically</p>
+            <form class="upload-form" id="uploadForm">
+                <div class="form-group">
+                    <label>Video File (MP4, MOV, AVI)</label>
+                    <input type="file" id="videoFile" accept="video/*" required>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Dataset Name</label>
+                        <input type="text" id="datasetId" placeholder="e.g., tesla_model_s" required>
+                    </div>
+                    <div class="form-group">
+                        <label>FPS</label>
+                        <input type="number" id="fps" value="1" min="0.5" max="5" step="0.5">
+                    </div>
+                    <div class="form-group">
+                        <label>Training Steps</label>
+                        <input type="number" id="steps" value="30000" min="10000" max="50000" step="1000">
+                    </div>
+                </div>
+                <button type="submit" class="btn" id="uploadBtn">🎬 Start Video Workflow</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>📷 Photos Workflow</h2>
+            <p style="color: #666; margin-bottom: 15px;">Upload multiple photos OR a ZIP file (20+ images recommended)</p>
+            <form class="upload-form" id="photosForm">
+                <div class="form-group">
+                    <label>Photo Files (JPG, PNG) or ZIP File</label>
+                    <input type="file" id="photoFiles" accept="image/jpeg,image/png,.zip" multiple required>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Dataset Name</label>
+                        <input type="text" id="photosDatasetId" placeholder="e.g., my_object" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Matcher</label>
+                        <select id="photosMatcher">
+                            <option value="exhaustive">Exhaustive</option>
+                            <option value="sequential">Sequential</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Training Steps</label>
+                        <input type="number" id="photosSteps" value="30000" min="10000" max="50000" step="1000">
+                    </div>
+                </div>
+                <button type="submit" class="btn" id="photosBtn">📷 Start Photos Workflow</button>
+            </form>
+        </div>
+
+        <div class="card" id="workflowsCard" style="display: none;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h2 style="margin-bottom: 0;">📊 Active Workflows (<span id="workflowCount">0</span>)</h2>
+                <button class="btn" style="padding: 8px 16px; font-size: 0.9rem; background: #ef4444;" onclick="clearAllWorkflows()">🗑️ Clear All</button>
+            </div>
+            <div class="workflow-list" id="workflowList"></div>
+        </div>
+
+        <div class="card" id="detailsCard" style="display: none;">
+            <div class="stats" id="stats"></div>
+            <h2>Pipeline Stages</h2>
+            <div class="stage-list" id="stageList"></div>
+            <div class="logs" id="logs"></div>
+        </div>
+    </div>
+
+    <script>
+        // Use dynamic hostname for remote access
+        const COLMAP_API = `http://${window.location.hostname}:8003`;
+        
+        let selectedWorkflowId = null;
+        let updateInterval = null;
+
+        // Form submission
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('uploadBtn');
+            btn.disabled = true;
+            btn.textContent = '🔄 Uploading...';
+
+            const formData = new FormData();
+            formData.append('file', document.getElementById('videoFile').files[0]);
+            formData.append('dataset_id', document.getElementById('datasetId').value);
+            formData.append('fps', document.getElementById('fps').value);
+            formData.append('camera_model', 'SIMPLE_RADIAL');
+            formData.append('matcher', 'exhaustive');
+            formData.append('num_training_steps', document.getElementById('steps').value);
+
+            try {
+                const response = await fetch(`${COLMAP_API}/workflow/video-to-model`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                
+                btn.textContent = '✅ Upload Started!';
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = '🎬 Start Video Workflow';
+                }, 2000);
+                
+                // Start monitoring
+                setTimeout(checkWorkflows, 3000);
+            } catch (error) {
+                alert('Upload failed: ' + error.message);
+                btn.disabled = false;
+                btn.textContent = '🎬 Start Video Workflow';
+            }
+        });
+
+        // Photos form submission
+        document.getElementById('photosForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('photosBtn');
+            btn.disabled = true;
+            btn.textContent = '🔄 Uploading Photos...';
+
+            const formData = new FormData();
+            const files = document.getElementById('photoFiles').files;
+            for (let i = 0; i < files.length; i++) {
+                formData.append('files', files[i]);
+            }
+            formData.append('dataset_id', document.getElementById('photosDatasetId').value);
+            formData.append('camera_model', 'SIMPLE_RADIAL');
+            formData.append('matcher', document.getElementById('photosMatcher').value);
+            formData.append('num_training_steps', document.getElementById('photosSteps').value);
+
+            try {
+                const response = await fetch(`${COLMAP_API}/workflow/photos-to-model`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                
+                btn.textContent = '✅ Photos Uploaded!';
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = '📷 Start Photos Workflow';
+                }, 2000);
+                
+                setTimeout(checkWorkflows, 3000);
+            } catch (error) {
+                alert('Upload failed: ' + error.message);
+                btn.disabled = false;
+                btn.textContent = '📷 Start Photos Workflow';
+            }
+        });
+
+        // Check workflows every 3 seconds
+        async function checkWorkflows() {
+            try {
+                const response = await fetch(`${COLMAP_API}/workflow/list`);
+                const data = await response.json();
+                const workflows = data.workflows || [];
+                
+                document.getElementById('workflowCount').textContent = workflows.length;
+                
+                if (workflows.length > 0) {
+                    document.getElementById('workflowsCard').style.display = 'block';
+                    renderWorkflows(workflows);
+                    
+                    // Auto-select first active workflow if none selected
+                    if (!selectedWorkflowId) {
+                        const activeWf = workflows.find(w => w.status !== 'completed' && w.status !== 'failed');
+                        if (activeWf) {
+                            selectWorkflow(activeWf.workflow_id);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error checking workflows:', error);
+            }
+        }
+
+        function renderWorkflows(workflows) {
+            const list = document.getElementById('workflowList');
+            list.innerHTML = workflows.map(wf => `
+                <div class="workflow-item ${wf.workflow_id === selectedWorkflowId ? 'selected' : ''}" 
+                     onclick="selectWorkflow('${wf.workflow_id}')">
+                    <div class="workflow-header">
+                        <div class="workflow-title">${wf.dataset_id}</div>
+                        <span class="badge ${wf.status === 'completed' ? 'completed' : wf.status === 'failed' ? 'failed' : 'active'}">
+                            ${wf.status}
+                        </span>
+                    </div>
+                    <div class="workflow-details">
+                        ${wf.workflow_id} • Progress: ${Math.round((wf.progress || 0) * 100)}%
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function selectWorkflow(workflowId) {
+            selectedWorkflowId = workflowId;
+            checkWorkflows(); // Re-render to show selection
+            
+            // Start detailed monitoring
+            if (updateInterval) clearInterval(updateInterval);
+            updateInterval = setInterval(() => updateWorkflowDetails(workflowId), 3000);
+            updateWorkflowDetails(workflowId);
+        }
+
+        async function updateWorkflowDetails(workflowId) {
+            try {
+                const response = await fetch(`${COLMAP_API}/workflow/status/${workflowId}`);
+                const status = await response.json();
+                
+                document.getElementById('detailsCard').style.display = 'block';
+                
+                // Update stats
+                document.getElementById('stats').innerHTML = `
+                    <div class="stat-card">
+                        <div class="stat-value">${Math.round((status.progress || 0) * 100)}%</div>
+                        <div class="stat-label">Progress</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${status.status?.toUpperCase() || 'N/A'}</div>
+                        <div class="stat-label">Status</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${status.dataset_id || 'N/A'}</div>
+                        <div class="stat-label">Dataset</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${new Date().toLocaleTimeString()}</div>
+                        <div class="stat-label">Last Update</div>
+                    </div>
+                `;
+                
+                // Render stages
+                renderStages(status);
+                
+                // Add log
+                const logs = document.getElementById('logs');
+                const logLine = `[${new Date().toLocaleTimeString()}] ${status.current_step || 'Processing...'}\n`;
+                logs.innerHTML += `<div class="log-line">${logLine}</div>`;
+                logs.scrollTop = logs.scrollHeight;
+                
+            } catch (error) {
+                console.error('Error updating details:', error);
+            }
+        }
+
+        function renderStages(status) {
+            const progress = status.progress || 0;
+            const stages = [
+                {
+                    name: '📤 Upload Video',
+                    active: progress < 0.1,
+                    completed: progress >= 0.1,
+                    details: progress >= 0.1 ? 'Video uploaded' : 'Uploading...'
+                },
+                {
+                    name: '🎬 Extract Frames',
+                    active: progress >= 0.1 && progress < 0.3,
+                    completed: progress >= 0.3,
+                    details: progress >= 0.2 ? `Extracting frames...` : ''
+                },
+                {
+                    name: '📐 COLMAP Reconstruction',
+                    active: progress >= 0.3 && progress < 0.7,
+                    completed: progress >= 0.7,
+                    details: status.current_step || '',
+                    progress: progress >= 0.3 && progress < 0.7 ? (progress - 0.3) / 0.4 : 0
+                },
+                {
+                    name: '🎓 Training Gaussian Splat',
+                    active: progress >= 0.7 && status.status !== 'completed',
+                    completed: status.status === 'completed',
+                    details: status.trainingDetails?.message || '',
+                    progress: status.trainingDetails?.progress || 0
+                }
+            ];
+            
+            document.getElementById('stageList').innerHTML = stages.map(stage => `
+                <div class="stage ${stage.active ? 'active' : ''} ${stage.completed ? 'completed' : ''}">
+                    <div class="stage-header">
+                        <div class="stage-title">
+                            ${stage.name}
+                            ${stage.active ? '<span class="spinner"></span>' : ''}
+                            ${stage.completed ? ' ✅' : ''}
+                        </div>
+                    </div>
+                    ${stage.progress > 0 ? `
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: ${stage.progress * 100}%"></div>
+                        </div>
+                    ` : ''}
+                    ${stage.details ? `<div class="stage-details">${stage.details}</div>` : ''}
+                </div>
+            `).join('');
+        }
+
+        // Clear all workflows
+        async function clearAllWorkflows() {
+            if (!confirm('Clear all workflows? This cannot be undone.')) return;
+            
+            try {
+                const response = await fetch(`${COLMAP_API}/workflow/clear/all`, {
+                    method: 'DELETE'
+                });
+                const data = await response.json();
+                alert(data.message);
+                
+                // Reset UI
+                selectedWorkflowId = null;
+                document.getElementById('workflowsCard').style.display = 'none';
+                document.getElementById('detailsCard').style.display = 'none';
+                document.getElementById('logs').innerHTML = '';
+                checkWorkflows();
+            } catch (error) {
+                alert('Failed to clear workflows: ' + error.message);
+            }
+        }
+
+        // Start checking workflows immediately and every 3 seconds
+        checkWorkflows();
+        setInterval(checkWorkflows, 3000);
+    </script>
+</body>
+</html>

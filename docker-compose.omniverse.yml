@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  training:
+    build:
+      context: ./training-service
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: fvdb-training:latest
+    container_name: fvdb-training
+    ports:
+      - "8000:8000"
+    volumes:
+      - training-data:/app/data
+      - training-uploads:/app/uploads
+      - training-outputs:/app/outputs
+      - shared-models:/app/models
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - omniverse-fvdb-network
+
+  rendering:
+    build:
+      context: ./rendering-service
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: fvdb-rendering:latest
+    container_name: fvdb-rendering
+    ports:
+      - "8001:8001"
+      - "49100:49100"  # WebRTC signaling for Omniverse streaming
+      - "8890:8890"    # fVDB interactive viewer
+    volumes:
+      - shared-models:/app/models
+      - rendering-outputs:/app/outputs
+      - rendering-cache:/app/cache
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OMNIVERSE_STREAMING_ENABLED=true
+      - OMNIVERSE_STREAMING_PORT=49100
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      - training
+    networks:
+      - omniverse-fvdb-network
+
+  web-viewer:
+    build:
+      context: /home/dwatkins3/CascadeProjects/web-viewer-sample
+      dockerfile: Dockerfile
+      target: development
+    container_name: omniverse-web-viewer
+    ports:
+      - "5173:5173"
+    volumes:
+      - /home/dwatkins3/CascadeProjects/web-viewer-sample/src:/app/src
+      - /home/dwatkins3/CascadeProjects/web-viewer-sample/index.html:/app/index.html
+      - /home/dwatkins3/CascadeProjects/web-viewer-sample/stream.config.fvdb.json:/app/stream.config.json:ro
+      - /home/dwatkins3/CascadeProjects/web-viewer-sample/vite.config.ts:/app/vite.config.ts
+      - /home/dwatkins3/CascadeProjects/web-viewer-sample/tsconfig.json:/app/tsconfig.json
+    environment:
+      - NODE_ENV=development
+    networks:
+      - omniverse-fvdb-network
+    depends_on:
+      rendering:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  training-data:
+    driver: local
+  training-uploads:
+    driver: local
+  training-outputs:
+    driver: local
+  shared-models:
+    driver: local
+  rendering-outputs:
+    driver: local
+  rendering-cache:
+    driver: local
+
+networks:
+  omniverse-fvdb-network:
+    driver: bridge
+    name: omniverse-fvdb-network

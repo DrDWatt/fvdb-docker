@@ -1,0 +1,61 @@
+version: "3.8"
+
+services:
+  # USD Pipeline - Convert PLY to USD and render
+  usd-pipeline:
+    build: 
+      context: ./docker/usd-pipeline
+      dockerfile: Dockerfile
+    container_name: usd_converter
+    runtime: nvidia
+    network_mode: host
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - ./models:/workspace/data/models
+      - ./outputs:/workspace/data/outputs
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    ports:
+      - "8002:8002"
+    command: ["python3", "/workspace/app/convert_and_render.py"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Open3D WebRTC - High-quality real-time rendering
+  open3d-webrtc:
+    build: 
+      context: ./docker/open3d-webrtc
+      dockerfile: Dockerfile
+    container_name: webrtc_visualizer
+    runtime: nvidia
+    network_mode: host
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - ./models:/workspace/data/models
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    ports:
+      - "8888:8888"
+    command: ["python3", "/workspace/app/stream_and_render.py"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

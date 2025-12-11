@@ -1,0 +1,41 @@
+FROM nvidia/cuda:12.6.0-cudnn-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=$CUDA_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
+# Install minimal dependencies
+RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3-pip \
+    libgl1 \
+    libglib2.0-0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python symlinks
+RUN ln -sf /usr/bin/python3.12 /usr/bin/python && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python3
+
+# Install only API dependencies (not fVDB - using host mount)
+RUN python -m pip install --break-system-packages \
+    fastapi \
+    uvicorn[standard] \
+    python-multipart \
+    aiofiles \
+    pydantic \
+    requests
+
+WORKDIR /app
+
+COPY rendering_service.py /app/
+COPY static/ /app/static/
+COPY templates/ /app/templates/
+
+RUN mkdir -p /app/models /app/outputs /app/cache
+
+EXPOSE 8001
+
+CMD ["uvicorn", "rendering_service:app", "--host", "0.0.0.0", "--port", "8001"]

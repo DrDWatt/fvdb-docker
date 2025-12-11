@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # WebRTC Streaming Server
+  streaming-server:
+    build:
+      context: ./streaming-server
+      dockerfile: Dockerfile
+    image: omniverse-streaming-server:latest
+    container_name: streaming-server
+    network_mode: "host"
+    volumes:
+      - ./models:/app/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # PLY Rendering Service (for model downloads)
+  rendering:
+    image: fvdb-rendering-minimal:latest
+    container_name: fvdb-rendering
+    ports:
+      - "8001:8001"
+    volumes:
+      - shared-models:/app/models
+    restart: unless-stopped
+    networks:
+      - omniverse-net
+
+  # Omniverse Web Viewer
+  web-viewer:
+    image: web-viewer-sample-web-viewer-dev:latest
+    container_name: omniverse-web-viewer
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_HOST=0.0.0.0
+    restart: unless-stopped
+    networks:
+      - omniverse-net
+    depends_on:
+      - streaming-server
+
+volumes:
+  shared-models:
+    external: true
+    name: fvdb-docker_shared-models
+
+networks:
+  omniverse-net:
+    driver: bridge

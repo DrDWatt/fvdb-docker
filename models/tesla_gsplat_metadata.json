@@ -1,0 +1,8 @@
+{
+  "num_gaussians": 2746386,
+  "device": "cuda:0",
+  "num_channels": 3,
+  "num_images": 121,
+  "training_steps": 7000,
+  "output_file": "/app/outputs/job_20251205_014609_956635/tesla_gsplat.ply"
+}

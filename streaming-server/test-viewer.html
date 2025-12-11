@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebRTC Stream Viewer - Test</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #fff;
+            font-family: Arial, sans-serif;
+        }
+        #container {
+            max-width: 1920px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #76b900;
+            margin-bottom: 20px;
+        }
+        #video {
+            width: 100%;
+            max-width: 1920px;
+            background: #000;
+            border: 2px solid #76b900;
+        }
+        #status {
+            margin: 20px 0;
+            padding: 15px;
+            background: #2a2a2a;
+            border-radius: 5px;
+        }
+        .info { color: #76b900; }
+        .error { color: #ff4444; }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            background: #76b900;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background: #5a8f00;
+        }
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>Omniverse WebRTC Gaussian Splat Stream Viewer</h1>
+        
+        <div id="status">
+            <strong>Status:</strong> <span id="statusText">Not connected</span><br>
+            <strong>Model:</strong> <span id="modelInfo">Loading...</span><br>
+            <strong>Connection:</strong> <span id="connInfo">-</span>
+        </div>
+        
+        <div>
+            <button id="connectBtn" onclick="connect()">Connect to Stream</button>
+            <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+        </div>
+        
+        <video id="video" autoplay playsinline controls></video>
+    </div>
+
+    <script>
+        let pc = null;
+        let ws = null;
+        const video = document.getElementById('video');
+        const statusText = document.getElementById('statusText');
+        const modelInfo = document.getElementById('modelInfo');
+        const connInfo = document.getElementById('connInfo');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+
+        // Fetch model info
+        async function loadModelInfo() {
+            try {
+                const response = await fetch('http://localhost:8080/health');
+                const data = await response.json();
+                modelInfo.textContent = `${data.model_info.name} (${data.model_info.num_gaussians} Gaussians, rendering ${data.model_info.rendered_points} points)`;
+            } catch (error) {
+                modelInfo.textContent = 'Error loading model info';
+                console.error('Failed to load model info:', error);
+            }
+        }
+
+        async function connect() {
+            try {
+                statusText.textContent = 'Connecting...';
+                statusText.className = 'info';
+                connectBtn.disabled = true;
+
+                // Create peer connection with STUN and TURN servers
+                pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        {
+                            urls: 'turn:openrelay.metered.ca:80',
+                            username: 'openrelayproject',
+                            credential: 'openrelayproject'
+                        },
+                        {
+                            urls: 'turn:openrelay.metered.ca:443',
+                            username: 'openrelayproject',
+                            credential: 'openrelayproject'
+                        }
+                    ]
+                });
+
+                // Handle incoming tracks
+                pc.ontrack = (event) => {
+                    console.log('Received track:', event.track.kind);
+                    if (event.track.kind === 'video') {
+                        video.srcObject = event.streams[0];
+                        statusText.textContent = 'Connected - Streaming!';
+                        statusText.className = 'info';
+                        disconnectBtn.disabled = false;
+                    }
+                };
+
+                // Handle ICE candidates
+                pc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        console.log('Got ICE candidate:', event.candidate.candidate);
+                        // Send ICE candidate to server
+                        ws.send(JSON.stringify({
+                            type: 'ice',
+                            candidate: event.candidate
+                        }));
+                    } else {
+                        console.log('All ICE candidates sent');
+                    }
+                };
+                
+                // Handle connection state
+                pc.oniceconnectionstatechange = () => {
+                    connInfo.textContent = `ICE: ${pc.iceConnectionState}`;
+                    console.log('ICE connection state:', pc.iceConnectionState);
+                    
+                    if (pc.iceConnectionState === 'connected') {
+                        statusText.textContent = 'Connected - Streaming!';
+                        statusText.className = 'info';
+                        disconnectBtn.disabled = false;
+                    }
+                };
+
+                pc.onconnectionstatechange = () => {
+                    console.log('Connection state:', pc.connectionState);
+                    if (pc.connectionState === 'failed') {
+                        statusText.textContent = 'Connection failed';
+                        statusText.className = 'error';
+                    } else if (pc.connectionState === 'connected') {
+                        statusText.textContent = 'Connected - Streaming!';
+                        statusText.className = 'info';
+                    }
+                };
+
+                // Connect via WebSocket
+                ws = new WebSocket('ws://localhost:8080/ws/signaling/test-session');
+
+                ws.onopen = async () => {
+                    console.log('WebSocket connected');
+                    
+                    // Add transceiver to receive video (CRITICAL - without this, offer has no media!)
+                    pc.addTransceiver('video', { direction: 'recvonly' });
+                    console.log('Added video transceiver');
+                    
+                    // Create offer (now it will include video codecs)
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    
+                    console.log('Created offer with SDP length:', offer.sdp.length);
+
+                    // Send offer via WebSocket
+                    ws.send(JSON.stringify({
+                        type: 'offer',
+                        sdp: pc.localDescription.sdp
+                    }));
+                    console.log('Sent offer');
+                };
+
+                ws.onmessage = async (event) => {
+                    const message = JSON.parse(event.data);
+                    console.log('Received message:', message.type);
+
+                    if (message.type === 'answer') {
+                        await pc.setRemoteDescription({
+                            type: 'answer',
+                            sdp: message.sdp
+                        });
+                        console.log('Set remote description (answer)');
+                    } else if (message.type === 'ice' && message.candidate) {
+                        await pc.addIceCandidate(new RTCIceCandidate(message.candidate));
+                        console.log('Added ICE candidate from server');
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    statusText.textContent = 'WebSocket error';
+                    statusText.className = 'error';
+                    connectBtn.disabled = false;
+                };
+
+                ws.onclose = () => {
+                    console.log('WebSocket closed');
+                    if (statusText.textContent !== 'Connected - Streaming!') {
+                        statusText.textContent = 'Connection closed';
+                        connectBtn.disabled = false;
+                    }
+                };
+
+            } catch (error) {
+                console.error('Connection error:', error);
+                statusText.textContent = `Error: ${error.message}`;
+                statusText.className = 'error';
+                connectBtn.disabled = false;
+            }
+        }
+
+        function disconnect() {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            video.srcObject = null;
+            statusText.textContent = 'Disconnected';
+            connInfo.textContent = '-';
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+        }
+
+        // Load model info on page load
+        loadModelInfo();
+    </script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  # NVIDIA Omniverse Kit USD Viewer - Official streaming application
+  omniverse-kit:
+    image: nvcr.io/nvidia/omniverse/usd-viewer:107.3.2
+    container_name: omniverse-kit
+    network_mode: host
+    environment:
+      # WebRTC configuration
+      - WEBRTC_AUDIO_CODEC=opus
+      - WEBRTC_VIDEO_CODEC=h264
+      # Streaming configuration
+      - KIT_SIGNALING_PORT=8080
+      - KIT_MEDIA_PORT=8081
+      # Display configuration
+      - DISPLAY=:0
+      # Enable GPU acceleration
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    volumes:
+      # Mount models directory
+      - ${PWD}/models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    command: >
+      --no-window
+      --/app/livestream/enabled=true
+      --/app/livestream/port=8080

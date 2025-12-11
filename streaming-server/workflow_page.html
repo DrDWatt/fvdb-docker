@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>fVDB 3D Reconstruction Pipeline</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        .header h1 {
+            font-size: 3em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        .workflow-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            transition: transform 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+        }
+        .card h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 1.8em;
+        }
+        .upload-zone {
+            border: 3px dashed #667eea;
+            border-radius: 15px;
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 20px 0;
+        }
+        .upload-zone:hover {
+            border-color: #764ba2;
+            background: #f7f9fc;
+        }
+        .upload-zone.dragover {
+            background: #e7f3ff;
+            border-color: #76b900;
+        }
+        .upload-icon {
+            font-size: 3em;
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .btn {
+            display: inline-block;
+            padding: 15px 40px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 30px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            margin: 10px 5px;
+        }
+        .btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .btn-success {
+            background: linear-gradient(135deg, #76b900 0%, #5a8f00 100%);
+        }
+        .btn-secondary {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        }
+        .status-box {
+            background: #f7f9fc;
+            border-left: 4px solid #667eea;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        .status-box.processing {
+            border-color: #3b82f6;
+            background: #eff6ff;
+        }
+        .status-box.complete {
+            border-color: #76b900;
+            background: #f0fdf4;
+        }
+        .status-box.error {
+            border-color: #ef4444;
+            background: #fef2f2;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #e5e7eb;
+            border-radius: 15px;
+            overflow: hidden;
+            margin: 15px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+        }
+        .option-group {
+            margin: 20px 0;
+        }
+        .option-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #374151;
+        }
+        .option-group select,
+        .option-group input[type="number"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 10px;
+            font-size: 1em;
+        }
+        .services-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .service-link {
+            display: block;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 10px;
+            text-align: center;
+            font-weight: 600;
+            transition: transform 0.3s ease;
+        }
+        .service-link:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        .job-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .job-item {
+            padding: 15px;
+            background: #f7f9fc;
+            border-radius: 10px;
+            margin: 10px 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .job-status {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+        .status-processing { background: #3b82f6; color: white; }
+        .status-completed { background: #76b900; color: white; }
+        .status-failed { background: #ef4444; color: white; }
+        .file-info {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 15px 0;
+        }
+        .file-info strong {
+            color: #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎬 fVDB 3D Reconstruction Pipeline</h1>
+            <p>Complete workflow: Upload → COLMAP → Training → 3D Model</p>
+        </div>
+
+        <div class="workflow-grid">
+            <!-- Step 1: Upload -->
+            <div class="card">
+                <h2>📤 Step 1: Upload Media</h2>
+                <p style="margin-bottom: 20px;">Upload a video file (MP4, MOV) or ZIP of photos</p>
+                
+                <div class="upload-zone" id="uploadZone">
+                    <div class="upload-icon">📁</div>
+                    <p><strong>Drop file here or click to browse</strong></p>
+                    <p style="font-size: 0.9em; color: #6b7280; margin-top: 10px;">
+                        Supports: MP4, MOV, AVI, ZIP
+                    </p>
+                </div>
+                <input type="file" id="fileInput" accept=".mp4,.mov,.avi,.zip,.mkv" />
+                
+                <div id="fileInfo" class="file-info" style="display: none;"></div>
+                
+                <div class="option-group">
+                    <label>Video Frame Rate (FPS)</label>
+                    <input type="number" id="fpsInput" value="2" min="1" max="30" step="0.5" />
+                </div>
+                
+                <div class="option-group">
+                    <label>Dataset Name (optional)</label>
+                    <input type="text" id="datasetName" placeholder="my_scene" style="width: 100%; padding: 12px; border: 2px solid #e5e7eb; border-radius: 10px;" />
+                </div>
+                
+                <button class="btn" id="uploadBtn" disabled>Upload & Extract</button>
+            </div>
+
+            <!-- Step 2: COLMAP Processing -->
+            <div class="card">
+                <h2>🔬 Step 2: COLMAP Processing</h2>
+                <p style="margin-bottom: 20px;">Structure-from-Motion reconstruction</p>
+                
+                <div class="option-group">
+                    <label>Quality</label>
+                    <select id="qualitySelect">
+                        <option value="low">Low (Fast, ~2-5 min)</option>
+                        <option value="medium" selected>Medium (Balanced, ~5-15 min)</option>
+                        <option value="high">High (Quality, ~15-30 min)</option>
+                        <option value="extreme">Extreme (Best, ~30-60 min)</option>
+                    </select>
+                </div>
+                
+                <div class="option-group">
+                    <label>Matcher Type</label>
+                    <select id="matcherSelect">
+                        <option value="exhaustive" selected>Exhaustive (Best for <100 images)</option>
+                        <option value="sequential">Sequential (For video sequences)</option>
+                    </select>
+                </div>
+                
+                <button class="btn" id="processBtn" disabled>Run COLMAP</button>
+                
+                <div id="colmapStatus" class="status-box" style="display: none;">
+                    <div id="colmapMessage">Waiting...</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="colmapProgress" style="width: 0%">0%</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 3: Training -->
+            <div class="card">
+                <h2>🎯 Step 3: GPU Training</h2>
+                <p style="margin-bottom: 20px;">Train Gaussian Splat model</p>
+                
+                <div class="option-group">
+                    <label>Training Steps</label>
+                    <select id="stepsSelect">
+                        <option value="7000">7,000 (Quick preview, ~5 min)</option>
+                        <option value="30000" selected>30,000 (Production, ~20 min)</option>
+                        <option value="62200">62,200 (Maximum quality, ~45 min)</option>
+                    </select>
+                </div>
+                
+                <div class="option-group">
+                    <label>Model Name</label>
+                    <input type="text" id="modelName" placeholder="my_model" style="width: 100%; padding: 12px; border: 2px solid #e5e7eb; border-radius: 10px;" />
+                </div>
+                
+                <button class="btn btn-success" id="trainBtn" disabled>🚀 Start Training</button>
+                
+                <div id="trainingStatus" class="status-box" style="display: none;">
+                    <div id="trainingMessage">Waiting...</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="trainingProgress" style="width: 0%">0%</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Results & Downloads -->
+            <div class="card">
+                <h2>📦 Results & Downloads</h2>
+                <p style="margin-bottom: 20px;">Your trained 3D models</p>
+                
+                <div id="resultsArea">
+                    <p style="text-align: center; color: #6b7280; padding: 40px 0;">
+                        Complete the workflow to see results here
+                    </p>
+                </div>
+                
+                <div style="margin-top: 30px;">
+                    <h3 style="margin-bottom: 15px; color: #374151;">Quick Links:</h3>
+                    <div class="services-grid">
+                        <a href="http://localhost:8000" target="_blank" class="service-link">Training UI</a>
+                        <a href="http://localhost:8003/api" target="_blank" class="service-link">COLMAP API</a>
+                        <a href="http://localhost:8002" target="_blank" class="service-link">USD Pipeline</a>
+                        <a href="/test" class="service-link">3D Viewer</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentDatasetId = null;
+        let currentFile = null;
+        let colmapJobId = null;
+        let trainingJobId = null;
+
+        // Upload zone drag & drop
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        
+        uploadZone.addEventListener('click', () => fileInput.click());
+        
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+        
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                fileInput.files = e.dataTransfer.files;
+                handleFileSelect();
+            }
+        });
+        
+        fileInput.addEventListener('change', handleFileSelect);
+        
+        function handleFileSelect() {
+            currentFile = fileInput.files[0];
+            if (currentFile) {
+                const fileInfo = document.getElementById('fileInfo');
+                const sizeMB = (currentFile.size / 1024 / 1024).toFixed(2);
+                const fileType = currentFile.name.endsWith('.zip') ? 'Photo Archive' : 'Video File';
+                
+                fileInfo.innerHTML = `
+                    <strong>Selected:</strong> ${currentFile.name}<br>
+                    <strong>Type:</strong> ${fileType}<br>
+                    <strong>Size:</strong> ${sizeMB} MB
+                `;
+                fileInfo.style.display = 'block';
+                uploadBtn.disabled = false;
+            }
+        }
+        
+        // Upload & Extract
+        uploadBtn.addEventListener('click', async () => {
+            if (!currentFile) return;
+            
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = 'Uploading...';
+            
+            const formData = new FormData();
+            formData.append('file', currentFile);
+            
+            const fps = document.getElementById('fpsInput').value;
+            const datasetName = document.getElementById('datasetName').value || null;
+            
+            try {
+                let endpoint;
+                if (currentFile.name.endsWith('.zip')) {
+                    endpoint = 'http://localhost:8003/upload';
+                    if (datasetName) formData.append('dataset_name', datasetName);
+                } else {
+                    endpoint = `http://localhost:8003/video/extract?fps=${fps}`;
+                    if (datasetName) endpoint += `&dataset_name=${datasetName}`;
+                }
+                
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Upload failed');
+                
+                const result = await response.json();
+                currentDatasetId = result.dataset_id;
+                
+                alert(`✅ Success! ${result.num_images} images ready.\nDataset ID: ${currentDatasetId}`);
+                
+                document.getElementById('processBtn').disabled = false;
+                uploadBtn.textContent = 'Upload & Extract';
+                
+            } catch (error) {
+                alert('❌ Upload failed: ' + error.message);
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Upload & Extract';
+            }
+        });
+        
+        // COLMAP Processing
+        document.getElementById('processBtn').addEventListener('click', async () => {
+            if (!currentDatasetId) return;
+            
+            const processBtn = document.getElementById('processBtn');
+            processBtn.disabled = true;
+            
+            const quality = document.getElementById('qualitySelect').value;
+            const matcher = document.getElementById('matcherSelect').value;
+            
+            try {
+                const response = await fetch('http://localhost:8003/process', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        dataset_id: currentDatasetId,
+                        quality: quality,
+                        matcher: matcher
+                    })
+                });
+                
+                if (!response.ok) throw new Error('COLMAP processing failed to start');
+                
+                const result = await response.json();
+                colmapJobId = result.job_id;
+                
+                document.getElementById('colmapStatus').style.display = 'block';
+                monitorColmapProgress();
+                
+            } catch (error) {
+                alert('❌ COLMAP failed: ' + error.message);
+                processBtn.disabled = false;
+            }
+        });
+        
+        // Monitor COLMAP progress
+        async function monitorColmapProgress() {
+            const statusBox = document.getElementById('colmapStatus');
+            const message = document.getElementById('colmapMessage');
+            const progress = document.getElementById('colmapProgress');
+            
+            const interval = setInterval(async () => {
+                try {
+                    const response = await fetch(`http://localhost:8003/jobs/${colmapJobId}`);
+                    const job = await response.json();
+                    
+                    const percent = Math.round(job.progress * 100);
+                    progress.style.width = percent + '%';
+                    progress.textContent = percent + '%';
+                    message.textContent = job.message;
+                    
+                    statusBox.className = 'status-box processing';
+                    
+                    if (job.status === 'completed') {
+                        clearInterval(interval);
+                        statusBox.className = 'status-box complete';
+                        message.textContent = '✅ COLMAP complete! Ready for training.';
+                        document.getElementById('trainBtn').disabled = false;
+                    } else if (job.status === 'failed') {
+                        clearInterval(interval);
+                        statusBox.className = 'status-box error';
+                        message.textContent = '❌ COLMAP failed: ' + (job.error || 'Unknown error');
+                    }
+                } catch (error) {
+                    console.error('Error checking status:', error);
+                }
+            }, 2000);
+        }
+        
+        // Training
+        document.getElementById('trainBtn').addEventListener('click', async () => {
+            if (!colmapJobId) return;
+            
+            const trainBtn = document.getElementById('trainBtn');
+            trainBtn.disabled = true;
+            
+            const steps = document.getElementById('stepsSelect').value;
+            const modelName = document.getElementById('modelName').value || 'trained_model';
+            
+            try {
+                // First, download COLMAP result
+                const colmapZip = await fetch(`http://localhost:8003/download/${colmapJobId}`);
+                const colmapBlob = await colmapZip.blob();
+                
+                // Upload to training service
+                const formData = new FormData();
+                formData.append('file', colmapBlob, `${currentDatasetId}_colmap.zip`);
+                formData.append('dataset_name', currentDatasetId);
+                
+                const uploadResp = await fetch('http://localhost:8000/datasets/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!uploadResp.ok) throw new Error('Failed to upload to training service');
+                
+                // Start training
+                const trainResp = await fetch('http://localhost:8000/train', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        dataset_id: currentDatasetId,
+                        num_training_steps: parseInt(steps),
+                        output_name: modelName
+                    })
+                });
+                
+                if (!trainResp.ok) throw new Error('Training failed to start');
+                
+                const result = await trainResp.json();
+                trainingJobId = result.job_id;
+                
+                document.getElementById('trainingStatus').style.display = 'block';
+                monitorTrainingProgress();
+                
+            } catch (error) {
+                alert('❌ Training failed: ' + error.message);
+                trainBtn.disabled = false;
+            }
+        });
+        
+        // Monitor training progress
+        async function monitorTrainingProgress() {
+            const statusBox = document.getElementById('trainingStatus');
+            const message = document.getElementById('trainingMessage');
+            const progress = document.getElementById('trainingProgress');
+            
+            const interval = setInterval(async () => {
+                try {
+                    const response = await fetch(`http://localhost:8000/jobs/${trainingJobId}`);
+                    const job = await response.json();
+                    
+                    const percent = Math.round(job.progress * 100);
+                    progress.style.width = percent + '%';
+                    progress.textContent = percent + '%';
+                    message.textContent = job.message;
+                    
+                    statusBox.className = 'status-box processing';
+                    
+                    if (job.status === 'completed') {
+                        clearInterval(interval);
+                        statusBox.className = 'status-box complete';
+                        message.textContent = '✅ Training complete!';
+                        showResults(job);
+                    } else if (job.status === 'failed') {
+                        clearInterval(interval);
+                        statusBox.className = 'status-box error';
+                        message.textContent = '❌ Training failed: ' + (job.error || 'Unknown error');
+                    }
+                } catch (error) {
+                    console.error('Error checking status:', error);
+                }
+            }, 3000);
+        }
+        
+        // Show results
+        function showResults(job) {
+            const resultsArea = document.getElementById('resultsArea');
+            resultsArea.innerHTML = `
+                <div class="status-box complete">
+                    <h3 style="color: #76b900; margin-bottom: 15px;">🎉 Training Complete!</h3>
+                    <p><strong>Job ID:</strong> ${job.job_id}</p>
+                    <p><strong>Model:</strong> ${job.output_name}</p>
+                    <p style="margin-top: 20px;">
+                        <a href="http://localhost:8000/outputs/${job.job_id}/${job.output_name}.ply" 
+                           class="btn" download style="display: inline-block;">
+                            📥 Download PLY Model
+                        </a>
+                    </p>
+                    <p style="margin-top: 10px;">
+                        <a href="http://localhost:8002" target="_blank" class="btn btn-secondary" style="display: inline-block;">
+                            🎬 Convert to USD
+                        </a>
+                    </p>
+                </div>
+            `;
+        }
+    </script>
+</body>
+</html>

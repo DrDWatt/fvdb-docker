@@ -1,0 +1,87 @@
+# Build COLMAP from source for ARM64 with GPU support
+# This eliminates Qt GUI dependencies while keeping CUDA/GPU features
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_ARCHITECTURES=native
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    cmake \
+    ninja-build \
+    build-essential \
+    libboost-program-options-dev \
+    libboost-filesystem-dev \
+    libboost-graph-dev \
+    libboost-system-dev \
+    libeigen3-dev \
+    libflann-dev \
+    libfreeimage-dev \
+    libmetis-dev \
+    libgoogle-glog-dev \
+    libgflags-dev \
+    libsqlite3-dev \
+    libglew-dev \
+    qtbase5-dev \
+    libcgal-dev \
+    libceres-dev \
+    python3.10 \
+    python3-pip \
+    python3-dev \
+    ffmpeg \
+    curl \
+    wget \
+    xvfb \
+    libgl1-mesa-glx \
+    libgl1-mesa-dev \
+    mesa-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build COLMAP from source with headless settings
+WORKDIR /tmp
+RUN git clone --depth 1 --branch 3.9.1 https://github.com/colmap/colmap.git && \
+    cd colmap && \
+    mkdir build && cd build && \
+    cmake .. -GNinja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CUDA_ARCHITECTURES="86;89" \
+        -DTESTS_ENABLED=OFF \
+        -DGUI_ENABLED=OFF \
+        -DCUDA_ENABLED=ON \
+        -DOPENGL_ENABLED=ON && \
+    ninja install && \
+    cd /tmp && rm -rf colmap
+
+# Install Python dependencies
+RUN python3 -m pip install --upgrade pip && \
+    python3 -m pip install \
+    fastapi \
+    uvicorn[standard] \
+    python-multipart \
+    aiofiles \
+    pydantic \
+    pillow \
+    opencv-python-headless \
+    httpx
+
+WORKDIR /app
+
+# Copy service code
+COPY colmap_service.py /app/
+COPY process_colmap.py /app/
+
+# Create workspace directories  
+RUN mkdir -p /workspace/uploads /workspace/processing /workspace/jobs /workspace/outputs
+
+# Verify COLMAP installation
+RUN colmap -h && echo "✅ COLMAP built successfully"
+
+EXPOSE 8003
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8003/health || exit 1
+
+# Start xvfb for any remaining OpenGL needs, then uvicorn
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 & export DISPLAY=:99 && uvicorn colmap_service:app --host 0.0.0.0 --port 8003"]
