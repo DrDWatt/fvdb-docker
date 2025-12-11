@@ -25,6 +25,12 @@ models/*.pt
 models/*.pth
 test-models/
 
+# SpectacularAI data
+spectacularai-data/uploads/
+spectacularai-data/processing/
+spectacularai-data/outputs/
+spectacularai-models/*.ply
+
 # Environment
 .env
 .venv/

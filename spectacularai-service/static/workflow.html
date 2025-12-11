@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SpectacularAI Gaussian Splatting Workflow</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .card {
+            background: rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+        }
+        .card h2 { margin-bottom: 16px; color: #00d4ff; }
+        .upload-zone {
+            border: 2px dashed #00d4ff;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .upload-zone:hover { background: rgba(0,212,255,0.1); }
+        .upload-zone.dragover { background: rgba(0,212,255,0.2); border-color: #7b2cbf; }
+        input[type="file"] { display: none; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; margin-bottom: 8px; color: #aaa; }
+        .form-group select, .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #444;
+            border-radius: 8px;
+            background: #1a1a2e;
+            color: #fff;
+        }
+        .btn {
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            border: none;
+            padding: 14px 28px;
+            border-radius: 8px;
+            color: #fff;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .btn:hover { transform: scale(1.02); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .job-list { display: grid; gap: 16px; }
+        .job-item {
+            background: rgba(0,0,0,0.3);
+            padding: 16px;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .job-status {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .status-pending { background: #ffc107; color: #000; }
+        .status-processing, .status-training { background: #17a2b8; }
+        .status-completed { background: #28a745; }
+        .status-failed { background: #dc3545; }
+        .progress-bar {
+            height: 6px;
+            background: #333;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            transition: width 0.3s;
+        }
+        .api-docs {
+            display: flex;
+            gap: 12px;
+            margin-top: 20px;
+        }
+        .api-docs a {
+            color: #00d4ff;
+            text-decoration: none;
+            padding: 8px 16px;
+            border: 1px solid #00d4ff;
+            border-radius: 6px;
+        }
+        .api-docs a:hover { background: rgba(0,212,255,0.1); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 SpectacularAI Gaussian Splatting</h1>
+        
+        <div class="card">
+            <h2>📤 Upload Recording</h2>
+            <div class="upload-zone" id="uploadZone">
+                <p>📱 Drop recording from Spectacular Rec app here</p>
+                <p style="color:#888;margin-top:8px">or click to browse</p>
+                <input type="file" id="fileInput" accept=".zip,.tar,.tar.gz">
+            </div>
+            
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px">
+                <div class="form-group">
+                    <label>Scene Size</label>
+                    <select id="sceneSize">
+                        <option value="small">Small (table-sized)</option>
+                        <option value="medium" selected>Medium (room corner)</option>
+                        <option value="large">Large (full room)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Training Iterations</label>
+                    <input type="number" id="iterations" value="30000" min="1000" max="100000">
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label><input type="checkbox" id="fastMode"> Fast Mode (lower quality, faster)</label>
+            </div>
+            
+            <button class="btn" id="uploadBtn" disabled>Start Processing</button>
+        </div>
+        
+        <div class="card">
+            <h2>📋 Processing Jobs</h2>
+            <div class="job-list" id="jobList">
+                <p style="color:#888">No jobs yet. Upload a recording to start.</p>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>🎨 Trained Models</h2>
+            <div id="modelList">
+                <p style="color:#888">Loading models...</p>
+            </div>
+        </div>
+        
+        <div class="api-docs">
+            <a href="/docs">📖 Swagger API Docs</a>
+            <a href="/redoc">📚 ReDoc</a>
+            <a href="/openapi.json">🔧 OpenAPI JSON</a>
+        </div>
+    </div>
+    
+    <script>
+        const API = '';
+        let selectedFile = null;
+        
+        // Upload zone handling
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        
+        uploadZone.onclick = () => fileInput.click();
+        
+        uploadZone.ondragover = (e) => { e.preventDefault(); uploadZone.classList.add('dragover'); };
+        uploadZone.ondragleave = () => uploadZone.classList.remove('dragover');
+        uploadZone.ondrop = (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                selectedFile = e.dataTransfer.files[0];
+                uploadZone.innerHTML = `<p>📁 ${selectedFile.name}</p><p style="color:#888">${(selectedFile.size/1024/1024).toFixed(1)} MB</p>`;
+                uploadBtn.disabled = false;
+            }
+        };
+        
+        fileInput.onchange = () => {
+            if (fileInput.files.length) {
+                selectedFile = fileInput.files[0];
+                uploadZone.innerHTML = `<p>📁 ${selectedFile.name}</p><p style="color:#888">${(selectedFile.size/1024/1024).toFixed(1)} MB</p>`;
+                uploadBtn.disabled = false;
+            }
+        };
+        
+        uploadBtn.onclick = async () => {
+            if (!selectedFile) return;
+            
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            
+            const params = new URLSearchParams({
+                scene_size: document.getElementById('sceneSize').value,
+                fast_mode: document.getElementById('fastMode').checked,
+                max_iterations: document.getElementById('iterations').value
+            });
+            
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = 'Uploading...';
+            
+            try {
+                const resp = await fetch(`${API}/upload?${params}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await resp.json();
+                alert(`Job started: ${data.job_id}`);
+                loadJobs();
+            } catch (e) {
+                alert('Upload failed: ' + e.message);
+            }
+            
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = 'Start Processing';
+        };
+        
+        async function loadJobs() {
+            try {
+                const resp = await fetch(`${API}/jobs`);
+                const jobs = await resp.json();
+                const list = document.getElementById('jobList');
+                
+                if (!jobs.length) {
+                    list.innerHTML = '<p style="color:#888">No jobs yet.</p>';
+                    return;
+                }
+                
+                list.innerHTML = jobs.map(job => `
+                    <div class="job-item">
+                        <div>
+                            <strong>${job.job_id.slice(0,8)}...</strong>
+                            <div style="color:#888;font-size:12px">${job.message}</div>
+                            <div class="progress-bar"><div class="progress-fill" style="width:${job.progress*100}%"></div></div>
+                        </div>
+                        <span class="job-status status-${job.status}">${job.status}</span>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load jobs:', e);
+            }
+        }
+        
+        async function loadModels() {
+            try {
+                const resp = await fetch(`${API}/models`);
+                const data = await resp.json();
+                const list = document.getElementById('modelList');
+                
+                if (!data.models.length) {
+                    list.innerHTML = '<p style="color:#888">No models yet.</p>';
+                    return;
+                }
+                
+                list.innerHTML = data.models.map(m => `
+                    <div class="job-item">
+                        <div>
+                            <strong>${m.name}</strong>
+                            <div style="color:#888;font-size:12px">${(m.size_bytes/1024/1024).toFixed(1)} MB</div>
+                        </div>
+                        <a href="${API}/models/${m.name}/download" class="btn" style="padding:8px 16px">Download PLY</a>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load models:', e);
+            }
+        }
+        
+        // Initial load and refresh
+        loadJobs();
+        loadModels();
+        setInterval(loadJobs, 5000);
+        setInterval(loadModels, 30000);
+    </script>
+</body>
+</html>

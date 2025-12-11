@@ -1,0 +1,72 @@
+# SpectacularAI Gaussian Splatting Workflow
+# Separate, non-breaking workflow that integrates with existing rendering/viewer services
+#
+# Usage:
+#   docker compose -f docker-compose.spectacularai.yml up -d
+#
+# This workflow provides:
+#   - SpectacularAI SLAM-based processing (port 8004)
+#   - Integration with existing fvdb-rendering (port 8001)
+#   - Integration with existing fvdb-viewer (port 8085)
+
+services:
+  # SpectacularAI Processing Service
+  spectacularai-service:
+    build:
+      context: ./spectacularai-service
+      dockerfile: Dockerfile
+    image: spectacularai-service:latest
+    container_name: spectacularai-processor
+    ports:
+      - "8004:8004"
+    volumes:
+      # Uploads from Spectacular Rec app
+      - ./spectacularai-data/uploads:/app/uploads
+      # Processing workspace
+      - ./spectacularai-data/processing:/app/processing
+      # Output PLY files
+      - ./spectacularai-data/outputs:/app/outputs
+      # SHARED: Models directory - same as rendering/viewer services
+      - ./models:/app/models
+      # Service code for live updates
+      - ./spectacularai-service/spectacularai_service.py:/app/spectacularai_service.py:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - RENDERING_SERVICE_URL=http://fvdb-rendering:8001
+      - VIEWER_SERVICE_URL=http://fvdb-viewer:8085
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    runtime: nvidia
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - spectacularai-net
+      - workflow-net
+
+  # Use existing rendering service (connects to shared models)
+  # This just references the existing service from docker-compose.workflow.yml
+  # No need to redefine - it reads from ./models automatically
+
+networks:
+  spectacularai-net:
+    driver: bridge
+  # Connect to existing workflow network for rendering/viewer integration
+  workflow-net:
+    external: true
+    name: fvdb-docker_workflow-net
+
+volumes:
+  spectacularai-uploads:
+  spectacularai-processing:
+  spectacularai-outputs:

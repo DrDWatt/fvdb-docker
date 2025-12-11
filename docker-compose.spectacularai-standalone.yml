@@ -1,0 +1,107 @@
+# SpectacularAI Standalone Workflow
+# Complete self-contained workflow with its own rendering and viewing
+# Does NOT interfere with existing COLMAP-based workflow
+#
+# Usage:
+#   docker compose -f docker-compose.spectacularai-standalone.yml up -d
+#
+# Ports:
+#   - 8004: SpectacularAI Processing API
+#   - 8011: Rendering Service (separate from main workflow's 8001)
+#   - 8095: Viewer Service (separate from main workflow's 8085)
+
+services:
+  # SpectacularAI Processing Service
+  spectacularai-service:
+    build:
+      context: ./spectacularai-service
+      dockerfile: Dockerfile
+    image: spectacularai-service:latest
+    container_name: spectacularai-processor
+    ports:
+      - "8004:8004"
+    volumes:
+      - ./spectacularai-data/uploads:/app/uploads
+      - ./spectacularai-data/processing:/app/processing
+      - ./spectacularai-data/outputs:/app/outputs
+      - ./spectacularai-models:/app/models
+      - ./spectacularai-service/spectacularai_service.py:/app/spectacularai_service.py:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - RENDERING_SERVICE_URL=http://spectacularai-rendering:8001
+      - VIEWER_SERVICE_URL=http://spectacularai-viewer:8085
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    runtime: nvidia
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - spectacularai-standalone
+
+  # Dedicated Rendering Service for SpectacularAI models
+  spectacularai-rendering:
+    image: fvdb-rendering-minimal:latest
+    container_name: spectacularai-rendering
+    ports:
+      - "8011:8001"
+    volumes:
+      - ./spectacularai-models:/app/models
+      - ./rendering-service/rendering_service_clean.py:/app/rendering_service.py:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - spectacularai-standalone
+
+  # Dedicated Viewer Service for SpectacularAI models
+  spectacularai-viewer:
+    image: fvdb-training-gpu:latest
+    container_name: spectacularai-viewer
+    runtime: nvidia
+    ports:
+      - "8095:8085"
+    volumes:
+      - /home/dwatkins3/miniforge3/envs/fvdb:/host-fvdb:ro
+      - /usr/local/cuda-13.0:/usr/local/cuda-13.0:ro
+      - ./spectacularai-models:/app/models
+      - ./fvdb-viewer/image_viewer_service.py:/app/image_viewer_service.py:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTHONPATH=/host-fvdb/lib/python3.12/site-packages
+      - PATH=/host-fvdb/bin:/usr/local/cuda-13.0/bin:/usr/local/bin:/usr/bin:/bin
+      - LD_LIBRARY_PATH=/host-fvdb/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/cuda-13.0/lib64
+      - MODEL_DIR=/app/models
+      - VIEWER_PORT=8085
+    command: ["python3", "/app/image_viewer_service.py"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - spectacularai-standalone
+
+networks:
+  spectacularai-standalone:
+    driver: bridge
+
+volumes:
+  spectacularai-models:
