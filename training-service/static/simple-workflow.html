@@ -138,6 +138,41 @@
         }
         .stat-value { font-size: 2rem; font-weight: 700; }
         .stat-label { font-size: 0.85rem; opacity: 0.9; margin-top: 5px; }
+        .spectacular-banner {
+            background: linear-gradient(135deg, #00d4ff 0%, #7b2cbf 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .spectacular-banner h3 { margin: 0; font-size: 1.3em; }
+        .spectacular-banner p { margin: 5px 0 0 0; opacity: 0.9; }
+        .spectacular-banner .btn {
+            background: white;
+            color: #7b2cbf;
+            padding: 10px 20px;
+            font-size: 0.95rem;
+        }
+        .spectacular-info {
+            background: linear-gradient(135deg, #e0f7ff 0%, #f3e8ff 100%);
+            border: 2px solid #00d4ff;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+        }
+        .spectacular-info h4 { color: #7b2cbf; margin: 0 0 10px 0; }
+        .spectacular-info ul { margin: 0; padding-left: 20px; color: #555; }
+        .device-badges { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+        .device-badge {
+            background: #f0f0f0;
+            padding: 6px 12px;
+            border-radius: 15px;
+            font-size: 0.8rem;
+        }
     </style>
 </head>
 <body>
@@ -147,8 +182,32 @@
             <p style="color: #666;">Upload video → Extract frames → COLMAP → Train Gaussian Splat → Download model</p>
         </div>
 
+        <!-- Spectacular Rec Banner -->
+        <div class="spectacular-banner">
+            <div style="flex: 1;">
+                <h3>📱 Using Spectacular Rec App?</h3>
+                <p>Export video from the app and upload below - works seamlessly with this workflow!</p>
+                <div class="device-badges" style="margin-top: 10px;">
+                    <span class="device-badge" style="background: rgba(255,255,255,0.2); color: white;">📱 iPhone</span>
+                    <span class="device-badge" style="background: rgba(255,255,255,0.2); color: white;">🤖 Android</span>
+                    <span class="device-badge" style="background: rgba(255,255,255,0.2); color: white;">📷 OAK-D</span>
+                    <span class="device-badge" style="background: rgba(255,255,255,0.2); color: white;">🎥 RealSense</span>
+                </div>
+            </div>
+            <a href="https://apps.apple.com/us/app/spectacular-rec/id6473188128" target="_blank" class="btn">📱 iOS App</a>
+            <a href="https://play.google.com/store/apps/details?id=com.spectacularai.rec" target="_blank" class="btn">🤖 Android</a>
+        </div>
+
         <div class="card">
             <h2>🎬 Video Workflow</h2>
+            <div class="spectacular-info">
+                <h4>💡 Tip: Using Spectacular Rec?</h4>
+                <ul>
+                    <li><strong>Record</strong> your scene in the app</li>
+                    <li><strong>Export</strong> as MP4/MOV video</li>
+                    <li><strong>Upload</strong> below - same workflow!</li>
+                </ul>
+            </div>
             <p style="color: #666; margin-bottom: 15px;">Upload a video - frames will be extracted automatically</p>
             <form class="upload-form" id="uploadForm">
                 <div class="form-group">
