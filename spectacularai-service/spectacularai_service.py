@@ -24,7 +24,7 @@ from typing import Optional, List, Dict, Any
 from enum import Enum
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import aiofiles
@@ -497,6 +497,18 @@ async def notify_rendering_service(model_name: str):
             "message": f"Model ready but could not notify rendering service: {str(e)}",
             "model_path": str(ply_path)
         }
+
+
+@app.get("/workflow", response_class=HTMLResponse, tags=["UI"])
+async def workflow_page():
+    """Serve the workflow web UI"""
+    static_path = Path(__file__).parent / "static" / "index.html"
+    if static_path.exists():
+        return HTMLResponse(content=static_path.read_text(), status_code=200)
+    # Fallback to simple redirect
+    return HTMLResponse(content="""
+        <html><head><meta http-equiv="refresh" content="0;url=/static/index.html"></head></html>
+    """, status_code=200)
 
 
 # Mount static files for web UI

@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SpectacularAI 3D Gaussian Splatting Pipeline</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        .header h1 {
+            font-size: 2.8em;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf, #f093fb);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.8;
+            color: #a0a0a0;
+        }
+        .workflow-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+            gap: 25px;
+            margin-bottom: 30px;
+        }
+        .card {
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 20px;
+            padding: 30px;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 20px 40px rgba(0,212,255,0.2);
+        }
+        .card h2 {
+            color: #00d4ff;
+            margin-bottom: 15px;
+            font-size: 1.6em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .card p {
+            color: #a0a0a0;
+            margin-bottom: 20px;
+        }
+        .upload-zone {
+            border: 3px dashed #00d4ff;
+            border-radius: 15px;
+            padding: 50px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 20px 0;
+            background: rgba(0,212,255,0.05);
+        }
+        .upload-zone:hover {
+            border-color: #7b2cbf;
+            background: rgba(123,44,191,0.1);
+        }
+        .upload-zone.dragover {
+            background: rgba(0,212,255,0.2);
+            border-color: #00ff88;
+        }
+        .upload-icon {
+            font-size: 4em;
+            margin-bottom: 15px;
+        }
+        .upload-zone p {
+            color: #fff;
+        }
+        .upload-zone .sub {
+            color: #888;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .btn {
+            display: inline-block;
+            padding: 15px 35px;
+            background: linear-gradient(135deg, #00d4ff 0%, #7b2cbf 100%);
+            color: white;
+            border: none;
+            border-radius: 30px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            margin: 10px 5px;
+        }
+        .btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 10px 30px rgba(0,212,255,0.4);
+        }
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .btn-success {
+            background: linear-gradient(135deg, #00ff88 0%, #00b359 100%);
+        }
+        .btn-secondary {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        }
+        .btn-small {
+            padding: 10px 20px;
+            font-size: 0.9em;
+        }
+        .status-box {
+            background: rgba(0,0,0,0.3);
+            border-left: 4px solid #00d4ff;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        .status-box.processing {
+            border-color: #3b82f6;
+        }
+        .status-box.complete {
+            border-color: #00ff88;
+            background: rgba(0,255,136,0.1);
+        }
+        .status-box.error {
+            border-color: #f5576c;
+            background: rgba(245,87,108,0.1);
+        }
+        .progress-bar {
+            width: 100%;
+            height: 25px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 12px;
+            overflow: hidden;
+            margin: 15px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff 0%, #7b2cbf 100%);
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 0.9em;
+        }
+        .option-group {
+            margin: 20px 0;
+        }
+        .option-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #00d4ff;
+            font-size: 0.95em;
+        }
+        .option-group select,
+        .option-group input[type="number"],
+        .option-group input[type="text"] {
+            width: 100%;
+            padding: 14px;
+            border: 2px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            font-size: 1em;
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+        }
+        .option-group select:focus,
+        .option-group input:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+        .option-group select option {
+            background: #1a1a2e;
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 15px 0;
+            color: #fff;
+        }
+        .checkbox-group input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+        .services-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            margin-top: 20px;
+        }
+        .service-link {
+            display: block;
+            padding: 15px;
+            background: linear-gradient(135deg, rgba(0,212,255,0.2) 0%, rgba(123,44,191,0.2) 100%);
+            border: 1px solid rgba(0,212,255,0.3);
+            color: white;
+            text-decoration: none;
+            border-radius: 10px;
+            text-align: center;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        .service-link:hover {
+            transform: translateY(-3px);
+            background: linear-gradient(135deg, rgba(0,212,255,0.3) 0%, rgba(123,44,191,0.3) 100%);
+            box-shadow: 0 5px 20px rgba(0,212,255,0.3);
+        }
+        .job-list {
+            max-height: 350px;
+            overflow-y: auto;
+        }
+        .job-item {
+            padding: 15px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            margin: 10px 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        .job-item:hover {
+            border-color: rgba(0,212,255,0.3);
+        }
+        .job-info {
+            flex: 1;
+        }
+        .job-info strong {
+            color: #fff;
+        }
+        .job-info .message {
+            color: #888;
+            font-size: 0.85em;
+            margin-top: 5px;
+        }
+        .job-status {
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        .status-pending { background: #f59e0b; color: #000; }
+        .status-processing, .status-training { background: #3b82f6; color: #fff; }
+        .status-exporting { background: #8b5cf6; color: #fff; }
+        .status-completed { background: #00ff88; color: #000; }
+        .status-failed { background: #f5576c; color: #fff; }
+        .file-info {
+            background: rgba(0,212,255,0.1);
+            border: 1px solid rgba(0,212,255,0.3);
+            padding: 15px;
+            border-radius: 10px;
+            margin: 15px 0;
+            color: #fff;
+        }
+        .file-info strong {
+            color: #00d4ff;
+        }
+        .model-grid {
+            display: grid;
+            gap: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .model-item {
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            padding: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .model-item:hover {
+            border-color: rgba(0,255,136,0.5);
+        }
+        .model-info {
+            color: #fff;
+        }
+        .model-info .size {
+            color: #888;
+            font-size: 0.85em;
+        }
+        .device-icons {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        .device-icon {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            padding: 10px 15px;
+            color: #888;
+            font-size: 0.85em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .processing-indicator {
+            animation: pulse 1.5s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 SpectacularAI Gaussian Splatting</h1>
+            <p>SLAM-based 3D reconstruction: Upload Recording → Process → Train → View</p>
+        </div>
+
+        <div class="workflow-grid">
+            <!-- Step 1: Upload -->
+            <div class="card">
+                <h2>📱 Step 1: Upload Recording</h2>
+                <p>Upload a recording from Spectacular Rec app or supported devices</p>
+                
+                <div class="device-icons">
+                    <span class="device-icon">📱 iPhone</span>
+                    <span class="device-icon">🤖 Android</span>
+                    <span class="device-icon">📷 OAK-D</span>
+                    <span class="device-icon">🎥 RealSense</span>
+                </div>
+                
+                <div class="upload-zone" id="uploadZone">
+                    <div class="upload-icon">📤</div>
+                    <p><strong>Drop recording here or click to browse</strong></p>
+                    <p class="sub">Supports: ZIP files from Spectacular Rec</p>
+                </div>
+                <input type="file" id="fileInput" accept=".zip,.tar,.tar.gz" />
+                
+                <div id="fileInfo" class="file-info" style="display: none;"></div>
+                
+                <div class="option-group">
+                    <label>Scene Size</label>
+                    <select id="sceneSize">
+                        <option value="small">Small (table-sized objects)</option>
+                        <option value="medium" selected>Medium (room corner, furniture)</option>
+                        <option value="large">Large (full room, outdoor)</option>
+                    </select>
+                </div>
+                
+                <div class="option-group">
+                    <label>Model Name (optional)</label>
+                    <input type="text" id="modelName" placeholder="my_spectacularai_model" />
+                </div>
+                
+                <div class="checkbox-group">
+                    <input type="checkbox" id="fastMode" />
+                    <label for="fastMode">Fast Mode (lower quality, faster processing)</label>
+                </div>
+                
+                <button class="btn" id="uploadBtn" disabled>🚀 Start Processing</button>
+            </div>
+
+            <!-- Step 2: Processing Status -->
+            <div class="card">
+                <h2>⚙️ Step 2: Processing Pipeline</h2>
+                <p>SpectacularAI SLAM + Nerfstudio Gaussian Splatting</p>
+                
+                <div class="option-group">
+                    <label>Training Iterations</label>
+                    <select id="iterationsSelect">
+                        <option value="10000">10,000 (Quick preview, ~10 min)</option>
+                        <option value="30000" selected>30,000 (Production, ~30 min)</option>
+                        <option value="50000">50,000 (High quality, ~50 min)</option>
+                    </select>
+                </div>
+                
+                <div id="processingStatus" class="status-box" style="display: none;">
+                    <div id="statusMessage" style="color: #fff; margin-bottom: 10px;">Waiting...</div>
+                    <div id="statusStage" style="color: #00d4ff; font-size: 0.9em; margin-bottom: 10px;"></div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill" style="width: 0%">0%</div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 30px;">
+                    <h3 style="color: #fff; margin-bottom: 15px;">Processing Stages:</h3>
+                    <div style="color: #888; font-size: 0.9em; line-height: 1.8;">
+                        <div id="stage1">⏳ 1. Extract recording</div>
+                        <div id="stage2">⏳ 2. SpectacularAI SLAM processing</div>
+                        <div id="stage3">⏳ 3. Gaussian Splatting training</div>
+                        <div id="stage4">⏳ 4. Export PLY model</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Active Jobs -->
+            <div class="card">
+                <h2>📋 Active Jobs</h2>
+                <p>Monitor your processing jobs</p>
+                
+                <div class="job-list" id="jobList">
+                    <p style="color: #888; text-align: center; padding: 30px;">
+                        No active jobs. Upload a recording to start.
+                    </p>
+                </div>
+                
+                <button class="btn btn-small btn-secondary" onclick="loadJobs()" style="margin-top: 15px;">
+                    🔄 Refresh Jobs
+                </button>
+            </div>
+
+            <!-- Models & Results -->
+            <div class="card">
+                <h2>🎨 Trained Models</h2>
+                <p>Your Gaussian Splat models ready for viewing</p>
+                
+                <div class="model-grid" id="modelList">
+                    <p style="color: #888; text-align: center; padding: 30px;">
+                        Loading models...
+                    </p>
+                </div>
+                
+                <div style="margin-top: 25px;">
+                    <h3 style="color: #fff; margin-bottom: 15px;">Quick Links:</h3>
+                    <div class="services-grid">
+                        <a href="/docs" target="_blank" class="service-link">📖 API Docs</a>
+                        <a href="http://localhost:8001" target="_blank" class="service-link">🎬 Rendering</a>
+                        <a href="http://localhost:8085" target="_blank" class="service-link">👁️ Viewer</a>
+                        <a href="http://localhost:8000/workflow" target="_blank" class="service-link">🔄 COLMAP Flow</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API = '';
+        let currentJobId = null;
+        let currentFile = null;
+        let pollInterval = null;
+
+        // Upload zone handling
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        
+        uploadZone.addEventListener('click', () => fileInput.click());
+        
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+        
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                fileInput.files = e.dataTransfer.files;
+                handleFileSelect();
+            }
+        });
+        
+        fileInput.addEventListener('change', handleFileSelect);
+        
+        function handleFileSelect() {
+            currentFile = fileInput.files[0];
+            if (currentFile) {
+                const fileInfo = document.getElementById('fileInfo');
+                const sizeMB = (currentFile.size / 1024 / 1024).toFixed(2);
+                
+                fileInfo.innerHTML = `
+                    <strong>📁 Selected:</strong> ${currentFile.name}<br>
+                    <strong>📦 Size:</strong> ${sizeMB} MB
+                `;
+                fileInfo.style.display = 'block';
+                uploadBtn.disabled = false;
+                
+                // Auto-fill model name from filename
+                const nameInput = document.getElementById('modelName');
+                if (!nameInput.value) {
+                    nameInput.value = currentFile.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9]/g, '_');
+                }
+            }
+        }
+        
+        // Upload and start processing
+        uploadBtn.addEventListener('click', async () => {
+            if (!currentFile) return;
+            
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = '⏳ Uploading...';
+            
+            const formData = new FormData();
+            formData.append('file', currentFile);
+            
+            const sceneSize = document.getElementById('sceneSize').value;
+            const fastMode = document.getElementById('fastMode').checked;
+            const iterations = document.getElementById('iterationsSelect').value;
+            const modelName = document.getElementById('modelName').value || null;
+            
+            const params = new URLSearchParams({
+                scene_size: sceneSize,
+                fast_mode: fastMode,
+                max_iterations: iterations
+            });
+            if (modelName) params.append('model_name', modelName);
+            
+            try {
+                const response = await fetch(`${API}/upload?${params}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || 'Upload failed');
+                }
+                
+                const result = await response.json();
+                currentJobId = result.job_id;
+                
+                // Show processing status
+                document.getElementById('processingStatus').style.display = 'block';
+                startPolling();
+                
+                uploadBtn.textContent = '✅ Processing Started';
+                
+            } catch (error) {
+                alert('❌ Upload failed: ' + error.message);
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = '🚀 Start Processing';
+            }
+        });
+        
+        // Poll for job status
+        function startPolling() {
+            if (pollInterval) clearInterval(pollInterval);
+            
+            pollInterval = setInterval(async () => {
+                if (!currentJobId) return;
+                
+                try {
+                    const response = await fetch(`${API}/jobs/${currentJobId}`);
+                    const job = await response.json();
+                    
+                    updateStatus(job);
+                    
+                    if (job.status === 'completed' || job.status === 'failed') {
+                        clearInterval(pollInterval);
+                        loadModels();
+                        loadJobs();
+                        
+                        if (job.status === 'completed') {
+                            uploadBtn.disabled = false;
+                            uploadBtn.textContent = '🚀 Start New Processing';
+                        }
+                    }
+                } catch (error) {
+                    console.error('Polling error:', error);
+                }
+            }, 2000);
+        }
+        
+        function updateStatus(job) {
+            const statusBox = document.getElementById('processingStatus');
+            const message = document.getElementById('statusMessage');
+            const stage = document.getElementById('statusStage');
+            const progress = document.getElementById('progressFill');
+            
+            const percent = Math.round(job.progress * 100);
+            progress.style.width = percent + '%';
+            progress.textContent = percent + '%';
+            message.textContent = job.message;
+            
+            // Update stage indicators
+            const stages = ['stage1', 'stage2', 'stage3', 'stage4'];
+            const stageMap = {
+                'pending': 0,
+                'processing': 1,
+                'training': 2,
+                'exporting': 3,
+                'completed': 4
+            };
+            
+            const currentStage = stageMap[job.status] || 0;
+            stages.forEach((id, idx) => {
+                const el = document.getElementById(id);
+                if (idx < currentStage) {
+                    el.textContent = el.textContent.replace('⏳', '✅').replace('🔄', '✅');
+                } else if (idx === currentStage && job.status !== 'completed') {
+                    el.textContent = el.textContent.replace('⏳', '🔄');
+                    el.classList.add('processing-indicator');
+                }
+            });
+            
+            // Update status box style
+            statusBox.className = 'status-box';
+            if (job.status === 'completed') {
+                statusBox.classList.add('complete');
+                stage.textContent = '🎉 Model ready for viewing!';
+            } else if (job.status === 'failed') {
+                statusBox.classList.add('error');
+                stage.textContent = '❌ ' + job.message;
+            } else {
+                statusBox.classList.add('processing');
+                stage.textContent = `Stage: ${job.status}`;
+            }
+        }
+        
+        // Load jobs list
+        async function loadJobs() {
+            try {
+                const response = await fetch(`${API}/jobs?limit=10`);
+                const jobs = await response.json();
+                
+                const jobList = document.getElementById('jobList');
+                
+                if (!jobs.length) {
+                    jobList.innerHTML = '<p style="color: #888; text-align: center; padding: 30px;">No jobs yet.</p>';
+                    return;
+                }
+                
+                jobList.innerHTML = jobs.map(job => `
+                    <div class="job-item">
+                        <div class="job-info">
+                            <strong>${job.job_id.slice(0, 8)}...</strong>
+                            <div class="message">${job.message}</div>
+                            <div class="progress-bar" style="height: 6px; margin-top: 8px;">
+                                <div class="progress-fill" style="width: ${job.progress * 100}%; font-size: 0;"></div>
+                            </div>
+                        </div>
+                        <span class="job-status status-${job.status}">${job.status}</span>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Failed to load jobs:', error);
+            }
+        }
+        
+        // Load models list
+        async function loadModels() {
+            try {
+                const response = await fetch(`${API}/models`);
+                const data = await response.json();
+                
+                const modelList = document.getElementById('modelList');
+                
+                if (!data.models || !data.models.length) {
+                    modelList.innerHTML = '<p style="color: #888; text-align: center; padding: 30px;">No models yet. Complete a processing job to see models here.</p>';
+                    return;
+                }
+                
+                modelList.innerHTML = data.models.map(model => `
+                    <div class="model-item">
+                        <div class="model-info">
+                            <strong>${model.name}</strong>
+                            <div class="size">${(model.size_bytes / 1024 / 1024).toFixed(1)} MB</div>
+                        </div>
+                        <div>
+                            <a href="${API}/models/${model.name}/download" class="btn btn-small btn-success" style="margin: 0;">
+                                📥 Download
+                            </a>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Failed to load models:', error);
+                document.getElementById('modelList').innerHTML = '<p style="color: #888; text-align: center; padding: 30px;">Failed to load models.</p>';
+            }
+        }
+        
+        // Initial load
+        loadJobs();
+        loadModels();
+        
+        // Auto-refresh
+        setInterval(loadJobs, 10000);
+        setInterval(loadModels, 30000);
+    </script>
+</body>
+</html>
