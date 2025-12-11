@@ -209,6 +209,90 @@
         .file-info strong {
             color: #667eea;
         }
+        .spectacular-banner {
+            background: linear-gradient(135deg, #00d4ff 0%, #7b2cbf 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .spectacular-banner h3 {
+            margin: 0;
+            font-size: 1.4em;
+        }
+        .spectacular-banner p {
+            margin: 5px 0 0 0;
+            opacity: 0.9;
+        }
+        .spectacular-banner .btn {
+            background: white;
+            color: #7b2cbf;
+            margin: 0;
+        }
+        .device-badges {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin: 15px 0;
+        }
+        .device-badge {
+            background: #f0f0f0;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .tab-container {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .tab-btn {
+            padding: 12px 25px;
+            border: 2px solid #667eea;
+            background: white;
+            color: #667eea;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        .tab-btn.active {
+            background: #667eea;
+            color: white;
+        }
+        .tab-btn:hover {
+            background: #667eea;
+            color: white;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .spectacular-info {
+            background: linear-gradient(135deg, #e0f7ff 0%, #f3e8ff 100%);
+            border: 2px solid #00d4ff;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 15px 0;
+        }
+        .spectacular-info h4 {
+            color: #7b2cbf;
+            margin: 0 0 10px 0;
+        }
+        .spectacular-info ul {
+            margin: 0;
+            padding-left: 20px;
+            color: #555;
+        }
     </style>
 </head>
 <body>
@@ -218,19 +302,68 @@
             <p>Complete workflow: Upload > COLMAP > Training > 3D Model</p>
         </div>
 
+        <!-- Spectacular Rec Banner -->
+        <div class="spectacular-banner">
+            <div style="flex: 1;">
+                <h3>📱 Using Spectacular Rec App?</h3>
+                <p>Export your video from the app and upload it below - works seamlessly!</p>
+            </div>
+            <a href="https://apps.apple.com/us/app/spectacular-rec/id6473188128" target="_blank" class="btn">Get iOS App</a>
+            <a href="https://play.google.com/store/apps/details?id=com.spectacularai.rec" target="_blank" class="btn">Get Android App</a>
+        </div>
+
         <div class="workflow-grid">
             <!-- Step 1: Upload -->
             <div class="card">
                 <h2>Step 1: Upload Media</h2>
-                <p style="margin-bottom: 20px;">Upload a video file (MP4, MOV) or ZIP of photos</p>
                 
-                <div class="upload-zone" id="uploadZone">
-                    <div class="upload-icon">&#128193;</div>
-                    <p><strong>Drop file here or click to browse</strong></p>
-                    <p style="font-size: 0.9em; color: #6b7280; margin-top: 10px;">
-                        Supports: MP4, MOV, AVI, ZIP
-                    </p>
+                <!-- Input Source Tabs -->
+                <div class="tab-container">
+                    <button class="tab-btn active" onclick="switchTab('standard')">📹 Video/Photos</button>
+                    <button class="tab-btn" onclick="switchTab('spectacular')">📱 Spectacular Rec</button>
                 </div>
+                
+                <!-- Standard Upload Tab -->
+                <div id="tab-standard" class="tab-content active">
+                    <p style="margin-bottom: 15px;">Upload a video file (MP4, MOV) or ZIP of photos</p>
+                    
+                    <div class="upload-zone" id="uploadZone">
+                        <div class="upload-icon">&#128193;</div>
+                        <p><strong>Drop file here or click to browse</strong></p>
+                        <p style="font-size: 0.9em; color: #6b7280; margin-top: 10px;">
+                            Supports: MP4, MOV, AVI, ZIP
+                        </p>
+                    </div>
+                </div>
+                
+                <!-- Spectacular Rec Tab -->
+                <div id="tab-spectacular" class="tab-content">
+                    <div class="spectacular-info">
+                        <h4>📱 How to use Spectacular Rec:</h4>
+                        <ul>
+                            <li><strong>Record</strong> your scene in the app</li>
+                            <li><strong>Export</strong> as video (MP4/MOV)</li>
+                            <li><strong>Transfer</strong> to computer (AirDrop, iCloud, etc.)</li>
+                            <li><strong>Upload</strong> the video below</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="device-badges">
+                        <span class="device-badge">📱 iPhone</span>
+                        <span class="device-badge">🤖 Android</span>
+                        <span class="device-badge">📷 OAK-D</span>
+                        <span class="device-badge">🎥 RealSense</span>
+                    </div>
+                    
+                    <div class="upload-zone" id="uploadZoneSpectacular">
+                        <div class="upload-icon">📱</div>
+                        <p><strong>Drop Spectacular Rec export here</strong></p>
+                        <p style="font-size: 0.9em; color: #6b7280; margin-top: 10px;">
+                            Video (MP4/MOV) or Recording ZIP
+                        </p>
+                    </div>
+                </div>
+                
                 <input type="file" id="fileInput" accept=".mp4,.mov,.avi,.zip,.mkv" />
                 
                 <div id="fileInfo" class="file-info" style="display: none;"></div>
@@ -339,26 +472,57 @@
         let currentFile = null;
         let colmapJobId = null;
         let trainingJobId = null;
+        let isSpectacularRec = false;
+
+        // Tab switching
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById('tab-' + tabName).classList.add('active');
+            
+            isSpectacularRec = (tabName === 'spectacular');
+        }
 
         // Upload zone drag & drop
         const uploadZone = document.getElementById('uploadZone');
+        const uploadZoneSpectacular = document.getElementById('uploadZoneSpectacular');
         const fileInput = document.getElementById('fileInput');
         const uploadBtn = document.getElementById('uploadBtn');
         
+        // Standard upload zone
         uploadZone.addEventListener('click', () => fileInput.click());
-        
         uploadZone.addEventListener('dragover', (e) => {
             e.preventDefault();
             uploadZone.classList.add('dragover');
         });
-        
         uploadZone.addEventListener('dragleave', () => {
             uploadZone.classList.remove('dragover');
         });
-        
         uploadZone.addEventListener('drop', (e) => {
             e.preventDefault();
             uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                fileInput.files = e.dataTransfer.files;
+                handleFileSelect();
+            }
+        });
+        
+        // Spectacular Rec upload zone
+        uploadZoneSpectacular.addEventListener('click', () => fileInput.click());
+        uploadZoneSpectacular.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZoneSpectacular.classList.add('dragover');
+        });
+        uploadZoneSpectacular.addEventListener('dragleave', () => {
+            uploadZoneSpectacular.classList.remove('dragover');
+        });
+        uploadZoneSpectacular.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZoneSpectacular.classList.remove('dragover');
             if (e.dataTransfer.files.length > 0) {
                 fileInput.files = e.dataTransfer.files;
                 handleFileSelect();
@@ -372,7 +536,10 @@
             if (currentFile) {
                 const fileInfo = document.getElementById('fileInfo');
                 const sizeMB = (currentFile.size / 1024 / 1024).toFixed(2);
-                const fileType = currentFile.name.endsWith('.zip') ? 'Photo Archive' : 'Video File';
+                let fileType = currentFile.name.endsWith('.zip') ? 'Photo Archive' : 'Video File';
+                if (isSpectacularRec) {
+                    fileType = '📱 Spectacular Rec ' + fileType;
+                }
                 
                 fileInfo.innerHTML = `
                     <strong>Selected:</strong> ${currentFile.name}<br>
@@ -381,6 +548,12 @@
                 `;
                 fileInfo.style.display = 'block';
                 uploadBtn.disabled = false;
+                
+                // Auto-fill dataset name from filename
+                const datasetInput = document.getElementById('datasetName');
+                if (!datasetInput.value) {
+                    datasetInput.value = currentFile.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9]/g, '_');
+                }
             }
         }
         

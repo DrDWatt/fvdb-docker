@@ -209,6 +209,18 @@ async def upload_recording(
     )
 
 
+def check_spectacularai_available():
+    """Check if SpectacularAI SDK is available"""
+    try:
+        import spectacularAI
+        return True
+    except ImportError:
+        return False
+
+
+SIMULATION_MODE = not check_spectacularai_available()
+
+
 async def process_recording(job_id: str):
     """Background task to process recording through full pipeline"""
     job = jobs.get(job_id)
@@ -227,46 +239,64 @@ async def process_recording(job_id: str):
         job["updated_at"] = datetime.utcnow().isoformat()
         
         input_path = job_dir / "input"
+        input_path.mkdir(parents=True, exist_ok=True)
+        
         if upload_path.suffix == ".zip":
             shutil.unpack_archive(upload_path, input_path)
         else:
             input_path = upload_path
         
-        # Step 2: Process with sai-cli
+        await asyncio.sleep(1)  # Brief delay for UI update
+        
+        # Step 2: Process with sai-cli (or simulation)
         job["message"] = "Processing with SpectacularAI SLAM..."
         job["progress"] = 0.2
         job["updated_at"] = datetime.utcnow().isoformat()
         
         nerfstudio_path = job_dir / "nerfstudio"
+        nerfstudio_path.mkdir(parents=True, exist_ok=True)
         
-        # Determine key_frame_distance based on scene size
-        kfd_map = {
-            SceneSize.SMALL: 0.05,
-            SceneSize.MEDIUM: 0.10,
-            SceneSize.LARGE: 0.15
-        }
-        key_frame_distance = kfd_map[config["scene_size"]]
-        
-        # Build sai-cli command
-        sai_cmd = [
-            "sai-cli", "process",
-            str(input_path),
-            f"--key_frame_distance={key_frame_distance}",
-            str(nerfstudio_path)
-        ]
-        if config["fast_mode"]:
-            sai_cmd.insert(2, "--fast")
-        
-        # Run sai-cli process
-        process = await asyncio.create_subprocess_exec(
-            *sai_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            raise Exception(f"sai-cli processing failed: {stderr.decode()}")
+        if SIMULATION_MODE:
+            # Simulation mode for ARM64 or when SDK not available
+            job["message"] = "Processing (simulation mode - SpectacularAI SDK not available on ARM64)..."
+            await asyncio.sleep(3)
+            
+            # Look for images in the extracted content
+            image_count = 0
+            for ext in ['*.jpg', '*.jpeg', '*.png']:
+                image_count += len(list(input_path.rglob(ext)))
+            
+            job["progress"] = 0.4
+            job["message"] = f"Found {image_count} images, simulating SLAM processing..."
+            job["updated_at"] = datetime.utcnow().isoformat()
+            await asyncio.sleep(2)
+        else:
+            # Real SpectacularAI processing
+            kfd_map = {
+                SceneSize.SMALL: 0.05,
+                SceneSize.MEDIUM: 0.10,
+                SceneSize.LARGE: 0.15
+            }
+            key_frame_distance = kfd_map[config["scene_size"]]
+            
+            sai_cmd = [
+                "sai-cli", "process",
+                str(input_path),
+                f"--key_frame_distance={key_frame_distance}",
+                str(nerfstudio_path)
+            ]
+            if config["fast_mode"]:
+                sai_cmd.insert(2, "--fast")
+            
+            process = await asyncio.create_subprocess_exec(
+                *sai_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                raise Exception(f"sai-cli processing failed: {stderr.decode()}")
         
         job["progress"] = 0.4
         job["updated_at"] = datetime.utcnow().isoformat()
@@ -279,24 +309,34 @@ async def process_recording(job_id: str):
         
         model_name = config["model_name"]
         max_iterations = config["max_iterations"]
+        export_dir = OUTPUT_DIR / job_id
+        export_dir.mkdir(parents=True, exist_ok=True)
         
-        # Run ns-train gaussian-splatting
-        train_cmd = [
-            "ns-train", "gaussian-splatting",
-            "--data", str(nerfstudio_path),
-            "--max-num-iterations", str(max_iterations),
-            "--output-dir", str(job_dir / "training")
-        ]
-        
-        process = await asyncio.create_subprocess_exec(
-            *train_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            raise Exception(f"Training failed: {stderr.decode()}")
+        if SIMULATION_MODE:
+            # Simulation mode - create a demo PLY file
+            job["message"] = "Simulating Gaussian Splatting training..."
+            await asyncio.sleep(3)
+            job["progress"] = 0.7
+            job["updated_at"] = datetime.utcnow().isoformat()
+            await asyncio.sleep(2)
+        else:
+            # Run ns-train gaussian-splatting
+            train_cmd = [
+                "ns-train", "gaussian-splatting",
+                "--data", str(nerfstudio_path),
+                "--max-num-iterations", str(max_iterations),
+                "--output-dir", str(job_dir / "training")
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *train_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                raise Exception(f"Training failed: {stderr.decode()}")
         
         job["progress"] = 0.8
         job["updated_at"] = datetime.utcnow().isoformat()
@@ -307,30 +347,35 @@ async def process_recording(job_id: str):
         job["progress"] = 0.9
         job["updated_at"] = datetime.utcnow().isoformat()
         
-        # Find the config.yml from training
-        training_dir = job_dir / "training"
-        config_files = list(training_dir.rglob("config.yml"))
-        if not config_files:
-            raise Exception("Training config not found")
-        
-        export_dir = OUTPUT_DIR / job_id
-        export_dir.mkdir(parents=True, exist_ok=True)
-        
-        export_cmd = [
-            "ns-export", "gaussian-splat",
-            "--load-config", str(config_files[0]),
-            "--output-dir", str(export_dir)
-        ]
-        
-        process = await asyncio.create_subprocess_exec(
-            *export_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            raise Exception(f"Export failed: {stderr.decode()}")
+        if SIMULATION_MODE:
+            # Create a simple demo PLY file
+            await asyncio.sleep(1)
+            ply_content = create_demo_ply()
+            ply_file = export_dir / "point_cloud.ply"
+            with open(ply_file, 'w') as f:
+                f.write(ply_content)
+        else:
+            # Find the config.yml from training
+            training_dir = job_dir / "training"
+            config_files = list(training_dir.rglob("config.yml"))
+            if not config_files:
+                raise Exception("Training config not found")
+            
+            export_cmd = [
+                "ns-export", "gaussian-splat",
+                "--load-config", str(config_files[0]),
+                "--output-dir", str(export_dir)
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *export_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                raise Exception(f"Export failed: {stderr.decode()}")
         
         # Copy PLY to models directory for rendering service
         ply_file = export_dir / "splat.ply"
@@ -345,6 +390,7 @@ async def process_recording(job_id: str):
             metadata = {
                 "name": model_name,
                 "source": "spectacularai",
+                "simulation_mode": SIMULATION_MODE,
                 "job_id": job_id,
                 "created_at": datetime.utcnow().isoformat(),
                 "scene_size": config["scene_size"],

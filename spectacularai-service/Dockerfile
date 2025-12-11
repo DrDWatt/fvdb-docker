@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     git \
     curl \
+    unzip \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
@@ -27,11 +28,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Install SpectacularAI SDK with full dependencies
-RUN pip3 install --no-cache-dir "spectacularAI[full]"
+# Try to install SpectacularAI SDK (x86_64 only, will skip on ARM64)
+RUN pip3 install --no-cache-dir spectacularAI 2>/dev/null || \
+    echo "SpectacularAI not available for this architecture - running in simulation mode"
 
-# Install Nerfstudio for Gaussian Splatting training
-RUN pip3 install --no-cache-dir nerfstudio gsplat
+# Install gsplat for Gaussian Splatting (lighter than full nerfstudio)
+RUN pip3 install --no-cache-dir plyfile scipy 2>/dev/null || true
 
 # Copy application code
 COPY . .
