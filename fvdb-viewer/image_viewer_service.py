@@ -65,9 +65,8 @@ def load_sam2():
         # Find checkpoint
         checkpoint_paths = [
             SAM2_CHECKPOINT,
+            Path("/app/sam2-models/sam2_hiera_small.pt"),
             Path("/app/models/sam2_hiera_small.pt"),
-            Path("sam2-data/models/sam2_hiera_small.pt"),
-            MODEL_DIR.parent / "sam2-data" / "models" / "sam2_hiera_small.pt"
         ]
         
         checkpoint_path = None
@@ -77,11 +76,14 @@ def load_sam2():
                 break
         
         if checkpoint_path is None:
-            logger.error("SAM-2 checkpoint not found")
+            logger.error("SAM-2 checkpoint not found in any location")
             return False
         
-        logger.info(f"Loading SAM-2 from {checkpoint_path}...")
-        sam2_model = build_sam2("sam2_hiera_s.yaml", str(checkpoint_path), device=device)
+        # Use full config path
+        config_name = "sam2/sam2_hiera_s.yaml"
+        
+        logger.info(f"Loading SAM-2 from {checkpoint_path} with config {config_name}...")
+        sam2_model = build_sam2(config_name, str(checkpoint_path), device=device)
         sam2_predictor = SAM2ImagePredictor(sam2_model)
         sam2_loaded = True
         logger.info("SAM-2 loaded successfully")
@@ -89,7 +91,71 @@ def load_sam2():
         
     except Exception as e:
         logger.error(f"Failed to load SAM-2: {e}")
+        import traceback
+        traceback.print_exc()
         return False
+
+
+# Auto-labeling using simple heuristics and color analysis
+def auto_label_segment(image: np.ndarray, mask: np.ndarray) -> str:
+    """Generate automatic label for a segment based on visual features"""
+    import cv2
+    
+    # Get masked region
+    masked = image.copy()
+    masked[~mask] = 0
+    
+    # Get bounding box
+    coords = np.where(mask)
+    if len(coords[0]) == 0:
+        return "Unknown"
+    
+    y_min, y_max = coords[0].min(), coords[0].max()
+    x_min, x_max = coords[1].min(), coords[1].max()
+    
+    # Calculate features
+    height = y_max - y_min
+    width = x_max - x_min
+    area = np.sum(mask)
+    aspect_ratio = width / max(height, 1)
+    
+    # Get dominant color in masked region
+    roi = image[y_min:y_max, x_min:x_max]
+    roi_mask = mask[y_min:y_max, x_min:x_max]
+    if roi_mask.any():
+        mean_color = roi[roi_mask].mean(axis=0)
+    else:
+        mean_color = [128, 128, 128]
+    
+    # Position in image (relative)
+    img_h, img_w = image.shape[:2]
+    center_y = (y_min + y_max) / 2 / img_h
+    center_x = (x_min + x_max) / 2 / img_w
+    relative_size = area / (img_h * img_w)
+    
+    # Simple heuristic labeling based on features
+    if relative_size > 0.3:
+        return "Background"
+    elif relative_size > 0.15:
+        if center_y > 0.6:
+            return "Floor/Table"
+        else:
+            return "Large Object"
+    elif mean_color[1] > mean_color[0] and mean_color[1] > mean_color[2]:
+        return "Plant/Foliage"
+    elif mean_color[2] > 180 and mean_color[0] > 150:  # Yellow-ish
+        if aspect_ratio > 1.5:
+            return "Vehicle/Machine"
+        else:
+            return "Yellow Object"
+    elif center_y > 0.7 and relative_size < 0.05:
+        return "Small Object"
+    elif aspect_ratio > 2:
+        return "Elongated Object"
+    elif aspect_ratio < 0.5:
+        return "Tall Object"
+    else:
+        return f"Object"
 
 
 def segment_image(image: np.ndarray, points: List[Dict] = None, auto_mode: bool = True):
@@ -147,10 +213,16 @@ def segment_image(image: np.ndarray, points: List[Dict] = None, auto_mode: bool 
             masks_data.append(masks[best_idx])
             scores_data.append(float(scores[best_idx]))
         
+        # Auto-label each segment
+        labels = {}
+        for i, mask in enumerate(masks_data):
+            labels[i] = auto_label_segment(image, mask)
+        
         current_segments = {
             "masks": masks_data,
             "scores": scores_data,
-            "num_segments": len(masks_data)
+            "num_segments": len(masks_data),
+            "labels": labels
         }
         
         return current_segments
@@ -423,6 +495,20 @@ async def root():
                 overflow-y: auto;
                 margin-top: 10px;
             }}
+            #hover-tooltip {{
+                position: fixed;
+                background: rgba(0,0,0,0.85);
+                color: white;
+                padding: 8px 14px;
+                border-radius: 6px;
+                font-size: 14px;
+                font-weight: bold;
+                pointer-events: none;
+                display: none;
+                z-index: 1000;
+                border: 2px solid #00d4ff;
+                box-shadow: 0 4px 12px rgba(0,212,255,0.3);
+            }}
             .label-item {{
                 display: flex;
                 align-items: center;
@@ -511,6 +597,8 @@ async def root():
             </div>
             <div id="labels-list"></div>
         </div>
+        
+        <div id="hover-tooltip"></div>
         
         <script>
             const img = document.getElementById('render');
@@ -787,6 +875,73 @@ async def root():
                     originalUpdate();
                 }}
             }};
+            
+            // Hover tooltip functionality
+            const tooltip = document.getElementById('hover-tooltip');
+            let segmentMasks = [];
+            let segmentLabelMap = {{}};
+            
+            let maskScale = 4;
+            
+            img.addEventListener('mousemove', async (e) => {{
+                if (!showSegments || segmentMasks.length === 0) {{
+                    tooltip.style.display = 'none';
+                    return;
+                }}
+                
+                const rect = img.getBoundingClientRect();
+                const scaleX = 1024 / rect.width;
+                const scaleY = 768 / rect.height;
+                const imgX = Math.round((e.clientX - rect.left) * scaleX);
+                const imgY = Math.round((e.clientY - rect.top) * scaleY);
+                
+                // Account for downsampled masks
+                const x = Math.floor(imgX / maskScale);
+                const y = Math.floor(imgY / maskScale);
+                
+                // Check which segment the mouse is over
+                let hoveredLabel = null;
+                for (let i = 0; i < segmentMasks.length; i++) {{
+                    if (segmentMasks[i] && segmentMasks[i][y] && segmentMasks[i][y][x]) {{
+                        hoveredLabel = segmentLabelMap[i] || `Object ${{i}}`;
+                        break;
+                    }}
+                }}
+                
+                if (hoveredLabel) {{
+                    tooltip.textContent = hoveredLabel;
+                    tooltip.style.display = 'block';
+                    tooltip.style.left = (e.clientX + 15) + 'px';
+                    tooltip.style.top = (e.clientY + 15) + 'px';
+                }} else {{
+                    tooltip.style.display = 'none';
+                }}
+            }});
+            
+            img.addEventListener('mouseleave', () => {{
+                tooltip.style.display = 'none';
+            }});
+            
+            // Fetch segment mask data for hover detection
+            async function loadSegmentMasks() {{
+                try {{
+                    const response = await fetch('/segment/masks');
+                    const data = await response.json();
+                    segmentMasks = data.masks || [];
+                    segmentLabelMap = data.labels || {{}};
+                    maskScale = data.scale || 4;
+                }} catch(e) {{
+                    console.log('Could not load segment masks for hover');
+                }}
+            }}
+            
+            // Update loadSegmentMasks after segmentation
+            const origUpdateLabelsUI = updateLabelsUI;
+            updateLabelsUI = function(labels) {{
+                origUpdateLabelsUI(labels);
+                segmentLabelMap = labels;
+                loadSegmentMasks();
+            }};
         </script>
     </body>
     </html>
@@ -896,8 +1051,8 @@ async def segment_current_view(
     if segments is None:
         return JSONResponse({"error": "Segmentation failed"}, status_code=500)
     
-    # Reset labels for new segmentation
-    segment_labels = {i: f"Object {i}" for i in range(segments["num_segments"])}
+    # Use auto-generated labels from segmentation
+    segment_labels = segments.get("labels", {i: f"Object {i}" for i in range(segments["num_segments"])})
     
     return {
         "status": "ok",
@@ -996,6 +1151,26 @@ async def get_segment_labels():
     return {
         "labels": segment_labels,
         "num_segments": current_segments.get("num_segments", 0) if current_segments else 0
+    }
+
+
+@app.get("/segment/masks")
+async def get_segment_masks():
+    """Get segment mask data for hover detection (downsampled for efficiency)"""
+    if not current_segments or "masks" not in current_segments:
+        return {"masks": [], "labels": segment_labels}
+    
+    # Downsample masks for transfer (every 4th pixel)
+    downsampled = []
+    for mask in current_segments["masks"]:
+        # Convert to list of lists, downsampled
+        ds_mask = mask[::4, ::4].tolist()
+        downsampled.append(ds_mask)
+    
+    return {
+        "masks": downsampled,
+        "labels": segment_labels,
+        "scale": 4  # Client needs to multiply coordinates by this
     }
 
 
