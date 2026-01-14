@@ -1,0 +1,8 @@
+{
+  "num_gaussians": 2579746,
+  "device": "cuda:0",
+  "num_channels": 3,
+  "num_images": 114,
+  "training_steps": 50000,
+  "output_file": "/app/outputs/job_20251212_015439_351076/tesla_model-s-12-11-8-47pm_model.ply"
+}

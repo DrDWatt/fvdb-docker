@@ -1,0 +1,8 @@
+{
+  "num_gaussians": 16432,
+  "device": "cuda:0",
+  "num_channels": 3,
+  "num_images": 3,
+  "training_steps": 50000,
+  "output_file": "/app/outputs/job_20251211_202727_929983/kpop-party-2_model.ply"
+}

@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAM-2 Segmentation Service</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #fff;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            font-size: 2.5em;
+            background: linear-gradient(135deg, #00d4ff, #7b2cbf);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+        .card {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .card h2 { color: #00d4ff; margin-bottom: 15px; }
+        .upload-zone {
+            border: 2px dashed rgba(0,212,255,0.5);
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .upload-zone:hover { border-color: #00d4ff; background: rgba(0,212,255,0.1); }
+        .upload-zone.dragover { background: rgba(0,212,255,0.2); }
+        input[type="file"] { display: none; }
+        .btn {
+            background: linear-gradient(135deg, #00d4ff, #7b2cbf);
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 25px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+            margin: 5px;
+        }
+        .btn:hover { transform: scale(1.05); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .mode-selector { display: flex; gap: 10px; margin: 15px 0; flex-wrap: wrap; }
+        .mode-btn {
+            padding: 10px 20px;
+            border: 2px solid #00d4ff;
+            background: transparent;
+            color: #00d4ff;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .mode-btn.active { background: #00d4ff; color: #1a1a2e; }
+        .results-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .result-card {
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .result-card img { width: 100%; height: auto; }
+        .result-info { padding: 15px; }
+        .label-input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 5px;
+            background: rgba(255,255,255,0.1);
+            color: white;
+            margin-top: 10px;
+        }
+        .status-box {
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .progress-bar {
+            height: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            transition: width 0.3s;
+        }
+        .canvas-container {
+            position: relative;
+            display: inline-block;
+        }
+        #imageCanvas { cursor: crosshair; max-width: 100%; }
+        .point-marker {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+        }
+        .point-fg { background: #00ff00; border: 2px solid white; }
+        .point-bg { background: #ff0000; border: 2px solid white; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 SAM-2 Segmentation Service</h1>
+            <p>Zero-shot object segmentation powered by Segment Anything Model 2</p>
+        </div>
+
+        <div class="card">
+            <h2>📤 Upload Image or Video</h2>
+            <div class="upload-zone" id="uploadZone">
+                <p style="font-size: 3em; margin-bottom: 10px;">📁</p>
+                <p><strong>Drop file here or click to browse</strong></p>
+                <p style="opacity: 0.7; margin-top: 10px;">Supports: JPG, PNG, MP4, MOV</p>
+            </div>
+            <input type="file" id="fileInput" accept="image/*,video/*">
+            
+            <div id="previewContainer" style="display: none; margin-top: 20px;">
+                <h3 style="margin-bottom: 10px;">Preview (click to add points)</h3>
+                <div class="canvas-container">
+                    <canvas id="imageCanvas"></canvas>
+                </div>
+                <div id="pointsList" style="margin-top: 10px;"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>⚙️ Segmentation Mode</h2>
+            <div class="mode-selector">
+                <button class="mode-btn active" data-mode="auto">🔄 Auto (All Objects)</button>
+                <button class="mode-btn" data-mode="point">📍 Point Prompts</button>
+                <button class="mode-btn" data-mode="box">📦 Box Selection</button>
+            </div>
+            <p id="modeDescription" style="opacity: 0.7; margin-top: 10px;">
+                Automatically segment all objects in the image
+            </p>
+            <button class="btn" id="segmentBtn" disabled>🎯 Run Segmentation</button>
+        </div>
+
+        <div class="card" id="statusCard" style="display: none;">
+            <h2>📊 Processing Status</h2>
+            <div class="status-box">
+                <p id="statusMessage">Processing...</p>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" id="resultsCard" style="display: none;">
+            <h2>🎨 Segmentation Results</h2>
+            <div class="results-grid" id="resultsGrid"></div>
+            <div style="margin-top: 20px;">
+                <button class="btn" id="saveLabelsBtn">💾 Save Labels</button>
+                <button class="btn" id="exportBtn">📥 Export Masks</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🔗 Quick Links</h2>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <a href="/api" class="btn" target="_blank">📚 API Docs</a>
+                <a href="http://localhost:8000/workflow" class="btn" target="_blank">🚀 Training Workflow</a>
+                <a href="http://localhost:8085" class="btn" target="_blank">👁️ 3D Viewer</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentFile = null;
+        let currentMode = 'auto';
+        let points = [];
+        let imageLoaded = false;
+
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const segmentBtn = document.getElementById('segmentBtn');
+        const canvas = document.getElementById('imageCanvas');
+        const ctx = canvas.getContext('2d');
+
+        uploadZone.addEventListener('click', () => fileInput.click());
+        uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+        uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                fileInput.files = e.dataTransfer.files;
+                handleFileSelect();
+            }
+        });
+        fileInput.addEventListener('change', handleFileSelect);
+
+        function handleFileSelect() {
+            currentFile = fileInput.files[0];
+            if (!currentFile) return;
+            
+            segmentBtn.disabled = false;
+            
+            if (currentFile.type.startsWith('image/')) {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        ctx.drawImage(img, 0, 0);
+                        imageLoaded = true;
+                        document.getElementById('previewContainer').style.display = 'block';
+                    };
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(currentFile);
+            }
+        }
+
+        canvas.addEventListener('click', (e) => {
+            if (!imageLoaded || currentMode !== 'point') return;
+            
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const x = Math.round((e.clientX - rect.left) * scaleX);
+            const y = Math.round((e.clientY - rect.top) * scaleY);
+            const label = e.shiftKey ? 0 : 1;
+            
+            points.push({ x, y, label });
+            drawPoints();
+            updatePointsList();
+        });
+
+        function drawPoints() {
+            const img = new Image();
+            img.src = canvas.toDataURL();
+            img.onload = () => {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0);
+                points.forEach((p, i) => {
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
+                    ctx.fillStyle = p.label === 1 ? '#00ff00' : '#ff0000';
+                    ctx.fill();
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                });
+            };
+        }
+
+        function updatePointsList() {
+            const list = document.getElementById('pointsList');
+            list.innerHTML = points.map((p, i) => 
+                `<span style="margin-right: 10px; padding: 5px 10px; background: ${p.label === 1 ? '#00ff00' : '#ff0000'}; border-radius: 5px; color: black;">
+                    Point ${i + 1}: (${p.x}, ${p.y}) ${p.label === 1 ? 'FG' : 'BG'}
+                    <button onclick="removePoint(${i})" style="margin-left: 5px; cursor: pointer;">×</button>
+                </span>`
+            ).join('');
+        }
+
+        window.removePoint = (idx) => {
+            points.splice(idx, 1);
+            drawPoints();
+            updatePointsList();
+        };
+
+        document.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentMode = btn.dataset.mode;
+                
+                const descriptions = {
+                    auto: 'Automatically segment all objects in the image',
+                    point: 'Click on the image to add foreground points (Shift+click for background)',
+                    box: 'Draw bounding boxes around objects to segment'
+                };
+                document.getElementById('modeDescription').textContent = descriptions[currentMode];
+            });
+        });
+
+        segmentBtn.addEventListener('click', async () => {
+            if (!currentFile) return;
+            
+            segmentBtn.disabled = true;
+            document.getElementById('statusCard').style.display = 'block';
+            document.getElementById('statusMessage').textContent = 'Uploading and processing...';
+            document.getElementById('progressFill').style.width = '30%';
+            
+            const formData = new FormData();
+            formData.append('file', currentFile);
+            formData.append('mode', currentMode);
+            
+            if (currentMode === 'point' && points.length > 0) {
+                formData.append('points_json', JSON.stringify(points));
+            }
+            
+            try {
+                const response = await fetch('/api/segment/image', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                document.getElementById('progressFill').style.width = '70%';
+                
+                if (!response.ok) throw new Error('Segmentation failed');
+                
+                const result = await response.json();
+                
+                document.getElementById('progressFill').style.width = '100%';
+                document.getElementById('statusMessage').textContent = 'Complete!';
+                
+                displayResults(result);
+                
+            } catch (error) {
+                document.getElementById('statusMessage').textContent = 'Error: ' + error.message;
+            }
+            
+            segmentBtn.disabled = false;
+        });
+
+        function displayResults(result) {
+            document.getElementById('resultsCard').style.display = 'block';
+            const grid = document.getElementById('resultsGrid');
+            
+            let html = '';
+            
+            if (result.metadata && result.metadata.overlay) {
+                html += `
+                    <div class="result-card" style="grid-column: span 2;">
+                        <img src="/api/overlay/${result.job_id}" alt="Overlay">
+                        <div class="result-info">
+                            <strong>Segmentation Overlay</strong>
+                            <p>${result.masks ? result.masks.length : 0} objects detected</p>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            if (result.masks) {
+                result.masks.forEach((mask, i) => {
+                    html += `
+                        <div class="result-card">
+                            <img src="/api/mask/${result.job_id}/${i}" alt="Mask ${i}">
+                            <div class="result-info">
+                                <strong>${result.labels ? result.labels[i] : 'Object ' + i}</strong>
+                                <p>Score: ${result.scores ? result.scores[i].toFixed(3) : 'N/A'}</p>
+                                <input type="text" class="label-input" placeholder="Enter label..." 
+                                       data-idx="${i}" value="${result.labels ? result.labels[i] : ''}">
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+            
+            grid.innerHTML = html;
+            
+            window.currentJobId = result.job_id;
+        }
+
+        document.getElementById('saveLabelsBtn').addEventListener('click', async () => {
+            const inputs = document.querySelectorAll('.label-input');
+            const labels = {};
+            inputs.forEach(input => {
+                labels[input.dataset.idx] = input.value;
+            });
+            
+            const formData = new FormData();
+            formData.append('job_id', window.currentJobId);
+            formData.append('labels_json', JSON.stringify(labels));
+            
+            const response = await fetch('/api/labels/save', {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (response.ok) {
+                alert('Labels saved successfully!');
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "num_gaussians": 674152,
+  "device": "cuda:0",
+  "num_channels": 3,
+  "num_images": 110,
+  "training_steps": 50000,
+  "output_file": "/app/outputs/job_20251212_034457_487435/k-pop-lidar_model.ply"
+}

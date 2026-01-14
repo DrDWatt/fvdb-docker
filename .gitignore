@@ -31,6 +31,12 @@ spectacularai-data/processing/
 spectacularai-data/outputs/
 spectacularai-models/*.ply
 
+# SAM-2 Segmentation data
+sam2-data/uploads/
+sam2-data/outputs/
+sam2-data/models/
+sam2-data/cache/
+
 # Environment
 .env
 .venv/

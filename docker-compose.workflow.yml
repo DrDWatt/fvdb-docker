@@ -148,6 +148,50 @@ services:
       retries: 3
       start_period: 2s
 
+  # SAM-2 Segmentation Service (GPU-accelerated object segmentation)
+  sam2-service:
+    build:
+      context: ./sam2-service
+      dockerfile: Dockerfile
+    image: sam2-service:latest
+    container_name: sam2-segmentation
+    ports:
+      - "8004:8004"
+    volumes:
+      - ./sam2-data/uploads:/app/uploads
+      - ./sam2-data/outputs:/app/outputs
+      - ./sam2-data/models:/app/models/sam2
+      - ./sam2-data/cache:/app/cache
+      - ./models:/app/splat-models:ro
+      - ./sam2-service/sam2_service.py:/app/sam2_service.py:ro
+      - ./sam2-service/static:/app/static:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CUDA_VISIBLE_DEVICES=0
+      - TORCH_HOME=/app/cache
+      - SAM2_CHECKPOINT_DIR=/app/models/sam2
+      - VIEWER_SERVICE_URL=http://fvdb-viewer:8085
+      - TRAINING_SERVICE_URL=http://fvdb-training-gpu:8000
+      - RENDERING_SERVICE_URL=http://fvdb-rendering:8001
+    runtime: nvidia
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    networks:
+      - workflow-net
+
   # fVDB Image-based Viewer (renders to PNG, no Vulkan video encoding needed)
   fvdb-viewer:
     image: fvdb-training-gpu:latest
