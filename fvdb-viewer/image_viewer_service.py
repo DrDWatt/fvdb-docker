@@ -79,8 +79,8 @@ def load_sam2():
             logger.error("SAM-2 checkpoint not found in any location")
             return False
         
-        # Use full config path
-        config_name = "sam2/sam2_hiera_s.yaml"
+        # Use simple config name (hydra finds it automatically)
+        config_name = "sam2_hiera_s.yaml"
         
         logger.info(f"Loading SAM-2 from {checkpoint_path} with config {config_name}...")
         sam2_model = build_sam2(config_name, str(checkpoint_path), device=device)
@@ -101,12 +101,15 @@ def auto_label_segment(image: np.ndarray, mask: np.ndarray) -> str:
     """Generate automatic label for a segment based on visual features"""
     import cv2
     
+    # Convert mask to boolean if needed
+    bool_mask = mask.astype(bool) if mask.dtype != bool else mask
+    
     # Get masked region
     masked = image.copy()
-    masked[~mask] = 0
+    masked[~bool_mask] = 0
     
     # Get bounding box
-    coords = np.where(mask)
+    coords = np.where(bool_mask)
     if len(coords[0]) == 0:
         return "Unknown"
     
@@ -121,7 +124,7 @@ def auto_label_segment(image: np.ndarray, mask: np.ndarray) -> str:
     
     # Get dominant color in masked region
     roi = image[y_min:y_max, x_min:x_max]
-    roi_mask = mask[y_min:y_max, x_min:x_max]
+    roi_mask = bool_mask[y_min:y_max, x_min:x_max]
     if roi_mask.any():
         mean_color = roi[roi_mask].mean(axis=0)
     else:
