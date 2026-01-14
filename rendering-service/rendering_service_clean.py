@@ -1,21 +1,22 @@
 """
 Minimal Rendering Service - ARM64 Compatible
-Serves PLY files for download
+Serves PLY files for download with RAG metadata support
 """
 
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import logging
+import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="PLY Model Service",
-    description="Simple PLY file server for Gaussian Splat models",
-    version="1.0.0"
+    description="PLY file server with RAG metadata for object labeling",
+    version="2.0.0"
 )
 
 # Enable CORS
@@ -31,9 +32,13 @@ app.add_middleware(
 BASE_DIR = Path("/app")
 MODEL_DIR = BASE_DIR / "models"
 DOWNLOADS_DIR = BASE_DIR / "downloads"
+METADATA_DIR = BASE_DIR / "metadata"
 
-for dir_path in [MODEL_DIR, DOWNLOADS_DIR]:
+for dir_path in [MODEL_DIR, DOWNLOADS_DIR, METADATA_DIR]:
     dir_path.mkdir(exist_ok=True, parents=True)
+
+# RAG metadata storage
+model_metadata = {}
 
 @app.get("/")
 async def root():
@@ -183,6 +188,99 @@ async def upload_model(file: UploadFile = File(...)):
         "download_url": f"/download/{file.filename}",
         "message": "Upload successful"
     }
+
+
+# ===== RAG Metadata Endpoints =====
+
+def load_metadata(model_name: str) -> dict:
+    """Load metadata from file"""
+    meta_path = METADATA_DIR / f"{model_name}.json"
+    if meta_path.exists():
+        with open(meta_path, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_metadata(model_name: str, metadata: dict):
+    """Save metadata to file"""
+    meta_path = METADATA_DIR / f"{model_name}.json"
+    with open(meta_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+
+@app.get("/metadata/{model_name}")
+async def get_metadata(model_name: str):
+    """Get RAG metadata for a model"""
+    metadata = load_metadata(model_name)
+    return {
+        "model": model_name,
+        "metadata": metadata,
+        "has_metadata": bool(metadata)
+    }
+
+
+@app.post("/metadata/{model_name}")
+async def set_metadata(
+    model_name: str,
+    title: str = Form(None),
+    description: str = Form(None),
+    objects: str = Form(None),
+    labels: str = Form(None),
+    details: str = Form(None)
+):
+    """Set RAG metadata for a model
+    
+    - title: Model title (e.g., "Tesla Model S 70D")
+    - description: Full description
+    - objects: Comma-separated list of objects in scene (e.g., "car, Tesla, sedan, electric vehicle")
+    - labels: JSON object mapping segment descriptions to labels
+    - details: Additional context for labeling
+    """
+    metadata = load_metadata(model_name)
+    
+    if title:
+        metadata["title"] = title
+    if description:
+        metadata["description"] = description
+    if objects:
+        metadata["objects"] = [o.strip() for o in objects.split(",")]
+    if labels:
+        try:
+            metadata["labels"] = json.loads(labels)
+        except:
+            metadata["labels"] = labels
+    if details:
+        metadata["details"] = details
+    
+    save_metadata(model_name, metadata)
+    logger.info(f"Updated metadata for {model_name}: {metadata}")
+    
+    return {
+        "model": model_name,
+        "metadata": metadata,
+        "message": "Metadata updated"
+    }
+
+
+@app.delete("/metadata/{model_name}")
+async def delete_metadata(model_name: str):
+    """Delete RAG metadata for a model"""
+    meta_path = METADATA_DIR / f"{model_name}.json"
+    if meta_path.exists():
+        meta_path.unlink()
+        return {"message": f"Metadata for {model_name} deleted"}
+    raise HTTPException(status_code=404, detail="Metadata not found")
+
+
+@app.get("/metadata")
+async def list_all_metadata():
+    """List all models with metadata"""
+    all_metadata = {}
+    for meta_file in METADATA_DIR.glob("*.json"):
+        model_name = meta_file.stem
+        with open(meta_file, 'r') as f:
+            all_metadata[model_name] = json.load(f)
+    return {"models": all_metadata, "count": len(all_metadata)}
+
 
 if __name__ == "__main__":
     import uvicorn

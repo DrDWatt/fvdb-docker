@@ -42,9 +42,35 @@ sam2_loaded = False
 current_segments: Dict[str, Any] = {}
 segment_labels: Dict[int, str] = {}
 
+# RAG metadata from model service
+rag_metadata: Dict[str, Any] = {}
+rag_labels: List[str] = []
+MODEL_SERVICE_URL = os.environ.get("MODEL_SERVICE_URL", "http://rendering-service:8001")
+
 def get_available_models():
     """Get list of available PLY models"""
     return sorted([m.name for m in MODEL_DIR.glob("*.ply")])
+
+
+def fetch_rag_metadata(model_name: str):
+    """Fetch RAG metadata from model service"""
+    global rag_metadata, rag_labels
+    
+    try:
+        import requests
+        response = requests.get(f"{MODEL_SERVICE_URL}/metadata/{model_name}", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            rag_metadata = data.get("metadata", {})
+            rag_labels = rag_metadata.get("objects", [])
+            logger.info(f"Loaded RAG metadata for {model_name}: {rag_metadata}")
+            return True
+    except Exception as e:
+        logger.warning(f"Could not fetch RAG metadata: {e}")
+    
+    rag_metadata = {}
+    rag_labels = []
+    return False
 
 
 def load_sam2():
@@ -103,15 +129,22 @@ clip_loaded = False
 
 # Object labels for CLIP classification
 OBJECT_LABELS = [
+    # Vehicles
+    "car", "sedan", "sports car", "electric car", "Tesla", "automobile", "vehicle",
+    "SUV", "truck", "pickup truck", "van", "motorcycle", "bicycle",
+    # Construction vehicles
     "bulldozer", "toy bulldozer", "construction vehicle", "excavator", "toy truck",
-    "plant", "potted plant", "houseplant", "leaves", "foliage",
-    "table", "wooden table", "desk", "countertop",
-    "bowl", "cup", "mug", "plate", "dish",
-    "bottle", "spray bottle", "container", "jar",
-    "chair", "furniture", "shelf",
-    "book", "box", "package",
-    "floor", "wall", "background", "carpet",
-    "toy", "figurine", "decoration", "ornament"
+    # Plants
+    "plant", "potted plant", "houseplant", "leaves", "foliage", "tree",
+    # Furniture
+    "table", "wooden table", "desk", "countertop", "chair", "furniture", "shelf", "couch", "sofa",
+    # Kitchen items
+    "bowl", "cup", "mug", "plate", "dish", "bottle", "spray bottle", "container", "jar",
+    # Other objects
+    "book", "box", "package", "toy", "figurine", "decoration", "ornament",
+    # Environment
+    "floor", "wall", "background", "carpet", "ceiling", "window", "door",
+    "road", "pavement", "driveway", "garage", "parking lot"
 ]
 
 def load_clip_model():
@@ -138,7 +171,7 @@ def load_clip_model():
 
 
 def auto_label_segment(image: np.ndarray, mask: np.ndarray) -> str:
-    """Classify segment using HuggingFace CLIP model"""
+    """Classify segment using HuggingFace CLIP model with RAG enhancement"""
     import torch
     from PIL import Image
     
@@ -170,9 +203,19 @@ def auto_label_segment(image: np.ndarray, mask: np.ndarray) -> str:
         crop = image[y_min:y_max, x_min:x_max]
         pil_img = Image.fromarray(crop)
         
+        # Combine RAG labels with default labels (RAG labels first for priority)
+        labels_to_use = rag_labels + OBJECT_LABELS if rag_labels else OBJECT_LABELS
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_labels = []
+        for l in labels_to_use:
+            if l.lower() not in seen:
+                seen.add(l.lower())
+                unique_labels.append(l)
+        
         # Process with CLIP
         inputs = clip_processor(
-            text=OBJECT_LABELS,
+            text=unique_labels,
             images=pil_img,
             return_tensors="pt",
             padding=True
@@ -187,8 +230,17 @@ def auto_label_segment(image: np.ndarray, mask: np.ndarray) -> str:
             best_idx = probs[0].argmax().item()
             confidence = probs[0][best_idx].item()
         
-        label = OBJECT_LABELS[best_idx]
-        logger.info(f"CLIP classified as '{label}' with confidence {confidence:.2f}")
+        label = unique_labels[best_idx]
+        
+        # If we have RAG metadata title and this is a main object, use enhanced label
+        if rag_metadata.get("title") and confidence > 0.3:
+            # Check if label matches any RAG object
+            for rag_obj in rag_labels:
+                if rag_obj.lower() in label.lower() or label.lower() in rag_obj.lower():
+                    label = rag_metadata.get("title", label)
+                    break
+        
+        logger.info(f"CLIP classified as '{label}' (confidence {confidence:.2f}, RAG labels: {len(rag_labels)})")
         return label.title()
         
     except Exception as e:
@@ -369,6 +421,10 @@ def load_model(model_file=None):
     gsplat = gsplat_obj
     model_metadata = metadata
     logger.info(f"Loaded {gsplat.num_gaussians} gaussians")
+    
+    # Fetch RAG metadata for this model
+    fetch_rag_metadata(model_path.name)
+    
     return True
 
 def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx=0):
