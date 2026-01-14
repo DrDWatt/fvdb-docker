@@ -9,10 +9,12 @@ import io
 import time
 import logging
 import math
+import json
 import numpy as np
 from pathlib import Path
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, Response
+from typing import Optional, List, Dict, Any
+from fastapi import FastAPI, Query, Form
+from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -22,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/app/models"))
 VIEWER_PORT = int(os.environ.get("VIEWER_PORT", "8085"))
+SAM2_CHECKPOINT = Path(os.environ.get("SAM2_CHECKPOINT", "/app/sam2-models/sam2_hiera_small.pt"))
 
 app = FastAPI(title="fVDB Gaussian Splat Viewer")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -33,9 +36,186 @@ model_name = ""
 model_metadata = None
 available_models = []
 
+# SAM-2 segmentation state
+sam2_predictor = None
+sam2_loaded = False
+current_segments: Dict[str, Any] = {}
+segment_labels: Dict[int, str] = {}
+
 def get_available_models():
     """Get list of available PLY models"""
     return sorted([m.name for m in MODEL_DIR.glob("*.ply")])
+
+
+def load_sam2():
+    """Load SAM-2 model for segmentation"""
+    global sam2_predictor, sam2_loaded, device
+    
+    if sam2_loaded:
+        return True
+    
+    try:
+        import torch
+        from sam2.build_sam import build_sam2
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
+        
+        if device is None:
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        
+        # Find checkpoint
+        checkpoint_paths = [
+            SAM2_CHECKPOINT,
+            Path("/app/models/sam2_hiera_small.pt"),
+            Path("sam2-data/models/sam2_hiera_small.pt"),
+            MODEL_DIR.parent / "sam2-data" / "models" / "sam2_hiera_small.pt"
+        ]
+        
+        checkpoint_path = None
+        for p in checkpoint_paths:
+            if p.exists():
+                checkpoint_path = p
+                break
+        
+        if checkpoint_path is None:
+            logger.error("SAM-2 checkpoint not found")
+            return False
+        
+        logger.info(f"Loading SAM-2 from {checkpoint_path}...")
+        sam2_model = build_sam2("sam2_hiera_s.yaml", str(checkpoint_path), device=device)
+        sam2_predictor = SAM2ImagePredictor(sam2_model)
+        sam2_loaded = True
+        logger.info("SAM-2 loaded successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to load SAM-2: {e}")
+        return False
+
+
+def segment_image(image: np.ndarray, points: List[Dict] = None, auto_mode: bool = True):
+    """Segment objects in image using SAM-2"""
+    global current_segments, segment_labels
+    
+    if not sam2_loaded:
+        if not load_sam2():
+            return None
+    
+    try:
+        import torch
+        
+        # Set image
+        sam2_predictor.set_image(image)
+        
+        masks_data = []
+        scores_data = []
+        
+        if auto_mode:
+            # Auto segmentation - use grid of points
+            h, w = image.shape[:2]
+            grid_points = []
+            for y in range(h // 6, h, h // 3):
+                for x in range(w // 6, w, w // 3):
+                    grid_points.append([x, y])
+            
+            point_coords = np.array(grid_points)
+            point_labels = np.ones(len(grid_points), dtype=np.int32)
+            
+            masks, scores, _ = sam2_predictor.predict(
+                point_coords=point_coords,
+                point_labels=point_labels,
+                multimask_output=True
+            )
+            
+            for i, (mask, score) in enumerate(zip(masks, scores)):
+                if score > 0.5:
+                    masks_data.append(mask)
+                    scores_data.append(float(score))
+        
+        elif points:
+            # Point-based segmentation
+            point_coords = np.array([[p['x'], p['y']] for p in points])
+            point_labels = np.array([p.get('label', 1) for p in points])
+            
+            masks, scores, _ = sam2_predictor.predict(
+                point_coords=point_coords,
+                point_labels=point_labels,
+                multimask_output=True
+            )
+            
+            # Take best mask
+            best_idx = np.argmax(scores)
+            masks_data.append(masks[best_idx])
+            scores_data.append(float(scores[best_idx]))
+        
+        current_segments = {
+            "masks": masks_data,
+            "scores": scores_data,
+            "num_segments": len(masks_data)
+        }
+        
+        return current_segments
+        
+    except Exception as e:
+        logger.error(f"Segmentation failed: {e}")
+        return None
+
+
+def create_overlay_with_labels(image: np.ndarray, segments: Dict, labels: Dict[int, str] = None):
+    """Create image with segmentation overlay and labels"""
+    import cv2
+    from PIL import Image, ImageDraw, ImageFont
+    
+    overlay = image.copy()
+    colors = [
+        (255, 0, 0), (0, 255, 0), (0, 0, 255), 
+        (255, 255, 0), (255, 0, 255), (0, 255, 255),
+        (255, 128, 0), (128, 0, 255), (0, 255, 128)
+    ]
+    
+    if "masks" not in segments:
+        return overlay
+    
+    label_positions = []
+    
+    for i, mask in enumerate(segments["masks"]):
+        color = colors[i % len(colors)]
+        
+        # Create colored mask overlay
+        colored_mask = np.zeros_like(overlay)
+        colored_mask[mask > 0] = color
+        overlay = cv2.addWeighted(overlay, 1.0, colored_mask, 0.4, 0)
+        
+        # Draw contour
+        mask_uint8 = (mask * 255).astype(np.uint8)
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, contours, -1, color, 2)
+        
+        # Find centroid for label
+        if len(contours) > 0:
+            M = cv2.moments(contours[0])
+            if M["m00"] > 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                label_positions.append((i, cx, cy, color))
+    
+    # Convert to PIL for text drawing
+    pil_img = Image.fromarray(overlay)
+    draw = ImageDraw.Draw(pil_img)
+    
+    # Draw labels
+    for idx, cx, cy, color in label_positions:
+        label = labels.get(idx, f"Object {idx}") if labels else f"Object {idx}"
+        
+        # Draw label background
+        bbox = draw.textbbox((cx, cy), label)
+        padding = 4
+        draw.rectangle(
+            [bbox[0] - padding, bbox[1] - padding, bbox[2] + padding, bbox[3] + padding],
+            fill=(0, 0, 0, 180)
+        )
+        draw.text((cx, cy), label, fill=color)
+    
+    return np.array(pil_img)
 
 def load_model(model_file=None):
     global gsplat, device, model_name, model_metadata, available_models
@@ -216,6 +396,55 @@ async def root():
                 padding: 15px;
                 border-radius: 8px;
             }}
+            #segmentation {{
+                position: fixed;
+                bottom: 10px;
+                left: 10px;
+                background: rgba(0,0,0,0.9);
+                padding: 15px;
+                border-radius: 8px;
+                max-width: 350px;
+            }}
+            #segmentation h2 {{ color: #00d4ff; margin: 0 0 10px 0; font-size: 16px; }}
+            .seg-btn {{
+                padding: 8px 15px;
+                margin: 3px;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                font-weight: bold;
+            }}
+            .seg-btn-primary {{ background: #00d4ff; color: #000; }}
+            .seg-btn-success {{ background: #28a745; color: white; }}
+            .seg-btn-danger {{ background: #dc3545; color: white; }}
+            .seg-btn:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+            #labels-list {{
+                max-height: 150px;
+                overflow-y: auto;
+                margin-top: 10px;
+            }}
+            .label-item {{
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 5px;
+                margin: 3px 0;
+                background: rgba(255,255,255,0.1);
+                border-radius: 4px;
+            }}
+            .label-color {{
+                width: 15px;
+                height: 15px;
+                border-radius: 3px;
+            }}
+            .label-input {{
+                flex: 1;
+                padding: 4px 8px;
+                border: 1px solid #444;
+                border-radius: 3px;
+                background: #222;
+                color: white;
+            }}
             h1 {{ color: #76b900; margin: 0 0 10px 0; font-size: 18px; }}
             .slider-group {{ margin: 10px 0; }}
             label {{ display: block; margin-bottom: 5px; }}
@@ -227,6 +456,7 @@ async def root():
                 transform: translate(-50%, -50%);
                 font-size: 24px;
             }}
+            .click-mode {{ cursor: crosshair !important; }}
         </style>
     </head>
     <body>
@@ -267,6 +497,19 @@ async def root():
             <p><strong>Models:</strong> {model_list}</p>
             <p><strong>Gaussians:</strong> <span id="num-gs">Loading...</span></p>
             <p>Drag sliders to rotate view</p>
+        </div>
+        
+        <div id="segmentation">
+            <h2>🎯 SAM-2 Segmentation</h2>
+            <div>
+                <button class="seg-btn seg-btn-primary" id="autoSegBtn" onclick="runAutoSegmentation()">Auto Segment</button>
+                <button class="seg-btn seg-btn-success" id="clickSegBtn" onclick="toggleClickMode()">Click to Segment</button>
+                <button class="seg-btn seg-btn-danger" onclick="clearSegments()">Clear</button>
+            </div>
+            <div id="segStatus" style="margin-top:10px;font-size:12px;color:#888;">
+                Click "Auto Segment" to detect objects
+            </div>
+            <div id="labels-list"></div>
         </div>
         
         <script>
@@ -385,6 +628,165 @@ async def root():
             
             // Initial load
             refreshModels().then(() => updateRender());
+            
+            // ==================== Segmentation Functions ====================
+            let clickMode = false;
+            let showSegments = false;
+            const segColors = ['#ff0000', '#00ff00', '#0000ff', '#ffff00', '#ff00ff', '#00ffff', '#ff8000', '#8000ff', '#00ff80'];
+            
+            async function runAutoSegmentation() {{
+                const btn = document.getElementById('autoSegBtn');
+                const status = document.getElementById('segStatus');
+                btn.disabled = true;
+                status.textContent = 'Loading SAM-2 and segmenting...';
+                
+                const formData = new FormData();
+                formData.append('azimuth', azSlider.value);
+                formData.append('elevation', elSlider.value);
+                formData.append('zoom', zoomSlider.value);
+                formData.append('cam_idx', camSlider.value);
+                
+                try {{
+                    const response = await fetch('/segment', {{ method: 'POST', body: formData }});
+                    const data = await response.json();
+                    
+                    if (data.status === 'ok') {{
+                        status.textContent = `Found ${{data.num_segments}} objects`;
+                        showSegments = true;
+                        updateLabelsUI(data.labels);
+                        renderWithSegments();
+                    }} else {{
+                        status.textContent = 'Error: ' + (data.error || 'Unknown');
+                    }}
+                }} catch(e) {{
+                    status.textContent = 'Error: ' + e.message;
+                }}
+                btn.disabled = false;
+            }}
+            
+            function toggleClickMode() {{
+                clickMode = !clickMode;
+                const btn = document.getElementById('clickSegBtn');
+                const status = document.getElementById('segStatus');
+                
+                if (clickMode) {{
+                    btn.textContent = 'Stop Clicking';
+                    btn.style.background = '#ffc107';
+                    img.classList.add('click-mode');
+                    status.textContent = 'Click on objects to segment them';
+                }} else {{
+                    btn.textContent = 'Click to Segment';
+                    btn.style.background = '#28a745';
+                    img.classList.remove('click-mode');
+                    status.textContent = showSegments ? 'Segments active' : 'Ready';
+                }}
+            }}
+            
+            img.addEventListener('click', async (e) => {{
+                if (!clickMode) return;
+                
+                const rect = img.getBoundingClientRect();
+                const scaleX = 1024 / rect.width;
+                const scaleY = 768 / rect.height;
+                const x = Math.round((e.clientX - rect.left) * scaleX);
+                const y = Math.round((e.clientY - rect.top) * scaleY);
+                
+                const status = document.getElementById('segStatus');
+                status.textContent = `Segmenting at (${{x}}, ${{y}})...`;
+                
+                const formData = new FormData();
+                formData.append('x', x);
+                formData.append('y', y);
+                formData.append('label', 1);
+                formData.append('azimuth', azSlider.value);
+                formData.append('elevation', elSlider.value);
+                formData.append('zoom', zoomSlider.value);
+                formData.append('cam_idx', camSlider.value);
+                
+                try {{
+                    const response = await fetch('/segment/point', {{ method: 'POST', body: formData }});
+                    const data = await response.json();
+                    
+                    if (data.status === 'ok') {{
+                        status.textContent = `Segment ${{data.new_segment_idx}} added`;
+                        showSegments = true;
+                        refreshLabels();
+                        renderWithSegments();
+                    }}
+                }} catch(e) {{
+                    status.textContent = 'Error: ' + e.message;
+                }}
+            }});
+            
+            async function renderWithSegments() {{
+                const az = azSlider.value;
+                const el = elSlider.value;
+                const zoom = zoomSlider.value;
+                const cam = camSlider.value;
+                
+                loading.style.display = 'block';
+                try {{
+                    const response = await fetch(`/render_with_segments?azimuth=${{az}}&elevation=${{el}}&zoom=${{zoom}}&cam_idx=${{cam}}&width=1024&height=768`);
+                    if (response.ok) {{
+                        const blob = await response.blob();
+                        img.src = URL.createObjectURL(blob);
+                        img.style.display = 'block';
+                        loading.style.display = 'none';
+                    }}
+                }} catch(e) {{
+                    console.error('Render error:', e);
+                }}
+            }}
+            
+            async function clearSegments() {{
+                await fetch('/segment/clear', {{ method: 'POST' }});
+                showSegments = false;
+                document.getElementById('segStatus').textContent = 'Segments cleared';
+                document.getElementById('labels-list').innerHTML = '';
+                updateRender();
+            }}
+            
+            function updateLabelsUI(labels) {{
+                const list = document.getElementById('labels-list');
+                list.innerHTML = '';
+                
+                Object.entries(labels).forEach(([idx, label]) => {{
+                    const color = segColors[parseInt(idx) % segColors.length];
+                    const item = document.createElement('div');
+                    item.className = 'label-item';
+                    item.innerHTML = `
+                        <div class="label-color" style="background:${{color}}"></div>
+                        <input type="text" class="label-input" value="${{label}}" 
+                               onchange="updateLabel(${{idx}}, this.value)" 
+                               placeholder="Enter label...">
+                    `;
+                    list.appendChild(item);
+                }});
+            }}
+            
+            async function refreshLabels() {{
+                const response = await fetch('/segment/labels');
+                const data = await response.json();
+                updateLabelsUI(data.labels);
+            }}
+            
+            async function updateLabel(idx, label) {{
+                const formData = new FormData();
+                formData.append('segment_idx', idx);
+                formData.append('label', label);
+                await fetch('/segment/label', {{ method: 'POST', body: formData }});
+                renderWithSegments();
+            }}
+            
+            // Override render update to use segments if active
+            const originalUpdate = updateRender;
+            updateRender = function() {{
+                if (showSegments) {{
+                    renderWithSegments();
+                }} else {{
+                    originalUpdate();
+                }}
+            }};
         </script>
     </body>
     </html>
@@ -464,6 +866,158 @@ async def delete_model_endpoint(model: str = Query(...)):
         model_name = ""
     
     return {"status": "ok", "message": f"Deleted {model}"}
+
+
+# ==================== SAM-2 Segmentation Endpoints ====================
+
+@app.post("/segment")
+async def segment_current_view(
+    azimuth: float = Form(0),
+    elevation: float = Form(0),
+    zoom: float = Form(0.5),
+    cam_idx: int = Form(0),
+    points_json: Optional[str] = Form(None)
+):
+    """Segment objects in the current rendered view"""
+    global current_segments, segment_labels
+    
+    # Render current view
+    img = render_view(1024, 768, azimuth, elevation, zoom, cam_idx)
+    if img is None:
+        return JSONResponse({"error": "Failed to render view"}, status_code=500)
+    
+    # Parse points if provided
+    points = json.loads(points_json) if points_json else None
+    auto_mode = points is None
+    
+    # Run segmentation
+    segments = segment_image(img, points=points, auto_mode=auto_mode)
+    
+    if segments is None:
+        return JSONResponse({"error": "Segmentation failed"}, status_code=500)
+    
+    # Reset labels for new segmentation
+    segment_labels = {i: f"Object {i}" for i in range(segments["num_segments"])}
+    
+    return {
+        "status": "ok",
+        "num_segments": segments["num_segments"],
+        "scores": segments["scores"],
+        "labels": segment_labels
+    }
+
+
+@app.get("/render_with_segments")
+async def render_with_segments(
+    width: int = Query(1024),
+    height: int = Query(768),
+    azimuth: float = Query(0),
+    elevation: float = Query(0),
+    zoom: float = Query(0.5),
+    cam_idx: int = Query(0)
+):
+    """Render view with segmentation overlay and labels"""
+    img = render_view(width, height, azimuth, elevation, zoom, cam_idx)
+    if img is None:
+        return Response(content=b"Render failed", status_code=500)
+    
+    # Apply segmentation overlay if segments exist
+    if current_segments and "masks" in current_segments:
+        img = create_overlay_with_labels(img, current_segments, segment_labels)
+    
+    from PIL import Image
+    pil_img = Image.fromarray(img)
+    buffer = io.BytesIO()
+    pil_img.save(buffer, format='PNG')
+    buffer.seek(0)
+    
+    return Response(content=buffer.getvalue(), media_type="image/png")
+
+
+@app.post("/segment/point")
+async def segment_at_point(
+    x: int = Form(...),
+    y: int = Form(...),
+    label: int = Form(1),
+    azimuth: float = Form(0),
+    elevation: float = Form(0),
+    zoom: float = Form(0.5),
+    cam_idx: int = Form(0)
+):
+    """Segment object at specific point click"""
+    global current_segments, segment_labels
+    
+    img = render_view(1024, 768, azimuth, elevation, zoom, cam_idx)
+    if img is None:
+        return JSONResponse({"error": "Failed to render view"}, status_code=500)
+    
+    points = [{"x": x, "y": y, "label": label}]
+    segments = segment_image(img, points=points, auto_mode=False)
+    
+    if segments is None:
+        return JSONResponse({"error": "Segmentation failed"}, status_code=500)
+    
+    # Add to existing segments or create new
+    if "masks" not in current_segments:
+        current_segments = {"masks": [], "scores": [], "num_segments": 0}
+    
+    for mask, score in zip(segments["masks"], segments["scores"]):
+        idx = len(current_segments["masks"])
+        current_segments["masks"].append(mask)
+        current_segments["scores"].append(score)
+        current_segments["num_segments"] += 1
+        segment_labels[idx] = f"Object {idx}"
+    
+    return {
+        "status": "ok",
+        "num_segments": current_segments["num_segments"],
+        "new_segment_idx": current_segments["num_segments"] - 1
+    }
+
+
+@app.post("/segment/label")
+async def update_segment_label(
+    segment_idx: int = Form(...),
+    label: str = Form(...)
+):
+    """Update label for a segment"""
+    global segment_labels
+    
+    if segment_idx < 0 or (current_segments and segment_idx >= current_segments.get("num_segments", 0)):
+        return JSONResponse({"error": "Invalid segment index"}, status_code=400)
+    
+    segment_labels[segment_idx] = label
+    return {"status": "ok", "segment_idx": segment_idx, "label": label}
+
+
+@app.get("/segment/labels")
+async def get_segment_labels():
+    """Get all current segment labels"""
+    return {
+        "labels": segment_labels,
+        "num_segments": current_segments.get("num_segments", 0) if current_segments else 0
+    }
+
+
+@app.post("/segment/clear")
+async def clear_segments():
+    """Clear all segments"""
+    global current_segments, segment_labels
+    current_segments = {}
+    segment_labels = {}
+    return {"status": "ok", "message": "Segments cleared"}
+
+
+@app.get("/segment/status")
+async def segment_status():
+    """Get SAM-2 and segmentation status"""
+    return {
+        "sam2_loaded": sam2_loaded,
+        "has_segments": bool(current_segments and current_segments.get("masks")),
+        "num_segments": current_segments.get("num_segments", 0) if current_segments else 0,
+        "labels": segment_labels
+    }
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=VIEWER_PORT)
