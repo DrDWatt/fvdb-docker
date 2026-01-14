@@ -472,6 +472,10 @@ def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx
 @app.on_event("startup")
 async def startup():
     load_model()
+    # Preload CLIP model for instant classification
+    logger.info("Preloading CLIP model...")
+    load_clip_model()
+    logger.info("Startup complete - CLIP ready")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
