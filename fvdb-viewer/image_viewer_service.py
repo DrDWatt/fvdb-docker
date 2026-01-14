@@ -162,7 +162,7 @@ def auto_label_segment(image: np.ndarray, mask: np.ndarray) -> str:
 
 
 def segment_image(image: np.ndarray, points: List[Dict] = None, auto_mode: bool = True):
-    """Segment objects in image using SAM-2"""
+    """Segment objects in image using SAM-2 Automatic Mask Generator"""
     global current_segments, segment_labels
     
     if not sam2_loaded:
@@ -171,37 +171,47 @@ def segment_image(image: np.ndarray, points: List[Dict] = None, auto_mode: bool 
     
     try:
         import torch
-        
-        # Set image
-        sam2_predictor.set_image(image)
+        from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
         
         masks_data = []
         scores_data = []
         
         if auto_mode:
-            # Auto segmentation - use grid of points
-            h, w = image.shape[:2]
-            grid_points = []
-            for y in range(h // 6, h, h // 3):
-                for x in range(w // 6, w, w // 3):
-                    grid_points.append([x, y])
-            
-            point_coords = np.array(grid_points)
-            point_labels = np.ones(len(grid_points), dtype=np.int32)
-            
-            masks, scores, _ = sam2_predictor.predict(
-                point_coords=point_coords,
-                point_labels=point_labels,
-                multimask_output=True
+            # Use SAM2 Automatic Mask Generator for proper object detection
+            mask_generator = SAM2AutomaticMaskGenerator(
+                model=sam2_predictor.model,
+                points_per_side=32,
+                points_per_batch=64,
+                pred_iou_thresh=0.7,
+                stability_score_thresh=0.92,
+                stability_score_offset=1.0,
+                crop_n_layers=1,
+                box_nms_thresh=0.7,
+                min_mask_region_area=100,
             )
             
-            for i, (mask, score) in enumerate(zip(masks, scores)):
-                if score > 0.5:
-                    masks_data.append(mask)
-                    scores_data.append(float(score))
+            logger.info("Running SAM-2 automatic mask generation on GPU...")
+            masks = mask_generator.generate(image)
+            logger.info(f"Generated {len(masks)} masks")
+            
+            # Sort by area (largest first) and filter
+            masks = sorted(masks, key=lambda x: x['area'], reverse=True)
+            
+            for mask_data in masks:
+                # Skip very large masks (likely background)
+                img_area = image.shape[0] * image.shape[1]
+                if mask_data['area'] > img_area * 0.5:
+                    continue
+                # Skip tiny masks
+                if mask_data['area'] < img_area * 0.001:
+                    continue
+                    
+                masks_data.append(mask_data['segmentation'])
+                scores_data.append(float(mask_data['stability_score']))
         
         elif points:
-            # Point-based segmentation
+            # Point-based segmentation - set image first
+            sam2_predictor.set_image(image)
             point_coords = np.array([[p['x'], p['y']] for p in points])
             point_labels = np.array([p.get('label', 1) for p in points])
             
