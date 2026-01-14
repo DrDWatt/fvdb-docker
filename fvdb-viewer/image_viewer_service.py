@@ -96,112 +96,11 @@ def load_sam2():
         return False
 
 
-# CLIP model for object classification
-clip_model = None
-clip_preprocess = None
-clip_loaded = False
-
-OBJECT_LABELS = [
-    "bulldozer", "excavator", "toy truck", "construction vehicle", 
-    "plant", "potted plant", "foliage", "leaves",
-    "table", "wooden table", "desk",
-    "bowl", "cup", "mug", "container",
-    "bottle", "spray bottle", "jar",
-    "book", "box", "package",
-    "chair", "bench", "furniture",
-    "person", "hand", "arm",
-    "floor", "wall", "background",
-    "toy", "figurine", "decoration"
-]
-
-def load_clip():
-    """Load CLIP model for object classification"""
-    global clip_model, clip_preprocess, clip_loaded
-    
-    if clip_loaded:
-        return True
-    
-    try:
-        import clip
-        import torch
-        
-        logger.info("Loading CLIP model...")
-        clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
-        clip_loaded = True
-        logger.info("CLIP loaded successfully")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to load CLIP: {e}")
-        return False
-
-
-def clip_classify(image: np.ndarray, mask: np.ndarray) -> str:
-    """Use CLIP to classify object in masked region"""
-    if not clip_loaded:
-        if not load_clip():
-            return None
-    
-    try:
-        import clip
-        import torch
-        from PIL import Image
-        
-        # Get bounding box
-        bool_mask = mask.astype(bool) if mask.dtype != bool else mask
-        coords = np.where(bool_mask)
-        if len(coords[0]) == 0:
-            return None
-        
-        y_min, y_max = coords[0].min(), coords[0].max()
-        x_min, x_max = coords[1].min(), coords[1].max()
-        
-        # Add padding
-        pad = 10
-        y_min = max(0, y_min - pad)
-        x_min = max(0, x_min - pad)
-        y_max = min(image.shape[0], y_max + pad)
-        x_max = min(image.shape[1], x_max + pad)
-        
-        # Crop region
-        crop = image[y_min:y_max, x_min:x_max]
-        pil_img = Image.fromarray(crop)
-        
-        # Prepare for CLIP
-        img_input = clip_preprocess(pil_img).unsqueeze(0).to(device)
-        text_inputs = clip.tokenize(OBJECT_LABELS).to(device)
-        
-        # Get predictions
-        with torch.no_grad():
-            image_features = clip_model.encode_image(img_input)
-            text_features = clip_model.encode_text(text_inputs)
-            
-            image_features /= image_features.norm(dim=-1, keepdim=True)
-            text_features /= text_features.norm(dim=-1, keepdim=True)
-            
-            similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
-            best_idx = similarity[0].argmax().item()
-            confidence = similarity[0][best_idx].item()
-        
-        if confidence > 0.1:
-            return OBJECT_LABELS[best_idx].title()
-        return None
-        
-    except Exception as e:
-        logger.error(f"CLIP classification failed: {e}")
-        return None
-
-
-# Auto-labeling using CLIP and heuristics
+# Auto-labeling using heuristics (fast, no external models)
 def auto_label_segment(image: np.ndarray, mask: np.ndarray) -> str:
-    """Generate automatic label for a segment using CLIP, fallback to heuristics"""
+    """Generate automatic label for a segment based on visual features"""
     import cv2
     
-    # Try CLIP classification first
-    clip_label = clip_classify(image, mask)
-    if clip_label:
-        return clip_label
-    
-    # Fallback to heuristics
     # Convert mask to boolean if needed
     bool_mask = mask.astype(bool) if mask.dtype != bool else mask
     
