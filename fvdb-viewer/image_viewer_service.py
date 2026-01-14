@@ -96,73 +96,103 @@ def load_sam2():
         return False
 
 
-# Auto-labeling using heuristics (fast, no external models)
+# HuggingFace CLIP for object classification
+clip_model = None
+clip_processor = None
+clip_loaded = False
+
+# Object labels for CLIP classification
+OBJECT_LABELS = [
+    "bulldozer", "toy bulldozer", "construction vehicle", "excavator", "toy truck",
+    "plant", "potted plant", "houseplant", "leaves", "foliage",
+    "table", "wooden table", "desk", "countertop",
+    "bowl", "cup", "mug", "plate", "dish",
+    "bottle", "spray bottle", "container", "jar",
+    "chair", "furniture", "shelf",
+    "book", "box", "package",
+    "floor", "wall", "background", "carpet",
+    "toy", "figurine", "decoration", "ornament"
+]
+
+def load_clip_model():
+    """Load HuggingFace CLIP model for object classification"""
+    global clip_model, clip_processor, clip_loaded
+    
+    if clip_loaded:
+        return True
+    
+    try:
+        from transformers import CLIPProcessor, CLIPModel
+        
+        logger.info("Loading HuggingFace CLIP model (openai/clip-vit-base-patch32)...")
+        clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+        clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        clip_loaded = True
+        logger.info("CLIP model loaded successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to load CLIP: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def auto_label_segment(image: np.ndarray, mask: np.ndarray) -> str:
-    """Generate automatic label for a segment based on visual features"""
-    import cv2
+    """Classify segment using HuggingFace CLIP model"""
+    import torch
+    from PIL import Image
     
-    # Convert mask to boolean if needed
-    bool_mask = mask.astype(bool) if mask.dtype != bool else mask
+    # Load CLIP if not loaded
+    if not clip_loaded:
+        if not load_clip_model():
+            return "Object"
     
-    # Get bounding box
-    coords = np.where(bool_mask)
-    if len(coords[0]) == 0:
-        return "Unknown"
-    
-    y_min, y_max = coords[0].min(), coords[0].max()
-    x_min, x_max = coords[1].min(), coords[1].max()
-    
-    # Calculate features
-    height = y_max - y_min
-    width = x_max - x_min
-    area = np.sum(mask)
-    aspect_ratio = width / max(height, 1)
-    
-    # Get dominant color in masked region
-    roi = image[y_min:y_max, x_min:x_max]
-    roi_mask = bool_mask[y_min:y_max, x_min:x_max]
-    if roi_mask.any():
-        mean_color = roi[roi_mask].mean(axis=0)
-    else:
-        mean_color = [128, 128, 128]
-    
-    # Position in image (relative)
-    img_h, img_w = image.shape[:2]
-    center_y = (y_min + y_max) / 2 / img_h
-    center_x = (x_min + x_max) / 2 / img_w
-    relative_size = area / (img_h * img_w)
-    
-    # RGB values
-    r, g, b = mean_color[0], mean_color[1], mean_color[2]
-    
-    # Yellow/orange detection for construction vehicles
-    is_yellow = (r > 180 and g > 140 and b < 120)
-    is_orange = (r > 200 and g > 100 and g < 180 and b < 100)
-    
-    # Improved heuristic labeling
-    if relative_size > 0.3:
-        return "Background"
-    elif relative_size > 0.12 and center_y > 0.5:
-        return "Table/Surface"
-    elif is_yellow or is_orange:
-        if 0.005 < relative_size < 0.1 and aspect_ratio > 0.8:
-            return "Bulldozer/Vehicle"
-        return "Yellow Object"
-    elif g > r and g > b:
-        return "Plant/Foliage"
-    elif r > 150 and g < 100 and b < 100:
-        return "Red Object"
-    elif b > 150 and r < 100 and g < 150:
-        return "Blue Object"
-    elif r > 180 and g > 150 and b > 150:
-        return "Bowl/Container"
-    elif center_y > 0.7 and relative_size < 0.02:
-        return "Small Item"
-    elif aspect_ratio > 2.5:
-        return "Elongated Object"
-    elif aspect_ratio < 0.4:
-        return "Tall Object"
-    else:
+    try:
+        # Convert mask to boolean
+        bool_mask = mask.astype(bool) if mask.dtype != bool else mask
+        
+        # Get bounding box
+        coords = np.where(bool_mask)
+        if len(coords[0]) == 0:
+            return "Object"
+        
+        y_min, y_max = coords[0].min(), coords[0].max()
+        x_min, x_max = coords[1].min(), coords[1].max()
+        
+        # Add padding
+        pad = 15
+        y_min = max(0, y_min - pad)
+        x_min = max(0, x_min - pad)
+        y_max = min(image.shape[0], y_max + pad)
+        x_max = min(image.shape[1], x_max + pad)
+        
+        # Crop region
+        crop = image[y_min:y_max, x_min:x_max]
+        pil_img = Image.fromarray(crop)
+        
+        # Process with CLIP
+        inputs = clip_processor(
+            text=OBJECT_LABELS,
+            images=pil_img,
+            return_tensors="pt",
+            padding=True
+        )
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        # Get predictions
+        with torch.no_grad():
+            outputs = clip_model(**inputs)
+            logits = outputs.logits_per_image
+            probs = logits.softmax(dim=1)
+            best_idx = probs[0].argmax().item()
+            confidence = probs[0][best_idx].item()
+        
+        label = OBJECT_LABELS[best_idx]
+        logger.info(f"CLIP classified as '{label}' with confidence {confidence:.2f}")
+        return label.title()
+        
+    except Exception as e:
+        logger.error(f"CLIP classification failed: {e}")
         return "Object"
 
 
