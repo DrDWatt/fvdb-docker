@@ -136,29 +136,38 @@ def auto_label_segment(image: np.ndarray, mask: np.ndarray) -> str:
     center_x = (x_min + x_max) / 2 / img_w
     relative_size = area / (img_h * img_w)
     
-    # Simple heuristic labeling based on features
+    # RGB values
+    r, g, b = mean_color[0], mean_color[1], mean_color[2]
+    
+    # Yellow/orange detection for construction vehicles
+    is_yellow = (r > 180 and g > 140 and b < 120)
+    is_orange = (r > 200 and g > 100 and g < 180 and b < 100)
+    
+    # Improved heuristic labeling
     if relative_size > 0.3:
         return "Background"
-    elif relative_size > 0.15:
-        if center_y > 0.6:
-            return "Floor/Table"
-        else:
-            return "Large Object"
-    elif mean_color[1] > mean_color[0] and mean_color[1] > mean_color[2]:
+    elif relative_size > 0.12 and center_y > 0.5:
+        return "Table/Surface"
+    elif is_yellow or is_orange:
+        if 0.005 < relative_size < 0.1 and aspect_ratio > 0.8:
+            return "Bulldozer/Vehicle"
+        return "Yellow Object"
+    elif g > r and g > b:
         return "Plant/Foliage"
-    elif mean_color[2] > 180 and mean_color[0] > 150:  # Yellow-ish
-        if aspect_ratio > 1.5:
-            return "Vehicle/Machine"
-        else:
-            return "Yellow Object"
-    elif center_y > 0.7 and relative_size < 0.05:
-        return "Small Object"
-    elif aspect_ratio > 2:
+    elif r > 150 and g < 100 and b < 100:
+        return "Red Object"
+    elif b > 150 and r < 100 and g < 150:
+        return "Blue Object"
+    elif r > 180 and g > 150 and b > 150:
+        return "Bowl/Container"
+    elif center_y > 0.7 and relative_size < 0.02:
+        return "Small Item"
+    elif aspect_ratio > 2.5:
         return "Elongated Object"
-    elif aspect_ratio < 0.5:
+    elif aspect_ratio < 0.4:
         return "Tall Object"
     else:
-        return f"Object"
+        return "Object"
 
 
 def segment_image(image: np.ndarray, points: List[Dict] = None, auto_mode: bool = True):
@@ -842,9 +851,23 @@ async def root():
             async function clearSegments() {{
                 await fetch('/segment/clear', {{ method: 'POST' }});
                 showSegments = false;
+                segmentMasks = [];
+                segmentLabelMap = {{}};
                 document.getElementById('segStatus').textContent = 'Segments cleared';
                 document.getElementById('labels-list').innerHTML = '';
-                updateRender();
+                // Force regular render without segments
+                const az = azSlider.value;
+                const el = elSlider.value;
+                const zoom = zoomSlider.value;
+                const cam = camSlider.value;
+                loading.style.display = 'block';
+                const response = await fetch(`/render?azimuth=${{az}}&elevation=${{el}}&zoom=${{zoom}}&cam_idx=${{cam}}&width=1024&height=768`);
+                if (response.ok) {{
+                    const blob = await response.blob();
+                    img.src = URL.createObjectURL(blob);
+                    img.style.display = 'block';
+                    loading.style.display = 'none';
+                }}
             }}
             
             function updateLabelsUI(labels) {{
