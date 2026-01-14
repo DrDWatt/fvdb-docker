@@ -13,7 +13,7 @@ import json
 import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, Query, Form
+from fastapi import FastAPI, Query, Form, File, UploadFile
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -705,6 +705,10 @@ async def root():
                 <button class="seg-btn seg-btn-success" id="clickSegBtn" onclick="toggleClickMode()">Click to Segment</button>
                 <button class="seg-btn seg-btn-danger" onclick="clearSegments()">Clear</button>
             </div>
+            <div style="margin-top:8px;">
+                <button class="seg-btn" style="background:#6c757d;color:white;" onclick="showSummary()">📄 Summary</button>
+                <button class="seg-btn" style="background:#17a2b8;color:white;" onclick="showUploadModal()">⬆️ Upload Info</button>
+            </div>
             <div id="segStatus" style="margin-top:10px;font-size:12px;color:#888;">
                 Click "Auto Segment" to detect objects
             </div>
@@ -712,6 +716,29 @@ async def root():
         </div>
         
         <div id="hover-tooltip"></div>
+        
+        <!-- Summary Modal -->
+        <div id="summary-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:2000;">
+            <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a2e;padding:30px;border-radius:12px;max-width:600px;max-height:80vh;overflow-y:auto;border:2px solid #00d4ff;">
+                <h2 style="color:#00d4ff;margin-top:0;">📄 Model Summary</h2>
+                <div id="summary-content" style="color:#eee;line-height:1.6;white-space:pre-wrap;"></div>
+                <button onclick="closeSummary()" style="margin-top:20px;padding:10px 25px;background:#dc3545;color:white;border:none;border-radius:5px;cursor:pointer;">Close</button>
+            </div>
+        </div>
+        
+        <!-- Upload Modal -->
+        <div id="upload-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:2000;">
+            <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a2e;padding:30px;border-radius:12px;max-width:500px;border:2px solid #17a2b8;">
+                <h2 style="color:#17a2b8;margin-top:0;">⬆️ Upload Model Info</h2>
+                <p style="color:#aaa;">Upload a summary document (PDF, TXT, JSON, MD) for this model.</p>
+                <input type="file" id="summary-file" accept=".pdf,.txt,.json,.md,.text" style="margin:15px 0;color:#eee;">
+                <div style="margin-top:15px;">
+                    <button onclick="uploadSummary()" style="padding:10px 25px;background:#17a2b8;color:white;border:none;border-radius:5px;cursor:pointer;margin-right:10px;">Upload</button>
+                    <button onclick="closeUploadModal()" style="padding:10px 25px;background:#6c757d;color:white;border:none;border-radius:5px;cursor:pointer;">Cancel</button>
+                </div>
+                <div id="upload-status" style="margin-top:15px;color:#28a745;"></div>
+            </div>
+        </div>
         
         <script>
             const img = document.getElementById('render');
@@ -1069,6 +1096,79 @@ async def root():
                 segmentLabelMap = labels;
                 loadSegmentMasks();
             }};
+            
+            // Summary and Upload functions
+            async function showSummary() {{
+                const modelSelect = document.getElementById('model-select');
+                const modelName = modelSelect.value;
+                
+                document.getElementById('summary-content').textContent = 'Loading...';
+                document.getElementById('summary-modal').style.display = 'block';
+                
+                try {{
+                    const response = await fetch(`/model_summary?model=${{encodeURIComponent(modelName)}}`);
+                    const data = await response.json();
+                    
+                    if (data.has_summary) {{
+                        document.getElementById('summary-content').textContent = data.summary;
+                    }} else {{
+                        document.getElementById('summary-content').innerHTML = `
+                            <p style="color:#ffc107;">No summary available for this model.</p>
+                            <p>Click "Upload Info" to add a summary document (PDF, TXT, JSON, or MD).</p>
+                        `;
+                    }}
+                }} catch(e) {{
+                    document.getElementById('summary-content').textContent = 'Error loading summary: ' + e.message;
+                }}
+            }}
+            
+            function closeSummary() {{
+                document.getElementById('summary-modal').style.display = 'none';
+            }}
+            
+            function showUploadModal() {{
+                document.getElementById('upload-modal').style.display = 'block';
+                document.getElementById('upload-status').textContent = '';
+            }}
+            
+            function closeUploadModal() {{
+                document.getElementById('upload-modal').style.display = 'none';
+            }}
+            
+            async function uploadSummary() {{
+                const fileInput = document.getElementById('summary-file');
+                const modelSelect = document.getElementById('model-select');
+                const modelName = modelSelect.value;
+                
+                if (!fileInput.files[0]) {{
+                    document.getElementById('upload-status').textContent = 'Please select a file';
+                    document.getElementById('upload-status').style.color = '#dc3545';
+                    return;
+                }}
+                
+                const formData = new FormData();
+                formData.append('file', fileInput.files[0]);
+                
+                document.getElementById('upload-status').textContent = 'Uploading...';
+                document.getElementById('upload-status').style.color = '#ffc107';
+                
+                try {{
+                    const response = await fetch(`/upload_summary?model=${{encodeURIComponent(modelName)}}`, {{
+                        method: 'POST',
+                        body: formData
+                    }});
+                    const data = await response.json();
+                    
+                    if (data.message) {{
+                        document.getElementById('upload-status').textContent = '✅ ' + data.message;
+                        document.getElementById('upload-status').style.color = '#28a745';
+                        setTimeout(closeUploadModal, 2000);
+                    }}
+                }} catch(e) {{
+                    document.getElementById('upload-status').textContent = 'Error: ' + e.message;
+                    document.getElementById('upload-status').style.color = '#dc3545';
+                }}
+            }}
         </script>
     </body>
     </html>
@@ -1321,6 +1421,42 @@ async def segment_status():
         "num_segments": current_segments.get("num_segments", 0) if current_segments else 0,
         "labels": segment_labels
     }
+
+
+# ===== Summary Endpoints =====
+
+@app.get("/model_summary")
+async def get_model_summary(model: str = Query(...)):
+    """Get summary for a model from the model service"""
+    try:
+        import requests
+        response = requests.get(f"{MODEL_SERVICE_URL}/summary/{model}", timeout=10)
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        logger.error(f"Error fetching summary: {e}")
+    
+    return {"model": model, "has_summary": False, "summary": None}
+
+
+@app.post("/upload_summary")
+async def upload_model_summary(model: str = Query(...), file: UploadFile = File(...)):
+    """Upload summary document for a model"""
+    try:
+        import requests
+        content = await file.read()
+        files = {'file': (file.filename, content, file.content_type)}
+        response = requests.post(
+            f"{MODEL_SERVICE_URL}/summary/{model}",
+            files=files,
+            timeout=30
+        )
+        if response.status_code == 200:
+            return response.json()
+        return {"error": f"Upload failed: {response.status_code}"}
+    except Exception as e:
+        logger.error(f"Error uploading summary: {e}")
+        return {"error": str(e)}
 
 
 if __name__ == "__main__":

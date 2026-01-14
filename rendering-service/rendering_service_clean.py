@@ -282,6 +282,110 @@ async def list_all_metadata():
     return {"models": all_metadata, "count": len(all_metadata)}
 
 
+# ===== Summary Document Endpoints =====
+
+SUMMARY_DIR = BASE_DIR / "summaries"
+SUMMARY_DIR.mkdir(exist_ok=True, parents=True)
+
+
+@app.post("/summary/{model_name}")
+async def upload_summary(model_name: str, file: UploadFile = File(...)):
+    """Upload a summary document (PDF, TXT, JSON, MD) for a model"""
+    allowed_extensions = ['.pdf', '.txt', '.json', '.md', '.text']
+    ext = Path(file.filename).suffix.lower()
+    
+    if ext not in allowed_extensions:
+        raise HTTPException(status_code=400, detail=f"Only {allowed_extensions} files allowed")
+    
+    content = await file.read()
+    
+    # For text files, also store as readable text
+    summary_text = ""
+    if ext in ['.txt', '.json', '.md', '.text']:
+        try:
+            summary_text = content.decode('utf-8')
+        except:
+            summary_text = content.decode('latin-1')
+    
+    # Save the original file
+    file_path = SUMMARY_DIR / f"{model_name}{ext}"
+    with open(file_path, 'wb') as f:
+        f.write(content)
+    
+    # Also save extracted text for easy retrieval
+    if summary_text:
+        text_path = SUMMARY_DIR / f"{model_name}_summary.txt"
+        with open(text_path, 'w') as f:
+            f.write(summary_text)
+    
+    logger.info(f"Uploaded summary for {model_name}: {file.filename}")
+    
+    return {
+        "model": model_name,
+        "filename": file.filename,
+        "size_bytes": len(content),
+        "has_text": bool(summary_text),
+        "message": "Summary uploaded successfully"
+    }
+
+
+@app.get("/summary/{model_name}")
+async def get_summary(model_name: str):
+    """Get summary text for a model"""
+    # Try to find text summary first
+    text_path = SUMMARY_DIR / f"{model_name}_summary.txt"
+    if text_path.exists():
+        with open(text_path, 'r') as f:
+            return {
+                "model": model_name,
+                "has_summary": True,
+                "summary": f.read()
+            }
+    
+    # Check for other summary files
+    for ext in ['.txt', '.md', '.json', '.text']:
+        file_path = SUMMARY_DIR / f"{model_name}{ext}"
+        if file_path.exists():
+            with open(file_path, 'r') as f:
+                return {
+                    "model": model_name,
+                    "has_summary": True,
+                    "summary": f.read()
+                }
+    
+    # Check for PDF (return info that PDF exists but needs download)
+    pdf_path = SUMMARY_DIR / f"{model_name}.pdf"
+    if pdf_path.exists():
+        return {
+            "model": model_name,
+            "has_summary": True,
+            "summary": f"PDF summary available. Download at /summary/{model_name}/download",
+            "is_pdf": True,
+            "download_url": f"/summary/{model_name}/download"
+        }
+    
+    return {
+        "model": model_name,
+        "has_summary": False,
+        "summary": None
+    }
+
+
+@app.get("/summary/{model_name}/download")
+async def download_summary(model_name: str):
+    """Download summary file"""
+    for ext in ['.pdf', '.txt', '.md', '.json', '.text']:
+        file_path = SUMMARY_DIR / f"{model_name}{ext}"
+        if file_path.exists():
+            return FileResponse(
+                path=file_path,
+                filename=f"{model_name}_summary{ext}",
+                media_type="application/octet-stream"
+            )
+    
+    raise HTTPException(status_code=404, detail="No summary found for this model")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
