@@ -176,12 +176,12 @@ def segment_image(image: np.ndarray, points: List[Dict] = None, auto_mode: bool 
     
     try:
         import torch
-        from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
         
         masks_data = []
         scores_data = []
         
         if auto_mode:
+            from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
             # Use SAM2 Automatic Mask Generator for proper object detection
             mask_generator = SAM2AutomaticMaskGenerator(
                 model=sam2_predictor.model,
@@ -236,14 +236,19 @@ def segment_image(image: np.ndarray, points: List[Dict] = None, auto_mode: bool 
         for i, mask in enumerate(masks_data):
             labels[i] = auto_label_segment(image, mask)
         
-        current_segments = {
+        result = {
             "masks": masks_data,
             "scores": scores_data,
             "num_segments": len(masks_data),
             "labels": labels
         }
         
-        return current_segments
+        # Only set global state for auto_mode (not point-based)
+        if auto_mode:
+            current_segments = result
+            segment_labels = labels
+        
+        return result
         
     except Exception as e:
         logger.error(f"Segmentation failed: {e}")
@@ -1145,15 +1150,17 @@ async def segment_at_point(
         return JSONResponse({"error": "Segmentation failed"}, status_code=500)
     
     # Add to existing segments or create new
-    if "masks" not in current_segments:
+    if not current_segments or "masks" not in current_segments:
         current_segments = {"masks": [], "scores": [], "num_segments": 0}
     
-    for mask, score in zip(segments["masks"], segments["scores"]):
-        idx = len(current_segments["masks"])
+    new_idx = -1
+    for i, (mask, score) in enumerate(zip(segments["masks"], segments["scores"])):
+        new_idx = len(current_segments["masks"])
         current_segments["masks"].append(mask)
         current_segments["scores"].append(score)
         current_segments["num_segments"] += 1
-        segment_labels[idx] = f"Object {idx}"
+        # Use auto-generated label from segment_image
+        segment_labels[new_idx] = segments.get("labels", {}).get(i, f"Object {new_idx}")
     
     return {
         "status": "ok",
