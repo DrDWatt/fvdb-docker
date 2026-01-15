@@ -288,6 +288,35 @@ SUMMARY_DIR = BASE_DIR / "summaries"
 SUMMARY_DIR.mkdir(exist_ok=True, parents=True)
 
 
+def extract_pdf_text(pdf_path: Path) -> str:
+    """Extract text from PDF file"""
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(str(pdf_path))
+        text = ""
+        for page in doc:
+            text += page.get_text()
+        doc.close()
+        return text.strip()
+    except ImportError:
+        # Fallback: try pdfplumber
+        try:
+            import pdfplumber
+            text = ""
+            with pdfplumber.open(str(pdf_path)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+            return text.strip()
+        except ImportError:
+            logger.warning("No PDF library available (install PyMuPDF or pdfplumber)")
+            return ""
+    except Exception as e:
+        logger.error(f"PDF extraction error: {e}")
+        return ""
+
+
 @app.post("/summary/{model_name}")
 async def upload_summary(model_name: str, file: UploadFile = File(...)):
     """Upload a summary document (PDF, TXT, JSON, MD) for a model"""
@@ -299,24 +328,28 @@ async def upload_summary(model_name: str, file: UploadFile = File(...)):
     
     content = await file.read()
     
-    # For text files, also store as readable text
+    # Save the original file first
+    file_path = SUMMARY_DIR / f"{model_name}{ext}"
+    with open(file_path, 'wb') as f:
+        f.write(content)
+    
+    # Extract text based on file type
     summary_text = ""
     if ext in ['.txt', '.json', '.md', '.text']:
         try:
             summary_text = content.decode('utf-8')
         except:
             summary_text = content.decode('latin-1')
+    elif ext == '.pdf':
+        # Extract text from PDF
+        summary_text = extract_pdf_text(file_path)
+        if not summary_text:
+            summary_text = f"[PDF uploaded: {file.filename}]\n\nPDF text extraction not available. Install PyMuPDF: pip install PyMuPDF"
     
-    # Save the original file
-    file_path = SUMMARY_DIR / f"{model_name}{ext}"
-    with open(file_path, 'wb') as f:
-        f.write(content)
-    
-    # Also save extracted text for easy retrieval
-    if summary_text:
-        text_path = SUMMARY_DIR / f"{model_name}_summary.txt"
-        with open(text_path, 'w') as f:
-            f.write(summary_text)
+    # Save extracted text for easy retrieval
+    text_path = SUMMARY_DIR / f"{model_name}_summary.txt"
+    with open(text_path, 'w') as f:
+        f.write(summary_text)
     
     logger.info(f"Uploaded summary for {model_name}: {file.filename}")
     
@@ -332,7 +365,7 @@ async def upload_summary(model_name: str, file: UploadFile = File(...)):
 @app.get("/summary/{model_name}")
 async def get_summary(model_name: str):
     """Get summary text for a model"""
-    # Try to find text summary first
+    # Always check for extracted text summary first (includes PDF extractions)
     text_path = SUMMARY_DIR / f"{model_name}_summary.txt"
     if text_path.exists():
         with open(text_path, 'r') as f:
@@ -352,17 +385,6 @@ async def get_summary(model_name: str):
                     "has_summary": True,
                     "summary": f.read()
                 }
-    
-    # Check for PDF (return info that PDF exists but needs download)
-    pdf_path = SUMMARY_DIR / f"{model_name}.pdf"
-    if pdf_path.exists():
-        return {
-            "model": model_name,
-            "has_summary": True,
-            "summary": f"PDF summary available. Download at /summary/{model_name}/download",
-            "is_pdf": True,
-            "download_url": f"/summary/{model_name}/download"
-        }
     
     return {
         "model": model_name,
