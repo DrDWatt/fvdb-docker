@@ -1306,16 +1306,187 @@ async def root():
                     item.className = 'extraction-item';
                     item.innerHTML = `
                         <span>Asset ${{idx + 1}}: ${{ext.num_gaussians}} pts</span>
-                        <a href="/garfield/download/${{ext.job_id}}" style="color:#ffc107;text-decoration:none;">⬇️</a>
+                        <button onclick="viewExtraction(${{idx}})" style="background:#ffc107;color:#000;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px;">👁️ View</button>
                     `;
                     list.appendChild(item);
                 }});
             }}
             
+            // View extracted asset in viewer
+            let viewingExtraction = null;
+            let extAzimuth = 0;
+            let extElevation = 0;
+            let extZoom = 1.0;
+            let isDragging = false;
+            let lastMouseX = 0;
+            let lastMouseY = 0;
+            let renderPending = false;
+            let lastRenderTime = 0;
+            const RENDER_THROTTLE_MS = 50;  // Limit to 20 FPS for smoother rotation
+            
+            async function viewExtraction(idx) {{
+                const ext = extractions[idx];
+                if (!ext) return;
+                
+                viewingExtraction = ext;
+                extAzimuth = 0;
+                extElevation = 0;
+                extZoom = 1.0;
+                
+                document.getElementById('extractStatus').innerHTML = 
+                    `<span style="color:#ffc107;">👁️ Viewing Asset ${{idx + 1}} (${{ext.num_gaussians}} gaussians)</span><br>` +
+                    `<span style="font-size:11px;color:#aaa;">Arrow keys to rotate • +/- to zoom</span><br>` +
+                    `<button onclick="exitExtractionView()" style="margin-top:5px;background:#dc3545;color:white;border:none;border-radius:3px;padding:4px 10px;cursor:pointer;">Exit View</button>`;
+                
+                img.style.cursor = 'grab';
+                renderExtractionOverlay();
+            }}
+            
+            function exitExtractionView() {{
+                viewingExtraction = null;
+                img.style.cursor = 'default';
+                document.getElementById('extractStatus').textContent = 'Click to extract 3D assets from scene';
+                updateRender();
+            }}
+            
+            // Mouse drag rotation for extraction view
+            img.addEventListener('mousedown', (e) => {{
+                if (!viewingExtraction) return;
+                isDragging = true;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                img.style.cursor = 'grabbing';
+                e.preventDefault();
+            }});
+            
+            document.addEventListener('mousemove', (e) => {{
+                if (!isDragging || !viewingExtraction) return;
+                
+                const deltaX = e.clientX - lastMouseX;
+                const deltaY = e.clientY - lastMouseY;
+                
+                extAzimuth += deltaX * 0.5;
+                extElevation = Math.max(-89, Math.min(89, extElevation - deltaY * 0.5));
+                
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                
+                // Throttle render requests to reduce GPU pressure
+                const now = Date.now();
+                if (!renderPending && (now - lastRenderTime) >= RENDER_THROTTLE_MS) {{
+                    renderPending = true;
+                    lastRenderTime = now;
+                    renderExtractionOverlay().finally(() => {{ renderPending = false; }});
+                }}
+            }});
+            
+            document.addEventListener('mouseup', () => {{
+                if (isDragging && viewingExtraction) {{
+                    isDragging = false;
+                    img.style.cursor = 'grab';
+                    // Render final position on mouse up
+                    if (!renderPending) {{
+                        renderPending = true;
+                        renderExtractionOverlay().finally(() => {{ renderPending = false; }});
+                    }}
+                }}
+            }});
+            
+            // Scroll to zoom for extraction view (throttled)
+            img.addEventListener('wheel', (e) => {{
+                if (!viewingExtraction) return;
+                e.preventDefault();
+                extZoom = Math.max(0.2, Math.min(5, extZoom - e.deltaY * 0.002));
+                
+                const now = Date.now();
+                if (!renderPending && (now - lastRenderTime) >= RENDER_THROTTLE_MS) {{
+                    renderPending = true;
+                    lastRenderTime = now;
+                    renderExtractionOverlay().finally(() => {{ renderPending = false; }});
+                }}
+            }});
+            
+            // Keyboard controls for extraction view (more reliable than trackpad)
+            document.addEventListener('keydown', (e) => {{
+                if (!viewingExtraction) return;
+                
+                let changed = false;
+                const rotateStep = 10;
+                const zoomStep = 0.1;
+                
+                switch(e.key) {{
+                    case 'ArrowLeft':
+                        extAzimuth -= rotateStep;
+                        changed = true;
+                        break;
+                    case 'ArrowRight':
+                        extAzimuth += rotateStep;
+                        changed = true;
+                        break;
+                    case 'ArrowUp':
+                        extElevation = Math.min(89, extElevation + rotateStep);
+                        changed = true;
+                        break;
+                    case 'ArrowDown':
+                        extElevation = Math.max(-89, extElevation - rotateStep);
+                        changed = true;
+                        break;
+                    case '+':
+                    case '=':
+                        extZoom = Math.min(5, extZoom + zoomStep);
+                        changed = true;
+                        break;
+                    case '-':
+                    case '_':
+                        extZoom = Math.max(0.2, extZoom - zoomStep);
+                        changed = true;
+                        break;
+                    case 'Escape':
+                        exitExtractionView();
+                        return;
+                }}
+                
+                if (changed) {{
+                    e.preventDefault();
+                    if (!renderPending) {{
+                        renderPending = true;
+                        renderExtractionOverlay().finally(() => {{ renderPending = false; }});
+                    }}
+                }}
+            }});
+            
+            async function renderExtractionOverlay() {{
+                if (!viewingExtraction) return;
+                
+                // Request render with extraction
+                try {{
+                    const response = await fetch(`/garfield/render_extraction?job_id=${{viewingExtraction.job_id}}&azimuth=${{extAzimuth}}&elevation=${{extElevation}}&zoom=${{extZoom}}&width=1024&height=768`);
+                    if (response.ok) {{
+                        const blob = await response.blob();
+                        img.src = URL.createObjectURL(blob);
+                    }}
+                }} catch(e) {{
+                    console.log('Extraction render error:', e);
+                }}
+            }}
+            
+            // Override render to show extraction if viewing
+            const origUpdateRender = updateRender;
+            updateRender = function() {{
+                if (viewingExtraction) {{
+                    renderExtractionOverlay();
+                }} else {{
+                    origUpdateRender();
+                }}
+            }};
+            
             async function clearExtractions() {{
                 extractions = [];
+                viewingExtraction = null;
+                img.style.cursor = 'default';
                 document.getElementById('extraction-list').innerHTML = '';
                 document.getElementById('extractStatus').textContent = 'Click to extract 3D assets from scene';
+                updateRender();
             }}
         </script>
     </body>
@@ -1739,6 +1910,14 @@ async def local_garfield_extract(x, y, model_name, scale_level, azimuth, elevati
         if num_selected == 0:
             return {"status": "no_selection", "message": "No gaussians at click position", "job_id": job_id}
         
+        # Get selected indices and cache for viewing
+        selected_indices = np.where(selected)[0].tolist()
+        extraction_cache[job_id] = {
+            'indices': selected_indices,
+            'model_name': model_name,
+            'positions': positions[selected].tolist()
+        }
+        
         return {
             "status": "completed",
             "job_id": job_id,
@@ -1781,6 +1960,146 @@ async def garfield_status():
     except:
         pass
     return {"status": "unavailable", "message": "GARField service not connected"}
+
+
+# Store extraction data for viewing
+extraction_cache = {}
+
+
+@app.get("/garfield/render_extraction")
+async def render_extraction_view(
+    job_id: str = Query(...),
+    azimuth: float = Query(0),
+    elevation: float = Query(0),
+    zoom: float = Query(0.5),
+    width: int = Query(1024),
+    height: int = Query(768)
+):
+    """Render only the extracted gaussians with rotation"""
+    global extraction_cache
+    
+    # Get extraction indices from cache or from last extraction
+    if job_id not in extraction_cache:
+        # For local extractions, we need to re-extract with saved params
+        return Response(content=b"Extraction not in cache", status_code=404)
+    
+    ext_data = extraction_cache[job_id]
+    indices = ext_data.get('indices', [])
+    
+    if not indices:
+        return Response(content=b"No indices in extraction", status_code=400)
+    
+    # Render only the extracted gaussians
+    img = render_extracted_gaussians(indices, width, height, azimuth, elevation, zoom)
+    
+    if img is None:
+        return Response(content=b"Render failed", status_code=500)
+    
+    from PIL import Image
+    pil_img = Image.fromarray(img)
+    buffer = io.BytesIO()
+    pil_img.save(buffer, format='PNG')
+    buffer.seek(0)
+    
+    return Response(content=buffer.getvalue(), media_type="image/png")
+
+
+def render_extracted_gaussians(indices, width, height, azimuth, elevation, zoom):
+    """Render full scene with camera focused on extracted region centroid"""
+    import torch
+    import fvdb
+    
+    if gsplat is None or model_metadata is None:
+        return None
+    
+    try:
+        # Get extraction data to find centroid
+        ext_data = None
+        for job_id, data in extraction_cache.items():
+            if data.get('indices') == indices:
+                ext_data = data
+                break
+        
+        if ext_data is None or 'positions' not in ext_data:
+            return render_view(width, height, azimuth, elevation, zoom, 0)
+        
+        positions = np.array(ext_data['positions'])
+        if len(positions) == 0:
+            return render_view(width, height, azimuth, elevation, zoom, 0)
+        
+        # Calculate centroid of extracted region
+        centroid = torch.tensor(positions.mean(axis=0), dtype=torch.float32, device=device)
+        
+        # Get camera matrices from metadata
+        c2w_all = model_metadata.get('camera_to_world_matrices')
+        K_all = model_metadata.get('projection_matrices')
+        
+        if c2w_all is None or K_all is None:
+            return render_view(width, height, azimuth, elevation, zoom, 0)
+        
+        K = K_all[0].to(device).clone()
+        
+        # Apply rotation around centroid
+        az_rad = math.radians(azimuth)
+        el_rad = math.radians(elevation)
+        
+        cos_az, sin_az = math.cos(az_rad), math.sin(az_rad)
+        cos_el, sin_el = math.cos(el_rad), math.sin(el_rad)
+        
+        # Rotation matrices (GPU accelerated via torch)
+        rot_y = torch.tensor([
+            [cos_az, 0, sin_az],
+            [0, 1, 0],
+            [-sin_az, 0, cos_az]
+        ], dtype=torch.float32, device=device)
+        
+        rot_x = torch.tensor([
+            [1, 0, 0],
+            [0, cos_el, -sin_el],
+            [0, sin_el, cos_el]
+        ], dtype=torch.float32, device=device)
+        
+        rot = rot_x @ rot_y
+        
+        # Camera orbit around centroid
+        cam_distance = 1.5 / max(zoom, 0.1)
+        cam_offset = torch.tensor([0, 0, cam_distance], dtype=torch.float32, device=device)
+        cam_pos = centroid + (rot.T @ cam_offset)
+        
+        # Look at centroid
+        forward = centroid - cam_pos
+        forward = forward / (forward.norm() + 1e-8)
+        world_up = torch.tensor([0, 1, 0], dtype=torch.float32, device=device)
+        right = torch.cross(forward, world_up)
+        right = right / (right.norm() + 1e-8)
+        up = torch.cross(right, forward)
+        
+        # Build camera-to-world matrix
+        c2w = torch.eye(4, dtype=torch.float32, device=device)
+        c2w[:3, 0] = right
+        c2w[:3, 1] = up  
+        c2w[:3, 2] = -forward
+        c2w[:3, 3] = cam_pos
+        
+        # Render full scene with new camera (GPU accelerated via fVDB/CUDA)
+        with torch.cuda.amp.autocast():  # Use mixed precision for TensorRT-like acceleration
+            img_tensor = gsplat.render(c2w, K, width, height)
+        
+        img_np = (img_tensor.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+        
+        # Add border to indicate extraction view mode
+        img_np[:2, :] = [255, 200, 0]
+        img_np[-2:, :] = [255, 200, 0]
+        img_np[:, :2] = [255, 200, 0]
+        img_np[:, -2:] = [255, 200, 0]
+        
+        return img_np
+        
+    except Exception as e:
+        logger.error(f"Extraction render error: {e}")
+        import traceback
+        traceback.print_exc()
+        return render_view(width, height, azimuth, elevation, zoom, 0)
 
 
 if __name__ == "__main__":
