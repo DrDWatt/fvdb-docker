@@ -590,6 +590,46 @@ async def root():
                 border-radius: 8px;
                 max-width: 350px;
             }}
+            #garfield {{
+                position: fixed;
+                bottom: 10px;
+                right: 10px;
+                background: rgba(0,0,0,0.9);
+                padding: 15px;
+                border-radius: 8px;
+                max-width: 320px;
+                border: 1px solid #ff6b6b;
+            }}
+            #garfield h2 {{ color: #ff6b6b; margin: 0 0 10px 0; font-size: 16px; }}
+            .garfield-btn {{
+                padding: 8px 15px;
+                margin: 3px;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                font-weight: bold;
+            }}
+            .garfield-btn-primary {{ background: #ff6b6b; color: white; }}
+            .garfield-btn-success {{ background: #ffc107; color: #000; }}
+            #extraction-list {{
+                max-height: 120px;
+                overflow-y: auto;
+                margin-top: 10px;
+            }}
+            .extraction-item {{
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 6px 10px;
+                margin: 4px 0;
+                background: rgba(255,107,107,0.15);
+                border-radius: 4px;
+                font-size: 12px;
+            }}
+            .scale-slider {{
+                width: 100%;
+                margin: 8px 0;
+            }}
             #segmentation h2 {{ color: #00d4ff; margin: 0 0 10px 0; font-size: 16px; }}
             .seg-btn {{
                 padding: 8px 15px;
@@ -716,6 +756,23 @@ async def root():
         </div>
         
         <div id="hover-tooltip"></div>
+        
+        <!-- GARField 3D Asset Extraction Pane -->
+        <div id="garfield">
+            <h2>🎯 GARField 3D Extraction</h2>
+            <div>
+                <button class="garfield-btn garfield-btn-primary" id="extractBtn" onclick="toggleExtractMode()">Click to Extract</button>
+                <button class="garfield-btn" style="background:#6c757d;color:white;" onclick="clearExtractions()">Clear</button>
+            </div>
+            <div style="margin-top:10px;">
+                <label style="font-size:12px;">Scale Level: <span id="scale-val">0.5</span></label>
+                <input type="range" id="extract-scale" class="scale-slider" min="0.1" max="2.0" value="0.5" step="0.1" oninput="document.getElementById('scale-val').textContent = this.value">
+            </div>
+            <div id="extractStatus" style="margin-top:8px;font-size:12px;color:#888;">
+                Click to extract 3D assets from scene
+            </div>
+            <div id="extraction-list"></div>
+        </div>
         
         <!-- Summary Modal -->
         <div id="summary-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:2000;">
@@ -1169,6 +1226,97 @@ async def root():
                     document.getElementById('upload-status').style.color = '#dc3545';
                 }}
             }}
+            
+            // ===== GARField 3D Extraction Functions =====
+            let extractMode = false;
+            let extractions = [];
+            
+            function toggleExtractMode() {{
+                extractMode = !extractMode;
+                const btn = document.getElementById('extractBtn');
+                if (extractMode) {{
+                    btn.textContent = '🎯 Extracting...';
+                    btn.style.background = '#ffc107';
+                    btn.style.color = '#000';
+                    img.classList.add('click-mode');
+                    document.getElementById('extractStatus').textContent = 'Click on object to extract 3D asset';
+                    // Disable segment click mode if active
+                    if (clickMode) toggleClickMode();
+                }} else {{
+                    btn.textContent = 'Click to Extract';
+                    btn.style.background = '#ff6b6b';
+                    btn.style.color = 'white';
+                    img.classList.remove('click-mode');
+                    document.getElementById('extractStatus').textContent = 'Click to extract 3D assets from scene';
+                }}
+            }}
+            
+            img.addEventListener('click', async (e) => {{
+                if (!extractMode) return;
+                
+                const rect = img.getBoundingClientRect();
+                const scaleX = 1024 / rect.width;
+                const scaleY = 768 / rect.height;
+                const x = Math.round((e.clientX - rect.left) * scaleX);
+                const y = Math.round((e.clientY - rect.top) * scaleY);
+                
+                document.getElementById('extractStatus').textContent = 'Extracting 3D asset...';
+                
+                const modelSelect = document.getElementById('model-select');
+                const scaleLevel = document.getElementById('extract-scale').value;
+                
+                const formData = new FormData();
+                formData.append('x', x);
+                formData.append('y', y);
+                formData.append('model_name', modelSelect.value);
+                formData.append('scale_level', scaleLevel);
+                formData.append('azimuth', azSlider.value);
+                formData.append('elevation', elSlider.value);
+                formData.append('zoom', zoomSlider.value);
+                formData.append('width', 1024);
+                formData.append('height', 768);
+                
+                try {{
+                    const response = await fetch('/garfield/extract', {{
+                        method: 'POST',
+                        body: formData
+                    }});
+                    const data = await response.json();
+                    
+                    if (data.status === 'completed') {{
+                        extractions.push(data);
+                        updateExtractionList();
+                        document.getElementById('extractStatus').innerHTML = 
+                            `✅ Extracted ${{data.num_gaussians}} gaussians <a href="/garfield/download/${{data.job_id}}" style="color:#ffc107;">Download</a>`;
+                    }} else if (data.status === 'no_selection') {{
+                        document.getElementById('extractStatus').textContent = '⚠️ No object found at click position';
+                    }} else {{
+                        document.getElementById('extractStatus').textContent = '❌ Extraction failed: ' + (data.error || data.message);
+                    }}
+                }} catch(e) {{
+                    document.getElementById('extractStatus').textContent = '❌ Error: ' + e.message;
+                }}
+            }});
+            
+            function updateExtractionList() {{
+                const list = document.getElementById('extraction-list');
+                list.innerHTML = '';
+                extractions.forEach((ext, idx) => {{
+                    const item = document.createElement('div');
+                    item.className = 'extraction-item';
+                    item.innerHTML = `
+                        <span>Asset ${{idx + 1}}: ${{ext.num_gaussians}} pts</span>
+                        <a href="/garfield/download/${{ext.job_id}}" style="color:#ffc107;text-decoration:none;">⬇️</a>
+                    `;
+                    list.appendChild(item);
+                }});
+            }}
+            
+            async function clearExtractions() {{
+                extractions = [];
+                document.getElementById('extraction-list').innerHTML = '';
+                document.getElementById('extractStatus').textContent = 'Click to extract 3D assets from scene';
+            }}
         </script>
     </body>
     </html>
@@ -1457,6 +1605,182 @@ async def upload_model_summary(model: str = Query(...), file: UploadFile = File(
     except Exception as e:
         logger.error(f"Error uploading summary: {e}")
         return {"error": str(e)}
+
+
+# ===== GARField 3D Extraction Endpoints =====
+
+GARFIELD_SERVICE_URL = os.environ.get("GARFIELD_SERVICE_URL", "http://garfield-extraction:8006")
+
+
+@app.post("/garfield/extract")
+async def garfield_extract(
+    x: int = Form(...),
+    y: int = Form(...),
+    model_name: str = Form(...),
+    scale_level: float = Form(0.5),
+    azimuth: float = Form(0),
+    elevation: float = Form(0),
+    zoom: float = Form(1.0),
+    width: int = Form(1024),
+    height: int = Form(768)
+):
+    """Proxy extraction request to GARField service"""
+    try:
+        import requests
+        
+        # Render current view to send with extraction request
+        img = render_view(width, height, azimuth, elevation, zoom, 0)
+        img_bytes = None
+        if img is not None:
+            from PIL import Image
+            pil_img = Image.fromarray(img)
+            buffer = io.BytesIO()
+            pil_img.save(buffer, format='PNG')
+            img_bytes = buffer.getvalue()
+        
+        # Send to GARField service
+        data = {
+            'x': x,
+            'y': y,
+            'model_name': model_name,
+            'scale_level': scale_level,
+            'azimuth': azimuth,
+            'elevation': elevation,
+            'zoom': zoom,
+            'width': width,
+            'height': height
+        }
+        
+        files = {}
+        if img_bytes:
+            files['image'] = ('render.png', img_bytes, 'image/png')
+        
+        response = requests.post(
+            f"{GARFIELD_SERVICE_URL}/extract",
+            data=data,
+            files=files if files else None,
+            timeout=60
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        return {"status": "error", "error": f"GARField service error: {response.status_code}"}
+    except requests.exceptions.ConnectionError:
+        # Fallback: perform local extraction if GARField service unavailable
+        return await local_garfield_extract(x, y, model_name, scale_level, azimuth, elevation, zoom, width, height)
+    except Exception as e:
+        logger.error(f"GARField extraction error: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+async def local_garfield_extract(x, y, model_name, scale_level, azimuth, elevation, zoom, width, height):
+    """Local fallback for GARField extraction when service is unavailable"""
+    import uuid
+    from pathlib import Path
+    
+    job_id = str(uuid.uuid4())[:8]
+    
+    try:
+        # Find model file
+        model_path = None
+        for ext in ['.ply', '']:
+            test_path = MODEL_DIR / f"{model_name}{ext}"
+            if test_path.exists():
+                model_path = test_path
+                break
+        
+        if not model_path:
+            return {"status": "error", "error": f"Model not found: {model_name}", "job_id": job_id}
+        
+        # Simple extraction based on click position projection
+        from plyfile import PlyData
+        plydata = PlyData.read(str(model_path))
+        vertex = plydata['vertex']
+        
+        positions = np.stack([
+            np.array(vertex['x']),
+            np.array(vertex['y']),
+            np.array(vertex['z'])
+        ], axis=-1)
+        
+        # Project points and find those near click
+        focal = width / (2 * np.tan(np.radians(30)))
+        cx, cy = width / 2, height / 2
+        
+        az_rad = np.radians(azimuth)
+        el_rad = np.radians(elevation)
+        
+        rotated = positions.copy()
+        cos_az, sin_az = np.cos(az_rad), np.sin(az_rad)
+        temp_x = rotated[:, 0] * cos_az + rotated[:, 2] * sin_az
+        temp_z = -rotated[:, 0] * sin_az + rotated[:, 2] * cos_az
+        rotated[:, 0] = temp_x
+        rotated[:, 2] = temp_z
+        
+        cos_el, sin_el = np.cos(el_rad), np.sin(el_rad)
+        temp_y = rotated[:, 1] * cos_el - rotated[:, 2] * sin_el
+        temp_z = rotated[:, 1] * sin_el + rotated[:, 2] * cos_el
+        rotated[:, 1] = temp_y
+        rotated[:, 2] = temp_z
+        
+        z_vals = rotated[:, 2]
+        valid = z_vals > 0.1
+        
+        proj_x = np.where(valid, rotated[:, 0] / z_vals * focal + cx, -1)
+        proj_y = np.where(valid, rotated[:, 1] / z_vals * focal + cy, -1)
+        
+        # Find points near click within radius based on scale
+        radius = 50 * scale_level
+        distances = np.sqrt((proj_x - x)**2 + (proj_y - y)**2)
+        selected = (distances < radius) & valid
+        
+        num_selected = np.sum(selected)
+        
+        if num_selected == 0:
+            return {"status": "no_selection", "message": "No gaussians at click position", "job_id": job_id}
+        
+        return {
+            "status": "completed",
+            "job_id": job_id,
+            "num_gaussians": int(num_selected),
+            "model_name": model_name,
+            "click": {"x": x, "y": y},
+            "message": "Local extraction (GARField service unavailable)"
+        }
+        
+    except Exception as e:
+        logger.error(f"Local extraction error: {e}")
+        return {"status": "error", "error": str(e), "job_id": job_id}
+
+
+@app.get("/garfield/download/{job_id}")
+async def garfield_download(job_id: str):
+    """Proxy download request to GARField service"""
+    try:
+        import requests
+        response = requests.get(f"{GARFIELD_SERVICE_URL}/download/{job_id}", timeout=30, stream=True)
+        if response.status_code == 200:
+            return Response(
+                content=response.content,
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f"attachment; filename=extracted_{job_id}.ply"}
+            )
+        return JSONResponse({"error": "Download failed"}, status_code=response.status_code)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/garfield/status")
+async def garfield_status():
+    """Check GARField service status"""
+    try:
+        import requests
+        response = requests.get(f"{GARFIELD_SERVICE_URL}/health", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+    except:
+        pass
+    return {"status": "unavailable", "message": "GARField service not connected"}
 
 
 if __name__ == "__main__":

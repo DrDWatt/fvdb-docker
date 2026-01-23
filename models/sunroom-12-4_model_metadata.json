@@ -1,8 +1,0 @@
-{
-  "num_gaussians": 23430,
-  "device": "cuda:0",
-  "num_channels": 3,
-  "num_images": 3,
-  "training_steps": 50000,
-  "output_file": "/app/outputs/job_20251205_134129_621753/sunroom-12-4_model.ply"
-}

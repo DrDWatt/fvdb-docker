@@ -1,0 +1,47 @@
+# GARField 3D Asset Extraction Service
+# GPU-accelerated 3D asset extraction using hierarchical grouping
+
+services:
+  garfield-service:
+    build:
+      context: ./garfield-service
+      dockerfile: Dockerfile
+    image: garfield-service:latest
+    container_name: garfield-extraction
+    ports:
+      - "8006:8006"
+    volumes:
+      - ./models:/app/models:ro
+      - ./garfield-data/outputs:/app/outputs
+      - ./garfield-data/cache:/app/cache
+      - ./garfield-service/garfield_service.py:/app/garfield_service.py:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CUDA_VISIBLE_DEVICES=0
+      - TORCH_HOME=/app/cache
+      - MODEL_DIR=/app/models
+      - OUTPUT_DIR=/app/outputs
+      - GARFIELD_PORT=8006
+      - VIEWER_SERVICE_URL=http://fvdb-viewer:8085
+    runtime: nvidia
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    networks:
+      - workflow-net
+
+networks:
+  workflow-net:
+    external: true
