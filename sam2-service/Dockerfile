@@ -1,6 +1,6 @@
 # SAM-2 Segmentation Service
 # GPU-accelerated object segmentation using Segment Anything Model 2
-FROM nvcr.io/nvidia/pytorch:24.01-py3
+FROM nvcr.io/nvidia/pytorch:25.04-py3
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsm6 \
     libxext6 \
-    libgl1-mesa-glx \
+    libgl1 \
     curl \
     git \
     && rm -rf /var/lib/apt/lists/*
@@ -24,7 +24,8 @@ COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Install SAM-2 from Meta's repository
-RUN pip3 install git+https://github.com/facebookresearch/segment-anything-2.git
+# Use --no-build-isolation to use existing PyTorch from NGC container (avoids version conflict)
+RUN pip3 install --no-build-isolation git+https://github.com/facebookresearch/segment-anything-2.git
 
 # Create directories
 RUN mkdir -p /app/uploads /app/outputs /app/models /app/cache
