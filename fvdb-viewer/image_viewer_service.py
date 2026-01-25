@@ -42,6 +42,9 @@ sam2_loaded = False
 current_segments: Dict[str, Any] = {}
 segment_labels: Dict[int, str] = {}
 
+# Per-object summaries storage: {segment_idx: {"summary": str, "files": [], "training_data": {}}}
+object_summaries: Dict[int, Dict[str, Any]] = {}
+
 # RAG metadata from model service
 rag_metadata: Dict[str, Any] = {}
 rag_labels: List[str] = []
@@ -662,6 +665,120 @@ async def root():
                 border: 2px solid #00d4ff;
                 box-shadow: 0 4px 12px rgba(0,212,255,0.3);
             }}
+            /* Object Summary Pane - see-through/transparent */
+            #object-summary-pane {{
+                position: fixed;
+                top: 50%;
+                right: 20px;
+                transform: translateY(-50%);
+                width: 380px;
+                max-height: 70vh;
+                background: rgba(26, 26, 46, 0.85);
+                backdrop-filter: blur(10px);
+                -webkit-backdrop-filter: blur(10px);
+                border: 2px solid #00d4ff;
+                border-radius: 12px;
+                padding: 20px;
+                display: none;
+                z-index: 1500;
+                box-shadow: 0 8px 32px rgba(0, 212, 255, 0.2);
+                overflow-y: auto;
+            }}
+            #object-summary-pane.visible {{
+                display: block;
+            }}
+            #object-summary-pane h3 {{
+                color: #00d4ff;
+                margin: 0 0 15px 0;
+                font-size: 18px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }}
+            #object-summary-pane .close-btn {{
+                background: transparent;
+                border: none;
+                color: #ff6b6b;
+                font-size: 24px;
+                cursor: pointer;
+                padding: 0 5px;
+            }}
+            #object-summary-pane .object-label {{
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 15px;
+                padding: 10px;
+                background: rgba(255,255,255,0.1);
+                border-radius: 8px;
+            }}
+            #object-summary-pane .object-color {{
+                width: 24px;
+                height: 24px;
+                border-radius: 4px;
+            }}
+            #object-summary-pane .summary-section {{
+                margin: 15px 0;
+            }}
+            #object-summary-pane .summary-section h4 {{
+                color: #aaa;
+                font-size: 12px;
+                text-transform: uppercase;
+                margin: 0 0 8px 0;
+            }}
+            #object-summary-pane textarea {{
+                width: 100%;
+                min-height: 120px;
+                background: rgba(0,0,0,0.5);
+                border: 1px solid #444;
+                border-radius: 6px;
+                color: white;
+                padding: 10px;
+                font-family: inherit;
+                resize: vertical;
+            }}
+            #object-summary-pane .file-upload {{
+                margin: 10px 0;
+            }}
+            #object-summary-pane .file-upload input {{
+                color: #aaa;
+            }}
+            #object-summary-pane .btn-row {{
+                display: flex;
+                gap: 10px;
+                margin-top: 15px;
+            }}
+            #object-summary-pane .btn {{
+                flex: 1;
+                padding: 10px 15px;
+                border: none;
+                border-radius: 6px;
+                cursor: pointer;
+                font-weight: bold;
+                transition: opacity 0.2s;
+            }}
+            #object-summary-pane .btn:hover {{
+                opacity: 0.85;
+            }}
+            #object-summary-pane .btn-save {{
+                background: #28a745;
+                color: white;
+            }}
+            #object-summary-pane .btn-upload {{
+                background: #17a2b8;
+                color: white;
+            }}
+            #object-summary-pane .uploaded-files {{
+                margin-top: 10px;
+                font-size: 12px;
+            }}
+            #object-summary-pane .uploaded-files li {{
+                padding: 5px 0;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }}
+            .object-clickable {{
+                cursor: pointer;
+            }}
             .label-item {{
                 display: flex;
                 align-items: center;
@@ -750,12 +867,44 @@ async def root():
                 <button class="seg-btn" style="background:#17a2b8;color:white;" onclick="showUploadModal()">⬆️ Upload Info</button>
             </div>
             <div id="segStatus" style="margin-top:10px;font-size:12px;color:#888;">
-                Click "Auto Segment" to detect objects
+                Click "Auto Segment" to detect objects<br>
+                <span style="color:#00d4ff;">Double-click objects to view/edit summaries</span>
             </div>
             <div id="labels-list"></div>
         </div>
         
         <div id="hover-tooltip"></div>
+        
+        <!-- Object Summary Pane - see-through for per-object summaries -->
+        <div id="object-summary-pane">
+            <h3>
+                <span>📋 Object Summary</span>
+                <button class="close-btn" onclick="closeObjectSummary()">&times;</button>
+            </h3>
+            <div class="object-label">
+                <div class="object-color" id="obj-summary-color"></div>
+                <input type="text" id="obj-summary-name" class="label-input" placeholder="Object name..." style="flex:1;">
+            </div>
+            <div class="summary-section">
+                <h4>Description / Notes</h4>
+                <textarea id="obj-summary-text" placeholder="Enter summary, notes, or description for this object..."></textarea>
+            </div>
+            <div class="summary-section">
+                <h4>Upload Documents</h4>
+                <div class="file-upload">
+                    <input type="file" id="obj-summary-file" accept=".pdf,.txt,.json,.md,.doc,.docx,.png,.jpg" multiple>
+                </div>
+                <ul class="uploaded-files" id="obj-uploaded-files"></ul>
+            </div>
+            <div class="summary-section">
+                <h4>Training Data</h4>
+                <div style="font-size:12px;color:#888;" id="obj-training-status">No training data associated</div>
+            </div>
+            <div class="btn-row">
+                <button class="btn btn-save" onclick="saveObjectSummary()">💾 Save</button>
+                <button class="btn btn-upload" onclick="uploadObjectFiles()">⬆️ Upload Files</button>
+            </div>
+        </div>
         
         <!-- GARField 3D Asset Extraction Pane -->
         <div id="garfield">
@@ -1226,6 +1375,215 @@ async def root():
                     document.getElementById('upload-status').style.color = '#dc3545';
                 }}
             }}
+            
+            // ===== Per-Object Summary Functions =====
+            let currentObjectIdx = null;
+            const objectSummaries = {{}};  // Local cache of object summaries
+            
+            function openObjectSummary(segmentIdx) {{
+                currentObjectIdx = segmentIdx;
+                const pane = document.getElementById('object-summary-pane');
+                const color = segColors[segmentIdx % segColors.length];
+                const label = segmentLabelMap[segmentIdx] || `Object ${{segmentIdx}}`;
+                
+                // Set object color and name
+                document.getElementById('obj-summary-color').style.background = color;
+                document.getElementById('obj-summary-name').value = label;
+                
+                // Load existing summary if any
+                const summary = objectSummaries[segmentIdx] || {{}};
+                document.getElementById('obj-summary-text').value = summary.text || '';
+                
+                // Show uploaded files
+                const filesList = document.getElementById('obj-uploaded-files');
+                filesList.innerHTML = '';
+                if (summary.files && summary.files.length > 0) {{
+                    summary.files.forEach(f => {{
+                        const li = document.createElement('li');
+                        li.textContent = f.name;
+                        filesList.appendChild(li);
+                    }});
+                }}
+                
+                // Show training data status
+                const trainingStatus = document.getElementById('obj-training-status');
+                if (summary.training_data && Object.keys(summary.training_data).length > 0) {{
+                    trainingStatus.innerHTML = `<span style="color:#28a745;">✓ Training data linked</span>`;
+                }} else {{
+                    trainingStatus.textContent = 'No training data associated';
+                }}
+                
+                // Show the pane
+                pane.classList.add('visible');
+                
+                // Fetch from server
+                fetchObjectSummary(segmentIdx);
+            }}
+            
+            function closeObjectSummary() {{
+                document.getElementById('object-summary-pane').classList.remove('visible');
+                currentObjectIdx = null;
+            }}
+            
+            async function fetchObjectSummary(segmentIdx) {{
+                try {{
+                    const response = await fetch(`/object_summary/${{segmentIdx}}`);
+                    const data = await response.json();
+                    if (data.summary) {{
+                        objectSummaries[segmentIdx] = data.summary;
+                        document.getElementById('obj-summary-text').value = data.summary.text || '';
+                        
+                        const filesList = document.getElementById('obj-uploaded-files');
+                        filesList.innerHTML = '';
+                        if (data.summary.files && data.summary.files.length > 0) {{
+                            data.summary.files.forEach((f, idx) => {{
+                                const li = document.createElement('li');
+                                li.style.cursor = 'pointer';
+                                li.innerHTML = `📄 <a href="/object_summary/${{segmentIdx}}/file/${{f.idx !== undefined ? f.idx : idx}}" target="_blank" style="color:#00d4ff;text-decoration:underline;">${{f.name}}</a> <small style="color:#888;">(${{f.size || 'unknown'}})</small>`;
+                                filesList.appendChild(li);
+                            }});
+                        }}
+                        
+                        // Update training data status
+                        updateTrainingStatus(data.summary);
+                    }}
+                }} catch(e) {{
+                    console.log('Could not fetch object summary:', e);
+                }}
+            }}
+            
+            function updateTrainingStatus(summary) {{
+                const trainingStatus = document.getElementById('obj-training-status');
+                if (summary.training_data && Object.keys(summary.training_data).length > 0) {{
+                    const td = summary.training_data;
+                    if (td.files_count) {{
+                        trainingStatus.innerHTML = `<span style="color:#28a745;">✓ ${{td.files_count}} document(s) uploaded</span><br><small style="color:#888;">Last: ${{td.last_upload || 'N/A'}}</small>`;
+                    }} else if (td.job_id) {{
+                        trainingStatus.innerHTML = `<span style="color:#28a745;">✓ Training job: ${{td.job_id}}</span>`;
+                    }} else {{
+                        trainingStatus.innerHTML = `<span style="color:#28a745;">✓ Training data linked</span>`;
+                    }}
+                }} else if (summary.files && summary.files.length > 0) {{
+                    trainingStatus.innerHTML = `<span style="color:#ffc107;">⚠ ${{summary.files.length}} file(s) - pending training link</span>`;
+                }} else {{
+                    trainingStatus.textContent = 'No training data associated';
+                }}
+            }}
+            
+            async function saveObjectSummary() {{
+                if (currentObjectIdx === null) return;
+                
+                const label = document.getElementById('obj-summary-name').value;
+                const text = document.getElementById('obj-summary-text').value;
+                
+                // Update label
+                await updateLabel(currentObjectIdx, label);
+                
+                // Save summary
+                const formData = new FormData();
+                formData.append('segment_idx', currentObjectIdx);
+                formData.append('text', text);
+                formData.append('label', label);
+                
+                try {{
+                    const response = await fetch('/object_summary', {{
+                        method: 'POST',
+                        body: formData
+                    }});
+                    const data = await response.json();
+                    
+                    if (data.status === 'ok') {{
+                        objectSummaries[currentObjectIdx] = {{ text, label, files: objectSummaries[currentObjectIdx]?.files || [] }};
+                        
+                        // Flash save button green
+                        const btn = document.querySelector('#object-summary-pane .btn-save');
+                        btn.style.background = '#28a745';
+                        btn.textContent = '✓ Saved!';
+                        setTimeout(() => {{
+                            btn.style.background = '#28a745';
+                            btn.textContent = '💾 Save';
+                        }}, 1500);
+                    }}
+                }} catch(e) {{
+                    console.error('Save failed:', e);
+                }}
+            }}
+            
+            async function uploadObjectFiles() {{
+                if (currentObjectIdx === null) return;
+                
+                const fileInput = document.getElementById('obj-summary-file');
+                if (!fileInput.files || fileInput.files.length === 0) {{
+                    alert('Please select files to upload');
+                    return;
+                }}
+                
+                const formData = new FormData();
+                formData.append('segment_idx', currentObjectIdx);
+                for (let i = 0; i < fileInput.files.length; i++) {{
+                    formData.append('files', fileInput.files[i]);
+                }}
+                
+                // Show uploading status
+                const uploadBtn = document.querySelector('#object-summary-pane .btn-upload');
+                uploadBtn.textContent = '⏳ Uploading...';
+                uploadBtn.disabled = true;
+                
+                try {{
+                    const response = await fetch('/object_summary/upload', {{
+                        method: 'POST',
+                        body: formData
+                    }});
+                    const data = await response.json();
+                    
+                    if (data.status === 'ok') {{
+                        // Update training status immediately
+                        if (data.training_data) {{
+                            updateTrainingStatus({{ training_data: data.training_data }});
+                        }}
+                        
+                        // Refresh file list
+                        fetchObjectSummary(currentObjectIdx);
+                        fileInput.value = '';
+                        
+                        // Flash success
+                        uploadBtn.textContent = '✓ Uploaded!';
+                        uploadBtn.style.background = '#28a745';
+                        setTimeout(() => {{
+                            uploadBtn.textContent = '⬆️ Upload Files';
+                            uploadBtn.style.background = '#17a2b8';
+                            uploadBtn.disabled = false;
+                        }}, 1500);
+                    }}
+                }} catch(e) {{
+                    console.error('Upload failed:', e);
+                    uploadBtn.textContent = '⬆️ Upload Files';
+                    uploadBtn.disabled = false;
+                }}
+            }}
+            
+            // Click on object in rendered image to open summary
+            img.addEventListener('dblclick', async (e) => {{
+                if (!showSegments || segmentMasks.length === 0) return;
+                if (clickMode || extractMode) return;  // Don't interfere with other modes
+                
+                const rect = img.getBoundingClientRect();
+                const scaleX = 1024 / rect.width;
+                const scaleY = 768 / rect.height;
+                const imgX = Math.round((e.clientX - rect.left) * scaleX);
+                const imgY = Math.round((e.clientY - rect.top) * scaleY);
+                
+                const x = Math.floor(imgX / maskScale);
+                const y = Math.floor(imgY / maskScale);
+                
+                // Find which segment was clicked
+                for (let i = 0; i < segmentMasks.length; i++) {{
+                    if (segmentMasks[i] && segmentMasks[i][y] && segmentMasks[i][y][x]) {{
+                        openObjectSummary(i);
+                        return;
+                    }}
+                }}
+            }});
             
             // ===== GARField 3D Extraction Functions =====
             let extractMode = false;
@@ -1776,6 +2134,153 @@ async def upload_model_summary(model: str = Query(...), file: UploadFile = File(
     except Exception as e:
         logger.error(f"Error uploading summary: {e}")
         return {"error": str(e)}
+
+
+# ===== Per-Object Summary Endpoints =====
+
+@app.get("/object_summary/{segment_idx}")
+async def get_object_summary(segment_idx: int):
+    """Get summary for a specific segmented object"""
+    summary = object_summaries.get(segment_idx, {})
+    label = segment_labels.get(segment_idx, f"Object {segment_idx}")
+    
+    # Create a serializable copy (exclude binary file data, include file index)
+    if summary:
+        serializable_summary = {
+            "text": summary.get("text", ""),
+            "label": summary.get("label", label),
+            "training_data": summary.get("training_data", {}),
+            "files": [
+                {"idx": i, "name": f.get("name"), "size": f.get("size"), "content_type": f.get("content_type")}
+                for i, f in enumerate(summary.get("files", []))
+            ]
+        }
+    else:
+        serializable_summary = None
+    
+    return {
+        "segment_idx": segment_idx,
+        "label": label,
+        "summary": serializable_summary
+    }
+
+
+@app.post("/object_summary")
+async def save_object_summary(
+    segment_idx: int = Form(...),
+    text: str = Form(""),
+    label: str = Form("")
+):
+    """Save summary text for a specific segmented object"""
+    global object_summaries, segment_labels
+    
+    # Initialize if not exists
+    if segment_idx not in object_summaries:
+        object_summaries[segment_idx] = {"text": "", "files": [], "training_data": {}}
+    
+    object_summaries[segment_idx]["text"] = text
+    object_summaries[segment_idx]["label"] = label
+    
+    # Also update the segment label
+    if label:
+        segment_labels[segment_idx] = label
+    
+    logger.info(f"Saved summary for object {segment_idx}: label={label}, text={text[:50] if text else 'empty'}...")
+    return {"status": "ok", "segment_idx": segment_idx, "text_saved": bool(text)}
+
+
+@app.post("/object_summary/upload")
+async def upload_object_files(
+    segment_idx: int = Form(...),
+    files: List[UploadFile] = File(...)
+):
+    """Upload files associated with a specific segmented object for RAG training"""
+    global object_summaries
+    
+    # Initialize if not exists
+    if segment_idx not in object_summaries:
+        object_summaries[segment_idx] = {"text": "", "files": [], "training_data": {}}
+    
+    uploaded = []
+    for file in files:
+        content = await file.read()
+        file_info = {
+            "name": file.filename,
+            "content_type": file.content_type,
+            "size": f"{len(content) / 1024:.1f} KB",
+            "data": content  # Store in memory for now
+        }
+        object_summaries[segment_idx]["files"].append(file_info)
+        uploaded.append({"name": file.filename, "size": file_info["size"]})
+    
+    # Update training data status when files are uploaded
+    total_files = len(object_summaries[segment_idx]["files"])
+    object_summaries[segment_idx]["training_data"] = {
+        "files_count": total_files,
+        "last_upload": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "documents_uploaded"
+    }
+    
+    logger.info(f"Uploaded {len(uploaded)} files for object {segment_idx}, total: {total_files}")
+    return {"status": "ok", "segment_idx": segment_idx, "uploaded": uploaded, "training_data": object_summaries[segment_idx]["training_data"]}
+
+
+@app.get("/object_summary/{segment_idx}/file/{file_idx}")
+async def get_object_file(segment_idx: int, file_idx: int):
+    """Serve an uploaded file for viewing"""
+    if segment_idx not in object_summaries:
+        return Response(content="Object not found", status_code=404)
+    
+    files = object_summaries[segment_idx].get("files", [])
+    if file_idx < 0 or file_idx >= len(files):
+        return Response(content="File not found", status_code=404)
+    
+    file_info = files[file_idx]
+    content = file_info.get("data", b"")
+    content_type = file_info.get("content_type", "application/octet-stream")
+    filename = file_info.get("name", "file")
+    
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Content-Disposition": f"inline; filename=\"{filename}\""}
+    )
+
+
+@app.get("/object_summaries")
+async def get_all_object_summaries():
+    """Get summaries for all segmented objects"""
+    result = {}
+    for idx, summary in object_summaries.items():
+        result[idx] = {
+            "label": segment_labels.get(idx, f"Object {idx}"),
+            "text": summary.get("text", ""),
+            "files_count": len(summary.get("files", [])),
+            "has_training": bool(summary.get("training_data"))
+        }
+    return {"summaries": result, "count": len(result)}
+
+
+@app.post("/object_summary/{segment_idx}/training")
+async def link_training_data(
+    segment_idx: int,
+    training_job_id: str = Form(None),
+    model_path: str = Form(None)
+):
+    """Link training data to a specific segmented object"""
+    global object_summaries
+    
+    if segment_idx not in object_summaries:
+        object_summaries[segment_idx] = {"text": "", "files": [], "training_data": {}}
+    
+    object_summaries[segment_idx]["training_data"] = {
+        "job_id": training_job_id,
+        "model_path": model_path,
+        "linked_at": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    logger.info(f"Linked training data for object {segment_idx}: job={training_job_id}")
+    return {"status": "ok", "segment_idx": segment_idx}
 
 
 # ===== GARField 3D Extraction Endpoints =====
