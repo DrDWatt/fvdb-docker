@@ -1,0 +1,179 @@
+# =============================================================================
+# ISAAC ROSBAG WORKFLOW - Docker Compose
+# =============================================================================
+# SVO to ROSBAG conversion workflow for NVIDIA ISAAC Sim and ISAAC Lab
+#
+# Usage:
+#   docker compose -f docker-compose.isaac-rosbag.yml up -d
+#
+# Service Ports:
+#   8009 - SVO to ROSBAG Converter (Main Workflow Entry)
+#   8010 - ISAAC Sim
+#   8011 - ISAAC Lab
+#   8012 - ISAAC Viewer (with SAM-2 & GARField integration)
+#
+# Swagger API Documentation:
+#   http://localhost:8009/api - SVO Converter API
+#   http://localhost:8010/api - ISAAC Sim API
+#   http://localhost:8011/api - ISAAC Lab API
+#   http://localhost:8012/api - ISAAC Viewer API
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # SVO TO ROSBAG CONVERTER
+  # Converts ZED X stereo camera SVO files to ROSBAG format
+  # Swagger: http://localhost:8009/api
+  # ===========================================================================
+  svo-converter:
+    build:
+      context: ./isaac-rosbag-service
+      dockerfile: Dockerfile
+    image: svo-rosbag-converter:latest
+    container_name: svo-converter
+    ports:
+      - "8009:8009"
+    volumes:
+      - ./isaac-data/svo-uploads:/app/uploads
+      - ./isaac-data/rosbags:/app/outputs
+      - ./isaac-data/processing:/app/processing
+      - ./isaac-rosbag-service/svo_converter_service.py:/app/svo_converter_service.py:ro
+    environment:
+      - UPLOAD_DIR=/app/uploads
+      - OUTPUT_DIR=/app/outputs
+      - PROCESSING_DIR=/app/processing
+      - PORT=8009
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8009/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - isaac-net
+
+  # ===========================================================================
+  # ISAAC SIM SERVICE
+  # Robotics simulation platform built on NVIDIA Omniverse
+  # Swagger: http://localhost:8010/api
+  # ===========================================================================
+  isaac-sim:
+    build:
+      context: ./isaac-sim-service
+      dockerfile: Dockerfile
+    image: isaac-sim-service:latest
+    container_name: isaac-sim
+    ports:
+      - "8010:8010"
+    volumes:
+      - ./isaac-data/rosbags:/app/rosbags:ro
+      - ./isaac-data/scenes:/app/scenes
+      - ./isaac-data/sim-outputs:/app/outputs
+      - ./isaac-sim-service/isaac_sim_service.py:/app/isaac_sim_service.py:ro
+    environment:
+      - ROSBAG_DIR=/app/rosbags
+      - SCENE_DIR=/app/scenes
+      - OUTPUT_DIR=/app/outputs
+      - PORT=8010
+    restart: unless-stopped
+    depends_on:
+      - svo-converter
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - isaac-net
+
+  # ===========================================================================
+  # ISAAC LAB SERVICE
+  # Reinforcement learning framework for robotics
+  # Swagger: http://localhost:8011/api
+  # ===========================================================================
+  isaac-lab:
+    build:
+      context: ./isaac-lab-service
+      dockerfile: Dockerfile
+    image: isaac-lab-service:latest
+    container_name: isaac-lab
+    ports:
+      - "8011:8011"
+    volumes:
+      - ./isaac-data/checkpoints:/app/checkpoints
+      - ./isaac-data/logs:/app/logs
+      - ./isaac-data/lab-outputs:/app/outputs
+      - ./isaac-lab-service/isaac_lab_service.py:/app/isaac_lab_service.py:ro
+    environment:
+      - CHECKPOINT_DIR=/app/checkpoints
+      - LOG_DIR=/app/logs
+      - OUTPUT_DIR=/app/outputs
+      - PORT=8011
+    restart: unless-stopped
+    depends_on:
+      - isaac-sim
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - isaac-net
+
+  # ===========================================================================
+  # ISAAC VIEWER
+  # Visualization with SAM-2 segmentation and GARField extraction
+  # Swagger: http://localhost:8012/api
+  # ===========================================================================
+  isaac-viewer:
+    build:
+      context: ./isaac-viewer
+      dockerfile: Dockerfile
+    image: isaac-viewer:latest
+    container_name: isaac-viewer
+    ports:
+      - "8012:8012"
+    volumes:
+      - ./isaac-data/rosbags:/app/rosbags:ro
+      - ./isaac-data/viewer-outputs:/app/outputs
+      - ./isaac-data/frames:/app/frames
+      - ./isaac-viewer/isaac_viewer_service.py:/app/isaac_viewer_service.py:ro
+    environment:
+      - ROSBAG_DIR=/app/rosbags
+      - OUTPUT_DIR=/app/outputs
+      - FRAME_DIR=/app/frames
+      - PORT=8012
+      - SAM2_SERVICE_URL=http://sam2-segmentation:8004
+      - GARFIELD_SERVICE_URL=http://garfield-extraction:8006
+    restart: unless-stopped
+    depends_on:
+      - svo-converter
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8012/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - isaac-net
+      - workflow-net
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  isaac-net:
+    driver: bridge
+    name: isaac-rosbag-net
+  workflow-net:
+    external: true
+    name: fvdb-workflow-net
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  isaac-data:
