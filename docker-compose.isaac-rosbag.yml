@@ -10,7 +10,8 @@
 #   8009 - SVO to ROSBAG Converter (Main Workflow Entry)
 #   8010 - ISAAC Sim
 #   8011 - ISAAC Lab
-#   8012 - ISAAC Viewer (with SAM-2 & GARField integration)
+#   8012 - ISAAC Viewer (SVO to Gaussian Splat workflow)
+#   8014 - cuSFM Service (GPU-accelerated SfM with TensorRT)
 #
 # Swagger API Documentation:
 #   http://localhost:8009/api - SVO Converter API
@@ -125,7 +126,7 @@ services:
 
   # ===========================================================================
   # ISAAC VIEWER
-  # Visualization with SAM-2 segmentation and GARField extraction
+  # SVO to Gaussian Splat workflow with cuSFM (GPU-accelerated SfM)
   # Swagger: http://localhost:8012/api
   # ===========================================================================
   isaac-viewer:
@@ -137,26 +138,67 @@ services:
     ports:
       - "8012:8012"
     volumes:
-      - ./isaac-data/rosbags:/app/rosbags:ro
+      - ./isaac-data/svo-uploads:/app/svo
+      - ./isaac-data/rosbags:/app/rosbags
       - ./isaac-data/viewer-outputs:/app/outputs
       - ./isaac-data/frames:/app/frames
       - ./isaac-viewer/isaac_viewer_service.py:/app/isaac_viewer_service.py:ro
     environment:
+      - SVO_DIR=/app/svo
       - ROSBAG_DIR=/app/rosbags
       - OUTPUT_DIR=/app/outputs
       - FRAME_DIR=/app/frames
       - PORT=8012
-      - SAM2_SERVICE_URL=http://sam2-segmentation:8004
-      - GARFIELD_SERVICE_URL=http://garfield-extraction:8006
+      - COLMAP_SERVICE_URL=http://colmap-processor:8003
+      - CUSFM_SERVICE_URL=http://cusfm-service:8014
+      - TRAINING_SERVICE_URL=http://fvdb-training-gpu:8000
+      - FVDB_VIEWER_URL=http://fvdb-viewer:8085
+      - DEPTH_SERVICE_URL=http://host.docker.internal:8013
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     depends_on:
       - svo-converter
+      - cusfm-service
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8012/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
+    networks:
+      - isaac-net
+      - workflow-net
+
+  # ===========================================================================
+  # cuSFM SERVICE
+  # GPU-accelerated Structure from Motion using NVIDIA cuSFM with TensorRT
+  # Swagger: http://localhost:8014/api
+  # ===========================================================================
+  cusfm-service:
+    build:
+      context: ./cusfm-service
+      dockerfile: Dockerfile
+    container_name: cusfm-service
+    runtime: nvidia
+    ports:
+      - "8014:8014"
+    volumes:
+      - ./isaac-data/frames:/app/frames
+      - ./cusfm-data/processing:/app/processing
+      - ./cusfm-data/outputs:/app/outputs
+      - ./cusfm-data/temp:/app/temp
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYCUSFM_DIR=/app/pycusfm/pycusfm
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8014/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     networks:
       - isaac-net
       - workflow-net
@@ -170,7 +212,7 @@ networks:
     name: isaac-rosbag-net
   workflow-net:
     external: true
-    name: fvdb-workflow-net
+    name: workflow-net
 
 # =============================================================================
 # VOLUMES
