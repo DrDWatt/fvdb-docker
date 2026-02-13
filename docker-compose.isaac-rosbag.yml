@@ -149,10 +149,10 @@ services:
       - OUTPUT_DIR=/app/outputs
       - FRAME_DIR=/app/frames
       - PORT=8012
-      - COLMAP_SERVICE_URL=http://colmap-processor:8003
+      - COLMAP_SERVICE_URL=http://host.docker.internal:8003
       - CUSFM_SERVICE_URL=http://cusfm-service:8014
-      - TRAINING_SERVICE_URL=http://fvdb-training-gpu:8000
-      - FVDB_VIEWER_URL=http://fvdb-viewer:8085
+      - TRAINING_SERVICE_URL=http://host.docker.internal:8000
+      - FVDB_VIEWER_URL=http://host.docker.internal:8085
       - DEPTH_SERVICE_URL=http://host.docker.internal:8013
     extra_hosts:
       - "host.docker.internal:host-gateway"

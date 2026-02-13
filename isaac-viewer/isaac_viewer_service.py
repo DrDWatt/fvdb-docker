@@ -703,8 +703,8 @@ def get_ui_html():
                         <span>Depth</span>
                     </div>
                     <div class="status-indicator">
-                        <span class="status-dot" id="cusfmStatus"></span>
-                        <span>cuSFM</span>
+                        <span class="status-dot" id="colmapStatus"></span>
+                        <span>COLMAP</span>
                     </div>
                     <div class="status-indicator">
                         <span class="status-dot" id="trainingStatus"></span>
@@ -717,7 +717,7 @@ def get_ui_html():
             <!-- Right Panel: Workflow -->
             <div class="panel">
                 <h2>� SVO to Gaussian Splat</h2>
-                <p style="font-size: 0.8em; color: #888; margin-bottom: 10px;">Extract frames, run cuSFM, train splat</p>
+                <p style="font-size: 0.8em; color: #888; margin-bottom: 10px;">Extract frames, run COLMAP, train splat</p>
                 
                 <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; margin-bottom: 12px;">
                     <div class="workflow-param">
@@ -755,7 +755,7 @@ def get_ui_html():
                         <div class="workflow-progress"><div class="fill" id="stepExtractProgress" style="width: 0%;"></div></div>
                     </div>
                     <div class="workflow-step" id="stepColmap">
-                        <div class="step-title">2. cuSFM (GPU-accelerated SfM)</div>
+                        <div class="step-title">2. COLMAP (Structure from Motion)</div>
                         <div class="step-detail" id="stepColmapDetail">Waiting...</div>
                         <div class="workflow-progress"><div class="fill" id="stepColmapProgress" style="width: 0%;"></div></div>
                     </div>
@@ -797,7 +797,6 @@ def get_ui_html():
         // Dynamic host for remote access
         const API_HOST = window.location.origin;
         const COLMAP_API = `http://${window.location.hostname}:8003`;
-        const CUSFM_API = `http://${window.location.hostname}:8014`;
         const TRAINING_API = `http://${window.location.hostname}:8000`;
         const VIEWER_URL = `http://${window.location.hostname}:8085`;
         
@@ -820,13 +819,13 @@ def get_ui_html():
             } catch(e) {
                 document.getElementById('depthStatus').className = 'status-dot warning';
             }
-            // Check cuSFM
+            // Check COLMAP
             try {
-                const resp = await fetch(CUSFM_API + '/health');
+                const resp = await fetch(COLMAP_API + '/health');
                 const data2 = await resp.json();
-                document.getElementById('cusfmStatus').className = (resp.ok && data2.cusfm_available) ? 'status-dot' : 'status-dot warning';
+                document.getElementById('colmapStatus').className = (resp.ok && data2.colmap_available) ? 'status-dot' : 'status-dot warning';
             } catch(e) {
-                document.getElementById('cusfmStatus').className = 'status-dot error';
+                document.getElementById('colmapStatus').className = 'status-dot error';
             }
             // Check Training
             try {
@@ -1892,7 +1891,7 @@ async def workflow_list():
 
 async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
                             num_training_steps: int, include_depth: bool):
-    """Background task: full SVO -> cuSFM -> Train -> View pipeline"""
+    """Background task: full SVO -> COLMAP -> Train -> View pipeline"""
     wf = active_workflows[workflow_id]
     
     try:
@@ -1949,8 +1948,8 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
         if num_extracted < 3:
             raise Exception(f"Only {num_extracted} frames extracted, need at least 3")
         
-        # === Step 2: Send to cuSFM service (GPU-accelerated SfM) ===
-        wf["current_step"] = "Sending frames to cuSFM"
+        # === Step 2: Send to COLMAP service (Structure from Motion) ===
+        wf["current_step"] = "Sending frames to COLMAP"
         wf["progress"] = 0.22
         
         # Create a ZIP of the images for upload
@@ -1959,16 +1958,18 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
             for img_file in sorted(images_dir.glob("*.jpg")):
                 zf.write(img_file, f"images/{img_file.name}")
         
-        # Upload ZIP to cuSFM service
+        # Upload ZIP to COLMAP service photos-to-model workflow
         with open(zip_path, 'rb') as f:
             files = {'files': ('images.zip', f, 'application/zip')}
             data = {
                 'dataset_id': dataset_name,
-                'feature_type': 'aliked',
+                'camera_model': 'SIMPLE_RADIAL',
+                'matcher': 'sequential',
+                'num_training_steps': str(num_training_steps),
             }
             
-            cusfm_resp = requests.post(
-                f"{CUSFM_SERVICE_URL}/process",
+            colmap_resp = requests.post(
+                f"{COLMAP_SERVICE_URL}/workflow/photos-to-model",
                 files=files,
                 data=data,
                 timeout=60
@@ -1976,17 +1977,17 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
         
         zip_path.unlink(missing_ok=True)
         
-        if cusfm_resp.status_code != 200:
-            raise Exception(f"cuSFM service returned {cusfm_resp.status_code}: {cusfm_resp.text[:200]}")
+        if colmap_resp.status_code != 200:
+            raise Exception(f"COLMAP service returned {colmap_resp.status_code}: {colmap_resp.text[:200]}")
         
-        cusfm_data = cusfm_resp.json()
-        cusfm_workflow_id = cusfm_data.get("workflow_id", "")
-        wf["cusfm_workflow_id"] = cusfm_workflow_id
+        colmap_data = colmap_resp.json()
+        colmap_workflow_id = colmap_data.get("workflow_id", "")
+        wf["colmap_workflow_id"] = colmap_workflow_id
         wf["progress"] = 0.25
-        wf["current_step"] = "cuSFM processing started (GPU-accelerated)"
-        logger.info(f"[{workflow_id}] cuSFM workflow: {cusfm_workflow_id}")
+        wf["current_step"] = "COLMAP processing started"
+        logger.info(f"[{workflow_id}] COLMAP workflow: {colmap_workflow_id}")
         
-        # Poll cuSFM status until complete
+        # Poll COLMAP status until complete
         max_wait = 3600  # 1 hour max
         elapsed = 0
         while elapsed < max_wait:
@@ -1995,30 +1996,41 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
             
             try:
                 status_resp = requests.get(
-                    f"{CUSFM_SERVICE_URL}/status/{cusfm_workflow_id}",
+                    f"{COLMAP_SERVICE_URL}/workflow/status/{colmap_workflow_id}",
                     timeout=10
                 )
                 if status_resp.status_code == 200:
-                    cusfm_status = status_resp.json()
-                    cusfm_progress = cusfm_status.get("progress", 0)
-                    cusfm_step = cusfm_status.get("current_step", "")
+                    colmap_status = status_resp.json()
+                    colmap_progress = colmap_status.get("progress", 0)
+                    colmap_step = colmap_status.get("current_step", "")
                     
-                    # Map cuSFM progress (0-1) to our range (0.25-0.7)
-                    wf["progress"] = 0.25 + cusfm_progress * 0.45
-                    wf["current_step"] = f"cuSFM: {cusfm_step}"
+                    # Map COLMAP progress (0-1) to our range (0.25-0.7)
+                    wf["progress"] = 0.25 + colmap_progress * 0.45
+                    wf["current_step"] = f"COLMAP: {colmap_step}"
                     
-                    if cusfm_status.get("status") == "completed":
+                    if colmap_status.get("status") in ("completed", "training", "completed_colmap_only"):
                         wf["progress"] = 0.7
-                        wf["current_step"] = "cuSFM complete - sparse output ready"
-                        logger.info(f"[{workflow_id}] cuSFM complete")
+                        wf["current_step"] = "COLMAP complete - sparse output ready"
+                        logger.info(f"[{workflow_id}] COLMAP complete")
                         break
-                    elif cusfm_status.get("status") == "failed":
-                        raise Exception(f"cuSFM failed: {cusfm_status.get('error', 'Unknown')}")
+                    elif colmap_status.get("status") == "failed":
+                        raise Exception(f"COLMAP failed: {colmap_status.get('error', 'Unknown')}")
             except requests.exceptions.ConnectionError:
-                logger.warning(f"[{workflow_id}] cuSFM status check failed, retrying...")
+                logger.warning(f"[{workflow_id}] COLMAP status check failed, retrying...")
         
-        # === Step 3: Training ===
+        # === Step 3: Training (may have been started by COLMAP workflow) ===
+        # Check if COLMAP workflow already triggered training
         training_job_id = None
+        try:
+            status_resp = requests.get(
+                f"{COLMAP_SERVICE_URL}/workflow/status/{colmap_workflow_id}",
+                timeout=10
+            )
+            if status_resp.status_code == 200:
+                training_job_id = status_resp.json().get("training_job_id")
+        except Exception:
+            pass
+        
         if not training_job_id:
             # Trigger training manually
             wf["current_step"] = "Starting Gaussian Splat training"
