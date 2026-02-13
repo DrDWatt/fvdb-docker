@@ -502,5 +502,105 @@ async def delete_extraction(job_id: str):
     return {"status": "deleted", "job_id": job_id}
 
 
+# ===== Per-Extraction RAG Metadata Endpoints =====
+
+extraction_metadata: Dict[str, Any] = {}
+
+
+@app.get("/extraction_metadata/{job_id}")
+async def get_extraction_metadata(job_id: str):
+    """Get RAG metadata for a specific extraction"""
+    meta = extraction_metadata.get(job_id, {})
+    if meta:
+        serializable = {
+            "text": meta.get("text", ""),
+            "label": meta.get("label", ""),
+            "training_data": meta.get("training_data", {}),
+            "files": [
+                {"idx": i, "name": f.get("name"), "size": f.get("size"), "content_type": f.get("content_type")}
+                for i, f in enumerate(meta.get("files", []))
+            ]
+        }
+    else:
+        serializable = None
+    return {"job_id": job_id, "metadata": serializable}
+
+
+@app.post("/extraction_metadata")
+async def save_extraction_metadata(
+    job_id: str = Form(...),
+    text: str = Form(""),
+    label: str = Form("")
+):
+    """Save RAG metadata for a specific extraction"""
+    if job_id not in extraction_metadata:
+        extraction_metadata[job_id] = {"text": "", "label": "", "files": [], "training_data": {}}
+    extraction_metadata[job_id]["text"] = text
+    extraction_metadata[job_id]["label"] = label
+    logger.info(f"Saved metadata for extraction {job_id}: label={label}")
+    return {"status": "ok", "job_id": job_id}
+
+
+@app.post("/extraction_metadata/upload")
+async def upload_extraction_docs(
+    job_id: str = Form(...),
+    files: List[UploadFile] = File(...)
+):
+    """Upload documents associated with an extraction for RAG"""
+    if job_id not in extraction_metadata:
+        extraction_metadata[job_id] = {"text": "", "label": "", "files": [], "training_data": {}}
+    
+    uploaded = []
+    for file in files:
+        content = await file.read()
+        file_info = {
+            "name": file.filename,
+            "content_type": file.content_type,
+            "size": f"{len(content) / 1024:.1f} KB",
+            "data": content
+        }
+        extraction_metadata[job_id]["files"].append(file_info)
+        uploaded.append({"name": file.filename, "size": file_info["size"]})
+    
+    total = len(extraction_metadata[job_id]["files"])
+    extraction_metadata[job_id]["training_data"] = {
+        "files_count": total,
+        "last_upload": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "documents_uploaded"
+    }
+    logger.info(f"Uploaded {len(uploaded)} files for extraction {job_id}")
+    return {"status": "ok", "job_id": job_id, "uploaded": uploaded}
+
+
+@app.get("/extraction_metadata/{job_id}/file/{file_idx}")
+async def get_extraction_doc(job_id: str, file_idx: int):
+    """Serve an uploaded document for an extraction"""
+    if job_id not in extraction_metadata:
+        raise HTTPException(status_code=404, detail="Extraction not found")
+    files = extraction_metadata[job_id].get("files", [])
+    if file_idx < 0 or file_idx >= len(files):
+        raise HTTPException(status_code=404, detail="File not found")
+    file_info = files[file_idx]
+    return Response(
+        content=file_info.get("data", b""),
+        media_type=file_info.get("content_type", "application/octet-stream"),
+        headers={"Content-Disposition": f"inline; filename=\"{file_info.get('name', 'file')}\""}
+    )
+
+
+@app.get("/extraction_metadata_all")
+async def get_all_extraction_metadata():
+    """Get metadata for all extractions"""
+    result = {}
+    for job_id, meta in extraction_metadata.items():
+        result[job_id] = {
+            "label": meta.get("label", ""),
+            "text": meta.get("text", ""),
+            "files_count": len(meta.get("files", [])),
+            "has_training": bool(meta.get("training_data"))
+        }
+    return {"metadata": result, "count": len(result)}
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=GARFIELD_PORT)

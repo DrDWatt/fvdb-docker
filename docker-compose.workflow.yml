@@ -79,6 +79,7 @@ services:
       - ./outputs:/app/outputs
       - ./models:/app/models
       - ./cache/torch:/app/.cache/torch
+      - ./cache/weights:/app/cache/weights
       # Training service code
       - ./training-service/training_service.py:/app/training_service.py:ro
       - ./training-service/train_subprocess.py:/app/train_subprocess.py:ro

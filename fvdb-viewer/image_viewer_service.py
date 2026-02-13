@@ -45,6 +45,9 @@ segment_labels: Dict[int, str] = {}
 # Per-object summaries storage: {segment_idx: {"summary": str, "files": [], "training_data": {}}}
 object_summaries: Dict[int, Dict[str, Any]] = {}
 
+# Per-extraction RAG metadata: {job_id: {"text": str, "label": str, "files": [], ...}}
+extraction_summaries: Dict[str, Dict[str, Any]] = {}
+
 # RAG metadata from model service
 rag_metadata: Dict[str, Any] = {}
 rag_labels: List[str] = []
@@ -429,6 +432,7 @@ def load_model(model_file=None):
     fetch_rag_metadata(model_path.name)
     
     return True
+
 
 def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx=0):
     """Render using cameras from PLY metadata with orbit and zoom"""
@@ -913,7 +917,7 @@ async def root():
                 <button class="garfield-btn garfield-btn-primary" id="extractBtn" onclick="toggleExtractMode()">Click to Extract</button>
                 <button class="garfield-btn" style="background:#6c757d;color:white;" onclick="clearExtractions()">Clear</button>
             </div>
-            <div style="margin-top:10px;">
+            <div style="margin-top:8px;">
                 <label style="font-size:12px;">Scale Level: <span id="scale-val">0.5</span></label>
                 <input type="range" id="extract-scale" class="scale-slider" min="0.1" max="2.0" value="0.5" step="0.1" oninput="document.getElementById('scale-val').textContent = this.value">
             </div>
@@ -921,6 +925,18 @@ async def root():
                 Click to extract 3D assets from scene
             </div>
             <div id="extraction-list"></div>
+            <div id="extraction-rag" style="margin-top:10px;display:none;">
+                <h3 style="color:#ff6b6b;font-size:13px;margin:0 0 6px 0;">📄 Extraction Metadata</h3>
+                <input type="text" id="extLabel" placeholder="Label (e.g. Chair, Table)" style="width:100%;padding:5px;background:rgba(0,0,0,0.4);border:1px solid #555;color:#eee;border-radius:4px;margin-bottom:5px;box-sizing:border-box;">
+                <textarea id="extSummary" placeholder="Description / notes for this extraction..." style="width:100%;min-height:60px;background:rgba(0,0,0,0.4);border:1px solid #555;color:#eee;border-radius:4px;padding:5px;resize:vertical;box-sizing:border-box;"></textarea>
+                <div style="margin-top:5px;display:flex;gap:5px;align-items:center;">
+                    <button class="garfield-btn" style="background:#17a2b8;color:white;font-size:11px;padding:4px 10px;" onclick="saveExtSummary()">Save</button>
+                    <label style="font-size:11px;cursor:pointer;color:#17a2b8;">
+                        <input type="file" id="extFileUpload" multiple style="display:none;" onchange="uploadExtFiles()"> ⬆️ Upload Docs
+                    </label>
+                </div>
+                <div id="extFileList" style="font-size:11px;color:#aaa;margin-top:4px;"></div>
+            </div>
         </div>
         
         <!-- Summary Modal -->
@@ -1585,6 +1601,70 @@ async def root():
                 }}
             }});
             
+            let activeExtractionId = null;
+            
+            // RAG metadata functions for extractions
+            function showExtractionRag(jobId) {{
+                activeExtractionId = jobId;
+                document.getElementById('extraction-rag').style.display = 'block';
+                // Load existing summary
+                fetch(`/extraction_summary/${{jobId}}`)
+                    .then(r => r.json())
+                    .then(data => {{
+                        if (data.summary) {{
+                            document.getElementById('extLabel').value = data.summary.label || '';
+                            document.getElementById('extSummary').value = data.summary.text || '';
+                            updateExtFileList(data.summary.files || []);
+                        }} else {{
+                            document.getElementById('extLabel').value = '';
+                            document.getElementById('extSummary').value = '';
+                            document.getElementById('extFileList').innerHTML = '';
+                        }}
+                    }}).catch(() => {{}});
+            }}
+            
+            async function saveExtSummary() {{
+                if (!activeExtractionId) return;
+                const formData = new FormData();
+                formData.append('job_id', activeExtractionId);
+                formData.append('text', document.getElementById('extSummary').value);
+                formData.append('label', document.getElementById('extLabel').value);
+                try {{
+                    const resp = await fetch('/extraction_summary', {{ method: 'POST', body: formData }});
+                    if (resp.ok) {{
+                        document.getElementById('extractStatus').textContent = '✅ Summary saved';
+                    }}
+                }} catch(e) {{
+                    console.error('Save summary error:', e);
+                }}
+            }}
+            
+            async function uploadExtFiles() {{
+                if (!activeExtractionId) return;
+                const fileInput = document.getElementById('extFileUpload');
+                if (!fileInput.files.length) return;
+                const formData = new FormData();
+                formData.append('job_id', activeExtractionId);
+                for (const f of fileInput.files) formData.append('files', f);
+                try {{
+                    const resp = await fetch('/extraction_summary/upload', {{ method: 'POST', body: formData }});
+                    const data = await resp.json();
+                    if (data.uploaded) {{
+                        updateExtFileList(data.uploaded.map((u, i) => ({{ idx: i, name: u.name, size: u.size }})));
+                        document.getElementById('extractStatus').textContent = `✅ ${{data.uploaded.length}} file(s) uploaded`;
+                    }}
+                }} catch(e) {{
+                    console.error('Upload error:', e);
+                }}
+                fileInput.value = '';
+            }}
+            
+            function updateExtFileList(files) {{
+                const el = document.getElementById('extFileList');
+                if (!files || files.length === 0) {{ el.innerHTML = ''; return; }}
+                el.innerHTML = files.map(f => `📎 ${{f.name}} (${{f.size || ''}})`).join('<br>');
+            }}
+            
             // ===== GARField 3D Extraction Functions =====
             let extractMode = false;
             let extractions = [];
@@ -1665,6 +1745,7 @@ async def root():
                     item.innerHTML = `
                         <span>Asset ${{idx + 1}}: ${{ext.num_gaussians}} pts</span>
                         <button onclick="viewExtraction(${{idx}})" style="background:#ffc107;color:#000;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px;">👁️ View</button>
+                        <button onclick="showExtractionRag('${{ext.job_id}}')" style="background:#17a2b8;color:#fff;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px;">📄 Info</button>
                     `;
                     list.appendChild(item);
                 }});
@@ -2281,6 +2362,105 @@ async def link_training_data(
     
     logger.info(f"Linked training data for object {segment_idx}: job={training_job_id}")
     return {"status": "ok", "segment_idx": segment_idx}
+
+
+# ===== Per-Extraction RAG Metadata Endpoints =====
+
+@app.get("/extraction_summary/{job_id}")
+async def get_extraction_summary(job_id: str):
+    """Get RAG summary for a specific extraction job"""
+    summary = extraction_summaries.get(job_id, {})
+    if summary:
+        serializable = {
+            "text": summary.get("text", ""),
+            "label": summary.get("label", ""),
+            "training_data": summary.get("training_data", {}),
+            "files": [
+                {"idx": i, "name": f.get("name"), "size": f.get("size"), "content_type": f.get("content_type")}
+                for i, f in enumerate(summary.get("files", []))
+            ]
+        }
+    else:
+        serializable = None
+    return {"job_id": job_id, "summary": serializable}
+
+
+@app.post("/extraction_summary")
+async def save_extraction_summary(
+    job_id: str = Form(...),
+    text: str = Form(""),
+    label: str = Form("")
+):
+    """Save RAG summary text for a specific extraction"""
+    global extraction_summaries
+    if job_id not in extraction_summaries:
+        extraction_summaries[job_id] = {"text": "", "label": "", "files": [], "training_data": {}}
+    extraction_summaries[job_id]["text"] = text
+    extraction_summaries[job_id]["label"] = label
+    logger.info(f"Saved extraction summary for {job_id}: label={label}")
+    return {"status": "ok", "job_id": job_id}
+
+
+@app.post("/extraction_summary/upload")
+async def upload_extraction_files(
+    job_id: str = Form(...),
+    files: List[UploadFile] = File(...)
+):
+    """Upload documents associated with an extraction for RAG training"""
+    global extraction_summaries
+    if job_id not in extraction_summaries:
+        extraction_summaries[job_id] = {"text": "", "label": "", "files": [], "training_data": {}}
+    
+    uploaded = []
+    for file in files:
+        content = await file.read()
+        file_info = {
+            "name": file.filename,
+            "content_type": file.content_type,
+            "size": f"{len(content) / 1024:.1f} KB",
+            "data": content
+        }
+        extraction_summaries[job_id]["files"].append(file_info)
+        uploaded.append({"name": file.filename, "size": file_info["size"]})
+    
+    total_files = len(extraction_summaries[job_id]["files"])
+    extraction_summaries[job_id]["training_data"] = {
+        "files_count": total_files,
+        "last_upload": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "documents_uploaded"
+    }
+    logger.info(f"Uploaded {len(uploaded)} files for extraction {job_id}, total: {total_files}")
+    return {"status": "ok", "job_id": job_id, "uploaded": uploaded}
+
+
+@app.get("/extraction_summary/{job_id}/file/{file_idx}")
+async def get_extraction_file(job_id: str, file_idx: int):
+    """Serve an uploaded file for an extraction"""
+    if job_id not in extraction_summaries:
+        return Response(content="Extraction not found", status_code=404)
+    files = extraction_summaries[job_id].get("files", [])
+    if file_idx < 0 or file_idx >= len(files):
+        return Response(content="File not found", status_code=404)
+    file_info = files[file_idx]
+    return Response(
+        content=file_info.get("data", b""),
+        media_type=file_info.get("content_type", "application/octet-stream"),
+        headers={"Content-Disposition": f"inline; filename=\"{file_info.get('name', 'file')}\""}
+    )
+
+
+@app.get("/extraction_summaries")
+async def get_all_extraction_summaries():
+    """Get summaries for all extractions"""
+    result = {}
+    for job_id, summary in extraction_summaries.items():
+        result[job_id] = {
+            "label": summary.get("label", ""),
+            "text": summary.get("text", ""),
+            "files_count": len(summary.get("files", [])),
+            "has_training": bool(summary.get("training_data"))
+        }
+    return {"summaries": result, "count": len(result)}
 
 
 # ===== GARField 3D Extraction Endpoints =====

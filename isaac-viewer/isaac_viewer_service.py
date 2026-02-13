@@ -1919,14 +1919,37 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
             raise Exception("Cannot open video file")
         
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        frame_interval = max(1, int(video_fps / fps))
-        num_extracted = 0
-        frame_idx = 0
+        reported_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        logger.info(f"[{workflow_id}] Video: fps={video_fps}, reported_count={reported_count}")
         
+        # Read all frames first (CAP_PROP_FRAME_COUNT is unreliable for SVO files)
+        all_frames = []
         while True:
             ret, raw_frame = cap.read()
             if not ret:
                 break
+            all_frames.append(raw_frame)
+        cap.release()
+        
+        total_readable = len(all_frames)
+        logger.info(f"[{workflow_id}] Total readable frames: {total_readable}")
+        
+        if total_readable == 0:
+            raise Exception("No frames could be read from file")
+        
+        # Calculate frame interval based on desired output fps
+        frame_interval = max(1, int(video_fps / fps))
+        expected_output = total_readable // frame_interval
+        
+        # Ensure we extract at least 10 frames (or all if fewer available)
+        min_frames = min(10, total_readable)
+        if expected_output < min_frames:
+            frame_interval = max(1, total_readable // min_frames)
+        
+        logger.info(f"[{workflow_id}] Sampling: interval={frame_interval}, expected={total_readable // frame_interval} frames")
+        
+        num_extracted = 0
+        for frame_idx, raw_frame in enumerate(all_frames):
             if frame_idx % frame_interval == 0:
                 rgb = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
                 h, w = rgb.shape[:2]
@@ -1936,10 +1959,9 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
                 cv2.imwrite(str(images_dir / f"frame_{num_extracted:04d}.jpg"), left_bgr,
                             [cv2.IMWRITE_JPEG_QUALITY, 95])
                 num_extracted += 1
-                wf["progress"] = min(0.18, 0.05 + (frame_idx / max(1, cap.get(cv2.CAP_PROP_FRAME_COUNT))) * 0.13)
-            frame_idx += 1
+                wf["progress"] = min(0.18, 0.05 + (frame_idx / total_readable) * 0.13)
         
-        cap.release()
+        del all_frames  # Free memory
         wf["num_frames"] = num_extracted
         wf["progress"] = 0.2
         wf["current_step"] = f"Extracted {num_extracted} frames"
@@ -2070,21 +2092,23 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
                     tdata = train_status.json()
                     train_progress = tdata.get("progress", 0)
                     
-                    # Map training progress (0-1) to our range (0.7-0.95)
-                    wf["progress"] = 0.7 + train_progress * 0.25
+                    # Map training progress to our range (0.70-0.95)
+                    tstatus = tdata.get("status", "")
+                    
+                    wf["progress"] = 0.70 + train_progress * 0.25
                     wf["current_step"] = f"Training: {tdata.get('message', '')}"
                     
-                    if tdata.get("status") == "completed":
+                    if tstatus == "completed":
                         wf["progress"] = 0.95
                         wf["current_step"] = "Training complete"
                         logger.info(f"[{workflow_id}] Training complete")
                         break
-                    elif tdata.get("status") == "failed":
+                    elif tstatus == "failed":
                         raise Exception(f"Training failed: {tdata.get('message', 'Unknown')}")
             except requests.exceptions.ConnectionError:
                 logger.warning(f"[{workflow_id}] Training status check failed, retrying...")
         
-        # === Step 4: Complete ===
+        # === Step 5: Complete ===
         wf["status"] = "completed"
         wf["progress"] = 1.0
         wf["current_step"] = "Pipeline complete! View splat at :8085"

@@ -65,6 +65,7 @@ for dir_path in [UPLOAD_DIR, OUTPUT_DIR, DATA_DIR, MODEL_DIR]:
 training_jobs = {}
 training_processes = {}  # Track running subprocesses
 
+
 # State file helpers
 JOBS_STATE_DIR = Path("/app/outputs")
 
