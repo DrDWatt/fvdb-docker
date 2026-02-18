@@ -1,0 +1,14 @@
+# fVDB Viewer Python dependencies
+# These must be installed in the host conda env at /home/dwatkins3/miniforge3/envs/fvdb
+# since the viewer mounts it read-only at /host-fvdb
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+requests>=2.31.0
+numpy>=1.24.0
+Pillow>=10.0.0
+plyfile>=1.0.0
+scikit-learn>=1.3.0
+torch
+fvdb
+fvdb_reality_capture

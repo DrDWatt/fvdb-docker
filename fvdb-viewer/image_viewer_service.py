@@ -54,8 +54,8 @@ rag_labels: List[str] = []
 MODEL_SERVICE_URL = os.environ.get("MODEL_SERVICE_URL", "http://rendering-service:8001")
 
 def get_available_models():
-    """Get list of available PLY models"""
-    return sorted([m.name for m in MODEL_DIR.glob("*.ply")])
+    """Get list of available PLY models (excludes extraction temp files)"""
+    return sorted([m.name for m in MODEL_DIR.glob("*.ply") if not m.name.startswith('_extraction_')])
 
 
 def fetch_rag_metadata(model_name: str):
@@ -532,6 +532,85 @@ def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx
         traceback.print_exc()
         return None
 
+def get_camera_matrices(width, height, azimuth, elevation, zoom, cam_idx):
+    """Compute world-to-camera and projection matrices matching render_view.
+    
+    Returns (w2c, K) tensors on the GPU device, or (None, None) if unavailable.
+    w2c shape: [1, 4, 4], K shape: [1, 3, 3] (or similar from metadata).
+    """
+    import torch
+    
+    if gsplat is None or model_metadata is None:
+        return None, None
+    
+    try:
+        c2w_all = model_metadata.get('camera_to_world_matrices')
+        K_all = model_metadata.get('projection_matrices')
+        sizes = model_metadata.get('image_sizes')
+        
+        if c2w_all is None or K_all is None:
+            return None, None
+        
+        num_cams = c2w_all.shape[0]
+        cam_idx = cam_idx % num_cams
+        
+        c2w = c2w_all[cam_idx].to(device).clone()
+        means = gsplat.means
+        center = means.mean(dim=0)
+        
+        # Apply zoom
+        cam_pos = c2w[:3, 3].clone()
+        view_dir = center - cam_pos
+        view_dir = view_dir / view_dir.norm()
+        dist_to_center = (center - cam_pos).norm().item()
+        new_dist = dist_to_center / zoom
+        new_pos = center - view_dir * new_dist
+        c2w[:3, 3] = new_pos
+        
+        # Apply rotation around model center
+        if azimuth != 0 or elevation != 0:
+            az_rad = math.radians(azimuth)
+            el_rad = math.radians(elevation)
+            
+            Ry = torch.tensor([
+                [math.cos(az_rad), 0, math.sin(az_rad), 0],
+                [0, 1, 0, 0],
+                [-math.sin(az_rad), 0, math.cos(az_rad), 0],
+                [0, 0, 0, 1]
+            ], device=device, dtype=torch.float32)
+            
+            Rx = torch.tensor([
+                [1, 0, 0, 0],
+                [0, math.cos(el_rad), -math.sin(el_rad), 0],
+                [0, math.sin(el_rad), math.cos(el_rad), 0],
+                [0, 0, 0, 1]
+            ], device=device, dtype=torch.float32)
+            
+            T_to = torch.eye(4, device=device, dtype=torch.float32)
+            T_to[:3, 3] = -center
+            T_back = torch.eye(4, device=device, dtype=torch.float32)
+            T_back[:3, 3] = center
+            
+            R_orbit = T_back @ Ry @ Rx @ T_to
+            c2w = R_orbit @ c2w
+        
+        c2w = c2w.unsqueeze(0).contiguous()
+        w2c = torch.inverse(c2w).contiguous()
+        
+        # Scale projection matrix to render resolution
+        orig_h, orig_w = sizes[cam_idx].tolist()
+        K = K_all[cam_idx:cam_idx+1].to(device).clone()
+        K[:, 0, :] *= width / orig_w
+        K[:, 1, :] *= height / orig_h
+        K = K.contiguous()
+        
+        return w2c, K
+        
+    except Exception as e:
+        logger.error(f"get_camera_matrices error: {e}")
+        return None, None
+
+
 @app.on_event("startup")
 async def startup():
     load_model()
@@ -867,7 +946,7 @@ async def root():
                 <button class="seg-btn seg-btn-danger" onclick="clearSegments()">Clear</button>
             </div>
             <div style="margin-top:8px;">
-                <button class="seg-btn" style="background:#6c757d;color:white;" onclick="showSummary()">📄 Summary</button>
+                <button class="seg-btn" style="background:#6c757d;color:white;" onclick="showSummary()">📄 RAG Query</button>
                 <button class="seg-btn" style="background:#17a2b8;color:white;" onclick="showUploadModal()">⬆️ Upload Info</button>
             </div>
             <div id="segStatus" style="margin-top:10px;font-size:12px;color:#888;">
@@ -939,12 +1018,26 @@ async def root():
             </div>
         </div>
         
-        <!-- Summary Modal -->
+        <!-- Summary / RAG Query Modal -->
         <div id="summary-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:2000;">
-            <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a2e;padding:30px;border-radius:12px;max-width:600px;max-height:80vh;overflow-y:auto;border:2px solid #00d4ff;">
-                <h2 style="color:#00d4ff;margin-top:0;">📄 Model Summary</h2>
-                <div id="summary-content" style="color:#eee;line-height:1.6;white-space:pre-wrap;"></div>
-                <button onclick="closeSummary()" style="margin-top:20px;padding:10px 25px;background:#dc3545;color:white;border:none;border-radius:5px;cursor:pointer;">Close</button>
+            <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a2e;padding:30px;border-radius:12px;width:90%;max-width:700px;max-height:85vh;display:flex;flex-direction:column;border:2px solid #00d4ff;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h2 style="color:#00d4ff;margin:0;">📄 Model Summary &amp; RAG Query</h2>
+                    <button onclick="closeSummary()" style="background:none;border:none;color:#aaa;font-size:22px;cursor:pointer;padding:0 4px;" title="Close">&times;</button>
+                </div>
+                <!-- Model context summary -->
+                <div id="summary-content" style="color:#eee;line-height:1.6;white-space:pre-wrap;font-size:13px;max-height:120px;overflow-y:auto;padding:10px;background:rgba(0,0,0,0.3);border-radius:6px;margin-bottom:12px;flex-shrink:0;"></div>
+                <!-- LLM status -->
+                <div id="rag-llm-status" style="font-size:11px;color:#888;margin-bottom:8px;"></div>
+                <!-- Chat history -->
+                <div id="rag-chat-history" style="flex:1;overflow-y:auto;min-height:150px;max-height:350px;padding:10px;background:rgba(0,0,0,0.25);border-radius:6px;margin-bottom:12px;"></div>
+                <!-- Query input -->
+                <div style="display:flex;gap:8px;flex-shrink:0;">
+                    <input type="text" id="rag-query-input" placeholder="Ask about the scene (e.g. 'What objects are in the splat?')" 
+                           style="flex:1;padding:10px 14px;background:rgba(0,0,0,0.4);border:1px solid #555;color:#eee;border-radius:6px;font-size:14px;"
+                           onkeydown="if(event.key==='Enter') sendRagQuery()">
+                    <button id="rag-send-btn" onclick="sendRagQuery()" style="padding:10px 20px;background:#00d4ff;color:#1a1a2e;border:none;border-radius:6px;cursor:pointer;font-weight:bold;font-size:14px;white-space:nowrap;">Ask</button>
+                </div>
             </div>
         </div>
         
@@ -1319,28 +1412,146 @@ async def root():
                 loadSegmentMasks();
             }};
             
-            // Summary and Upload functions
+            // Summary, RAG Query, and Upload functions
+            let ragChatHistory = [];
+            
             async function showSummary() {{
                 const modelSelect = document.getElementById('model-select');
                 const modelName = modelSelect.value;
                 
-                document.getElementById('summary-content').textContent = 'Loading...';
+                document.getElementById('summary-content').textContent = 'Loading context...';
+                document.getElementById('rag-chat-history').innerHTML = '';
+                document.getElementById('rag-llm-status').innerHTML = '<span style="color:#ffc107;">Checking LLM...</span>';
                 document.getElementById('summary-modal').style.display = 'block';
+                ragChatHistory = [];
                 
+                // Load model context summary
                 try {{
-                    const response = await fetch(`/model_summary?model=${{encodeURIComponent(modelName)}}`);
+                    const response = await fetch(`/rag/context?model=${{encodeURIComponent(modelName)}}`);
                     const data = await response.json();
                     
-                    if (data.has_summary) {{
-                        document.getElementById('summary-content').textContent = data.summary;
+                    let contextHtml = '';
+                    if (data.model_summary) {{
+                        contextHtml += `<strong>Model:</strong> ${{data.model_name || modelName}}<br>`;
+                        contextHtml += data.model_summary + '<br>';
+                    }}
+                    if (data.segments_count > 0) {{
+                        contextHtml += `<strong>Segments:</strong> ${{data.segments_count}} objects detected`;
+                        if (data.segment_labels && data.segment_labels.length > 0) {{
+                            contextHtml += ` (${{data.segment_labels.join(', ')}})`;
+                        }}
+                        contextHtml += '<br>';
+                    }}
+                    if (data.extractions_count > 0) {{
+                        contextHtml += `<strong>Extractions:</strong> ${{data.extractions_count}} 3D extractions<br>`;
+                    }}
+                    if (data.documents_count > 0) {{
+                        contextHtml += `<strong>Documents:</strong> ${{data.documents_count}} uploaded<br>`;
+                    }}
+                    if (!contextHtml) {{
+                        contextHtml = '<span style="color:#ffc107;">No context data yet.</span> Segment objects or upload documents to enrich the knowledge base.';
+                    }}
+                    document.getElementById('summary-content').innerHTML = contextHtml;
+                }} catch(e) {{
+                    document.getElementById('summary-content').innerHTML = '<span style="color:#ffc107;">No summary available.</span> Upload documents or segment objects to add context.';
+                }}
+                
+                // Check LLM status
+                try {{
+                    const llmResp = await fetch('/rag/status');
+                    const llmData = await llmResp.json();
+                    if (llmData.available) {{
+                        document.getElementById('rag-llm-status').innerHTML = `<span style="color:#28a745;">● LLM ready</span> <span style="color:#666;">(${{llmData.model}})</span>`;
                     }} else {{
-                        document.getElementById('summary-content').innerHTML = `
-                            <p style="color:#ffc107;">No summary available for this model.</p>
-                            <p>Click "Upload Info" to add a summary document (PDF, TXT, JSON, or MD).</p>
-                        `;
+                        document.getElementById('rag-llm-status').innerHTML = `<span style="color:#dc3545;">● LLM unavailable:</span> <span style="color:#888;">${{llmData.error || 'Ollama not reachable'}}</span>`;
                     }}
                 }} catch(e) {{
-                    document.getElementById('summary-content').textContent = 'Error loading summary: ' + e.message;
+                    document.getElementById('rag-llm-status').innerHTML = '<span style="color:#dc3545;">● LLM unavailable</span>';
+                }}
+            }}
+            
+            function appendChatMessage(role, text) {{
+                const history = document.getElementById('rag-chat-history');
+                const div = document.createElement('div');
+                div.style.marginBottom = '10px';
+                if (role === 'user') {{
+                    div.innerHTML = `<div style="text-align:right;"><span style="background:#00d4ff;color:#1a1a2e;padding:6px 12px;border-radius:12px 12px 2px 12px;display:inline-block;max-width:85%;text-align:left;font-size:13px;">${{text}}</span></div>`;
+                }} else if (role === 'assistant') {{
+                    div.innerHTML = `<div><span style="background:rgba(255,255,255,0.1);color:#eee;padding:6px 12px;border-radius:12px 12px 12px 2px;display:inline-block;max-width:85%;text-align:left;font-size:13px;white-space:pre-wrap;">${{text}}</span></div>`;
+                }} else {{
+                    div.innerHTML = `<div style="text-align:center;"><span style="color:#888;font-size:11px;font-style:italic;">${{text}}</span></div>`;
+                }}
+                history.appendChild(div);
+                history.scrollTop = history.scrollHeight;
+                return div;
+            }}
+            
+            async function sendRagQuery() {{
+                const input = document.getElementById('rag-query-input');
+                const query = input.value.trim();
+                if (!query) return;
+                
+                input.value = '';
+                const sendBtn = document.getElementById('rag-send-btn');
+                sendBtn.disabled = true;
+                sendBtn.textContent = '...';
+                
+                appendChatMessage('user', query);
+                const responseDiv = appendChatMessage('assistant', 'Thinking...');
+                
+                try {{
+                    const modelName = document.getElementById('model-select').value;
+                    const resp = await fetch('/rag/query', {{
+                        method: 'POST',
+                        headers: {{'Content-Type': 'application/json'}},
+                        body: JSON.stringify({{ query: query, model: modelName, history: ragChatHistory }})
+                    }});
+                    
+                    if (!resp.ok) {{
+                        const err = await resp.json();
+                        responseDiv.querySelector('span').textContent = 'Error: ' + (err.detail || err.error || 'Query failed');
+                        responseDiv.querySelector('span').style.color = '#dc3545';
+                    }} else {{
+                        // Stream the response
+                        const reader = resp.body.getReader();
+                        const decoder = new TextDecoder();
+                        let fullText = '';
+                        const textSpan = responseDiv.querySelector('span');
+                        
+                        while (true) {{
+                            const {{ done, value }} = await reader.read();
+                            if (done) break;
+                            const chunk = decoder.decode(value, {{ stream: true }});
+                            // Parse SSE lines
+                            const lines = chunk.split('\\n');
+                            for (const line of lines) {{
+                                if (line.startsWith('data: ')) {{
+                                    try {{
+                                        const parsed = JSON.parse(line.slice(6));
+                                        if (parsed.token) {{
+                                            fullText += parsed.token;
+                                            textSpan.textContent = fullText;
+                                        }}
+                                        if (parsed.done) {{
+                                            ragChatHistory.push({{ role: 'user', content: query }});
+                                            ragChatHistory.push({{ role: 'assistant', content: fullText }});
+                                        }}
+                                        if (parsed.error) {{
+                                            textSpan.textContent = 'Error: ' + parsed.error;
+                                            textSpan.style.color = '#dc3545';
+                                        }}
+                                    }} catch(e) {{}}
+                                }}
+                            }}
+                            document.getElementById('rag-chat-history').scrollTop = document.getElementById('rag-chat-history').scrollHeight;
+                        }}
+                    }}
+                }} catch(e) {{
+                    responseDiv.querySelector('span').textContent = 'Error: ' + e.message;
+                    responseDiv.querySelector('span').style.color = '#dc3545';
+                }} finally {{
+                    sendBtn.disabled = false;
+                    sendBtn.textContent = 'Ask';
                 }}
             }}
             
@@ -1711,6 +1922,7 @@ async def root():
                 formData.append('azimuth', azSlider.value);
                 formData.append('elevation', elSlider.value);
                 formData.append('zoom', zoomSlider.value);
+                formData.append('cam_idx', camSlider.value);
                 formData.append('width', 1024);
                 formData.append('height', 768);
                 
@@ -1925,6 +2137,8 @@ async def root():
                 img.style.cursor = 'default';
                 document.getElementById('extraction-list').innerHTML = '';
                 document.getElementById('extractStatus').textContent = 'Click to extract 3D assets from scene';
+                // Clean up server-side extraction cache and temp files
+                try {{ await fetch('/garfield/clear', {{method: 'POST'}}); }} catch(e) {{}}
                 updateRender();
             }}
         </script>
@@ -2463,6 +2677,214 @@ async def get_all_extraction_summaries():
     return {"summaries": result, "count": len(result)}
 
 
+# ===== RAG Query Endpoints =====
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "nemotron-mini")
+
+
+def _build_rag_context(model_name: str = None) -> str:
+    """Build a text context from all available RAG data sources"""
+    parts = []
+
+    # Model info
+    if gsplat is not None:
+        parts.append(f"Model: {model_name or 'unknown'}, {gsplat.num_gaussians} gaussians")
+
+    # Model-level RAG metadata
+    if rag_metadata:
+        if rag_metadata.get("title"):
+            parts.append(f"Scene title: {rag_metadata['title']}")
+        if rag_metadata.get("description"):
+            parts.append(f"Scene description: {rag_metadata['description']}")
+        if rag_labels:
+            parts.append(f"Known objects (from metadata): {', '.join(rag_labels)}")
+
+    # SAM-2 segment labels and summaries
+    if segment_labels:
+        labels_list = [f"{idx}: {lbl}" for idx, lbl in sorted(segment_labels.items())]
+        parts.append(f"Segmented objects: {'; '.join(labels_list)}")
+    if object_summaries:
+        for idx, s in sorted(object_summaries.items()):
+            label = segment_labels.get(idx, f"Object {idx}")
+            text = s.get("text", "")
+            file_count = len(s.get("files", []))
+            if text or file_count:
+                entry = f"Object '{label}'"
+                if text:
+                    entry += f": {text}"
+                if file_count:
+                    entry += f" ({file_count} document(s) uploaded)"
+                # Include text content of uploaded text files
+                for f in s.get("files", []):
+                    ct = f.get("content_type", "")
+                    if "text" in ct or ct in ("application/json",):
+                        try:
+                            doc_text = f["data"].decode("utf-8", errors="replace")[:2000]
+                            entry += f"\n  Document '{f['name']}': {doc_text}"
+                        except Exception:
+                            pass
+                parts.append(entry)
+
+    # Extraction metadata
+    if extraction_summaries:
+        for job_id, s in extraction_summaries.items():
+            label = s.get("label", job_id)
+            text = s.get("text", "")
+            file_count = len(s.get("files", []))
+            if text or label:
+                entry = f"3D Extraction '{label}'"
+                if text:
+                    entry += f": {text}"
+                if file_count:
+                    entry += f" ({file_count} document(s))"
+                for f in s.get("files", []):
+                    ct = f.get("content_type", "")
+                    if "text" in ct or ct in ("application/json",):
+                        try:
+                            doc_text = f["data"].decode("utf-8", errors="replace")[:2000]
+                            entry += f"\n  Document '{f['name']}': {doc_text}"
+                        except Exception:
+                            pass
+                parts.append(entry)
+
+    # Model-level uploaded summary (from rendering service)
+    if model_name:
+        try:
+            import requests as req
+            resp = req.get(f"{MODEL_SERVICE_URL}/summary/{model_name}", timeout=3)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("has_summary") and data.get("summary"):
+                    parts.append(f"Model document summary: {data['summary'][:3000]}")
+        except Exception:
+            pass
+
+    return "\n".join(parts) if parts else ""
+
+
+@app.get("/rag/context")
+async def get_rag_context(model: str = Query(None)):
+    """Get aggregated RAG context for the current model"""
+    context_text = _build_rag_context(model)
+
+    seg_labels = [segment_labels.get(idx, f"Object {idx}") for idx in sorted(segment_labels.keys())] if segment_labels else []
+    docs_count = sum(len(s.get("files", [])) for s in object_summaries.values())
+    docs_count += sum(len(s.get("files", [])) for s in extraction_summaries.values())
+
+    model_summary = None
+    if model:
+        try:
+            import requests as req
+            resp = req.get(f"{MODEL_SERVICE_URL}/summary/{model}", timeout=3)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("has_summary"):
+                    model_summary = data.get("summary", "")[:500]
+        except Exception:
+            pass
+
+    return {
+        "model_name": model,
+        "model_summary": model_summary,
+        "segments_count": len(segment_labels),
+        "segment_labels": seg_labels,
+        "extractions_count": len(extraction_summaries),
+        "documents_count": docs_count,
+        "context_length": len(context_text),
+    }
+
+
+@app.get("/rag/status")
+async def get_rag_status():
+    """Check if the Ollama LLM is reachable and the model is available"""
+    try:
+        import requests as req
+        resp = req.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        if resp.status_code == 200:
+            models = [m["name"] for m in resp.json().get("models", [])]
+            # Check if our model (or a prefix match) is available
+            matched = [m for m in models if OLLAMA_MODEL in m]
+            if matched:
+                return {"available": True, "model": matched[0], "all_models": models}
+            else:
+                return {"available": False, "error": f"Model '{OLLAMA_MODEL}' not found. Available: {models}", "all_models": models}
+        return {"available": False, "error": f"Ollama returned {resp.status_code}"}
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+
+@app.post("/rag/query")
+async def rag_query(body: dict):
+    """Query the LLM with RAG context from the scene. Streams SSE tokens."""
+    from starlette.responses import StreamingResponse
+    import requests as req
+
+    query = body.get("query", "").strip()
+    model_name = body.get("model")
+    history = body.get("history", [])
+
+    if not query:
+        return JSONResponse({"error": "Empty query"}, status_code=400)
+
+    # Build context
+    context = _build_rag_context(model_name)
+
+    # Build messages
+    system_msg = (
+        "You are an AI assistant for a 3D Gaussian Splat viewer application. "
+        "You help users understand what is in their 3D scene based on segmentation data, "
+        "uploaded documents, and metadata. Answer concisely and accurately based on the "
+        "available context. If you don't have enough information, say so.\n\n"
+        "=== Scene Context ===\n"
+        f"{context if context else 'No context data available yet. The user has not segmented objects or uploaded documents.'}\n"
+        "=== End Context ==="
+    )
+
+    messages = [{"role": "system", "content": system_msg}]
+    # Add conversation history (last 10 exchanges max)
+    for msg in history[-20:]:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": query})
+
+    # Find the actual model name
+    try:
+        tags_resp = req.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        available_models = [m["name"] for m in tags_resp.json().get("models", [])]
+        actual_model = next((m for m in available_models if OLLAMA_MODEL in m), OLLAMA_MODEL)
+    except Exception:
+        actual_model = OLLAMA_MODEL
+
+    def stream_response():
+        try:
+            resp = req.post(
+                f"{OLLAMA_URL}/api/chat",
+                json={"model": actual_model, "messages": messages, "stream": True},
+                stream=True,
+                timeout=120,
+            )
+            if resp.status_code != 200:
+                yield f"data: {json.dumps({'error': f'Ollama error {resp.status_code}: {resp.text[:200]}'})}\n\n"
+                return
+
+            for line in resp.iter_lines():
+                if line:
+                    try:
+                        chunk = json.loads(line)
+                        token = chunk.get("message", {}).get("content", "")
+                        done = chunk.get("done", False)
+                        if token:
+                            yield f"data: {json.dumps({'token': token})}\n\n"
+                        if done:
+                            yield f"data: {json.dumps({'done': True})}\n\n"
+                    except json.JSONDecodeError:
+                        pass
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(stream_response(), media_type="text/event-stream")
+
+
 # ===== GARField 3D Extraction Endpoints =====
 
 GARFIELD_SERVICE_URL = os.environ.get("GARFIELD_SERVICE_URL", "http://garfield-extraction:8006")
@@ -2477,161 +2899,213 @@ async def garfield_extract(
     azimuth: float = Form(0),
     elevation: float = Form(0),
     zoom: float = Form(1.0),
+    cam_idx: int = Form(0),
     width: int = Form(1024),
     height: int = Form(768)
 ):
-    """Proxy extraction request to GARField service"""
-    try:
-        import requests
-        
-        # Render current view to send with extraction request
-        img = render_view(width, height, azimuth, elevation, zoom, 0)
-        img_bytes = None
-        if img is not None:
-            from PIL import Image
-            pil_img = Image.fromarray(img)
-            buffer = io.BytesIO()
-            pil_img.save(buffer, format='PNG')
-            img_bytes = buffer.getvalue()
-        
-        # Send to GARField service
-        data = {
-            'x': x,
-            'y': y,
-            'model_name': model_name,
-            'scale_level': scale_level,
-            'azimuth': azimuth,
-            'elevation': elevation,
-            'zoom': zoom,
-            'width': width,
-            'height': height
-        }
-        
-        files = {}
-        if img_bytes:
-            files['image'] = ('render.png', img_bytes, 'image/png')
-        
-        response = requests.post(
-            f"{GARFIELD_SERVICE_URL}/extract",
-            data=data,
-            files=files if files else None,
-            timeout=60
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        return {"status": "error", "error": f"GARField service error: {response.status_code}"}
-    except requests.exceptions.ConnectionError:
-        # Fallback: perform local extraction if GARField service unavailable
-        return await local_garfield_extract(x, y, model_name, scale_level, azimuth, elevation, zoom, width, height)
-    except Exception as e:
-        logger.error(f"GARField extraction error: {e}")
-        return {"status": "error", "error": str(e)}
+    """Extract 3D object using SAM-2 mask + accurate camera projection"""
+    return await local_garfield_extract(
+        x, y, model_name, scale_level, azimuth, elevation, zoom,
+        width, height, cam_idx
+    )
 
 
-async def local_garfield_extract(x, y, model_name, scale_level, azimuth, elevation, zoom, width, height):
-    """Local fallback for GARField extraction when service is unavailable"""
+async def local_garfield_extract(x, y, model_name_param, scale_level, azimuth, elevation, zoom, width, height, cam_idx=0):
+    """Extract 3D object using SAM-2 mask + actual camera projection + DBSCAN filtering.
+    
+    Pipeline:
+    1. Render current view matching the user's viewport
+    2. Generate SAM-2 mask from click point (semantic object selection)
+    3. Project all Gaussian means to 2D using actual camera matrices
+    4. Select Gaussians whose projections fall inside SAM mask
+    5. DBSCAN 3D clustering to remove outlier Gaussians
+    6. Save extracted PLY and load as independent sub-splat for 3D viewing
+    """
     import uuid
+    import torch
+    import fvdb
     from pathlib import Path
     
     job_id = str(uuid.uuid4())[:8]
     
     try:
-        # Find model file
+        if gsplat is None:
+            return {"status": "error", "error": "No model loaded", "job_id": job_id}
+        
+        # 1. Render current view (same as what user sees)
+        img = render_view(width, height, azimuth, elevation, zoom, cam_idx)
+        if img is None:
+            return {"status": "error", "error": "Render failed", "job_id": job_id}
+        
+        # 2. Generate SAM-2 mask from click point
+        mask = None
+        mask_method = "fallback"
+        if not sam2_loaded:
+            load_sam2()
+        
+        if sam2_loaded and sam2_predictor is not None:
+            try:
+                sam2_predictor.set_image(img)
+                point_coords = np.array([[x, y]])
+                point_labels = np.array([1])
+                masks, scores, _ = sam2_predictor.predict(
+                    point_coords=point_coords,
+                    point_labels=point_labels,
+                    multimask_output=True
+                )
+                best_idx = np.argmax(scores)
+                mask = masks[best_idx].astype(np.uint8)
+                mask_method = "sam2"
+                logger.info(f"SAM-2 mask: {np.sum(mask > 0)} pixels, score={scores[best_idx]:.3f}")
+            except Exception as e:
+                logger.warning(f"SAM-2 mask generation failed: {e}")
+        
+        # Fallback: circular mask if SAM-2 unavailable
+        if mask is None:
+            mask = np.zeros((height, width), dtype=np.uint8)
+            radius = int(60 * max(scale_level, 0.3))
+            yy, xx = np.ogrid[:height, :width]
+            circle = (xx - x)**2 + (yy - y)**2 <= radius**2
+            mask[circle] = 1
+            logger.info(f"Fallback circular mask, radius={radius}")
+        
+        # 3. Get camera matrices matching the current view (same as render_view)
+        w2c, K = get_camera_matrices(width, height, azimuth, elevation, zoom, cam_idx)
+        if w2c is None:
+            return {"status": "error", "error": "Camera matrices unavailable", "job_id": job_id}
+        
+        # 4. Project all Gaussian means to 2D using actual camera matrices
+        means = gsplat.means  # [N, 3] on GPU
+        N = means.shape[0]
+        
+        ones = torch.ones(N, 1, device=device, dtype=means.dtype)
+        means_h = torch.cat([means, ones], dim=1)  # [N, 4]
+        
+        # World to camera transform
+        p_cam = (w2c[0] @ means_h.T).T  # [N, 4]
+        z_vals = p_cam[:, 2]
+        
+        # Project to 2D pixel coordinates using K matrix
+        p_2d = (K[0] @ p_cam[:, :3].T).T  # [N, 3]
+        px = (p_2d[:, 0] / (p_2d[:, 2] + 1e-8)).cpu().numpy()
+        py = (p_2d[:, 1] / (p_2d[:, 2] + 1e-8)).cpu().numpy()
+        z_np = z_vals.cpu().numpy()
+        
+        # 5. Select Gaussians whose projections fall inside the SAM mask
+        valid = (z_np > 0.01) & np.isfinite(px) & np.isfinite(py)
+        in_bounds = valid & (px >= 0) & (px < width) & (py >= 0) & (py < height)
+        
+        # Vectorized mask lookup (fast)
+        px_int = np.clip(px.astype(np.int32), 0, width - 1)
+        py_int = np.clip(py.astype(np.int32), 0, height - 1)
+        in_mask = in_bounds & (mask[py_int, px_int] > 0)
+        
+        selected_indices = np.where(in_mask)[0]
+        logger.info(f"Projection selected {len(selected_indices)} / {N} Gaussians")
+        
+        if len(selected_indices) == 0:
+            return {"status": "no_selection", "message": "No gaussians found at click position", "job_id": job_id}
+        
+        # 6. DBSCAN 3D clustering to remove outlier Gaussians
+        if len(selected_indices) > 10:
+            positions_sel = means[selected_indices].cpu().numpy()
+            try:
+                from sklearn.cluster import DBSCAN
+                # Adaptive eps: use interquartile range of distances from centroid
+                centroid = positions_sel.mean(axis=0)
+                dists = np.linalg.norm(positions_sel - centroid, axis=1)
+                eps = np.percentile(dists, 75) * 0.3 * max(scale_level, 0.2)
+                eps = max(eps, 0.005)
+                
+                clustering = DBSCAN(eps=eps, min_samples=5).fit(positions_sel)
+                labels = clustering.labels_
+                unique_labels = set(labels) - {-1}
+                
+                if unique_labels:
+                    largest = max(unique_labels, key=lambda l: np.sum(labels == l))
+                    cluster_mask = labels == largest
+                    selected_indices = selected_indices[cluster_mask]
+                    logger.info(f"DBSCAN filtered to {len(selected_indices)} Gaussians (largest cluster)")
+            except ImportError:
+                # Fallback: median absolute deviation outlier removal
+                median_pos = np.median(positions_sel, axis=0)
+                dists = np.linalg.norm(positions_sel - median_pos, axis=1)
+                threshold = np.median(dists) * (1.0 + scale_level * 2)
+                inlier_mask = dists <= threshold
+                selected_indices = selected_indices[inlier_mask]
+                logger.info(f"MAD filtered to {len(selected_indices)} Gaussians")
+        
+        if len(selected_indices) == 0:
+            return {"status": "no_selection", "message": "All Gaussians filtered as outliers", "job_id": job_id}
+        
+        # 7. Save extracted PLY as independent sub-splat
         model_path = None
         for ext in ['.ply', '']:
-            test_path = MODEL_DIR / f"{model_name}{ext}"
+            test_path = MODEL_DIR / f"{model_name_param}{ext}"
             if test_path.exists():
                 model_path = test_path
                 break
         
-        if not model_path:
-            return {"status": "error", "error": f"Model not found: {model_name}", "job_id": job_id}
+        if model_path is None:
+            return {"status": "error", "error": f"Model not found: {model_name_param}", "job_id": job_id}
         
-        # Simple extraction based on click position projection
-        from plyfile import PlyData
+        from plyfile import PlyData, PlyElement
         plydata = PlyData.read(str(model_path))
         vertex = plydata['vertex']
+        new_data = vertex.data[selected_indices]
+        new_element = PlyElement.describe(new_data, 'vertex')
         
-        positions = np.stack([
-            np.array(vertex['x']),
-            np.array(vertex['y']),
-            np.array(vertex['z'])
-        ], axis=-1)
+        output_path = MODEL_DIR / f"_extraction_{job_id}.ply"
+        PlyData([new_element]).write(str(output_path))
+        logger.info(f"Saved extracted PLY: {output_path} ({len(selected_indices)} Gaussians)")
         
-        # Project points and find those near click
-        focal = width / (2 * np.tan(np.radians(30)))
-        cx, cy = width / 2, height / 2
+        # 8. Load as independent GaussianSplat3d for 3D viewing
+        sub_gsplat, sub_metadata = fvdb.GaussianSplat3d.from_ply(str(output_path), device=device)
         
-        az_rad = np.radians(azimuth)
-        el_rad = np.radians(elevation)
-        
-        rotated = positions.copy()
-        cos_az, sin_az = np.cos(az_rad), np.sin(az_rad)
-        temp_x = rotated[:, 0] * cos_az + rotated[:, 2] * sin_az
-        temp_z = -rotated[:, 0] * sin_az + rotated[:, 2] * cos_az
-        rotated[:, 0] = temp_x
-        rotated[:, 2] = temp_z
-        
-        cos_el, sin_el = np.cos(el_rad), np.sin(el_rad)
-        temp_y = rotated[:, 1] * cos_el - rotated[:, 2] * sin_el
-        temp_z = rotated[:, 1] * sin_el + rotated[:, 2] * cos_el
-        rotated[:, 1] = temp_y
-        rotated[:, 2] = temp_z
-        
-        z_vals = rotated[:, 2]
-        valid = z_vals > 0.1
-        
-        proj_x = np.where(valid, rotated[:, 0] / z_vals * focal + cx, -1)
-        proj_y = np.where(valid, rotated[:, 1] / z_vals * focal + cy, -1)
-        
-        # Find points near click within radius based on scale
-        radius = 50 * scale_level
-        distances = np.sqrt((proj_x - x)**2 + (proj_y - y)**2)
-        selected = (distances < radius) & valid
-        
-        num_selected = np.sum(selected)
-        
-        if num_selected == 0:
-            return {"status": "no_selection", "message": "No gaussians at click position", "job_id": job_id}
-        
-        # Get selected indices and cache for viewing
-        selected_indices = np.where(selected)[0].tolist()
+        # Cache for viewing (includes extraction camera for sharp initial rendering)
         extraction_cache[job_id] = {
-            'indices': selected_indices,
-            'model_name': model_name,
-            'positions': positions[selected].tolist()
+            'indices': selected_indices.tolist(),
+            'model_name': model_name_param,
+            'positions': means[selected_indices].cpu().numpy().tolist(),
+            'sub_gsplat': sub_gsplat,
+            'sub_metadata': sub_metadata,
+            'output_path': str(output_path),
+            'cam_idx': cam_idx,
+            'azimuth': azimuth,
+            'elevation': elevation,
+            'zoom': zoom,
         }
         
         return {
             "status": "completed",
             "job_id": job_id,
-            "num_gaussians": int(num_selected),
-            "model_name": model_name,
+            "num_gaussians": int(len(selected_indices)),
+            "model_name": model_name_param,
             "click": {"x": x, "y": y},
-            "message": "Local extraction (GARField service unavailable)"
+            "mask_method": mask_method,
+            "message": f"Extracted {len(selected_indices)} Gaussians using {mask_method} mask"
         }
         
     except Exception as e:
         logger.error(f"Local extraction error: {e}")
+        import traceback
+        traceback.print_exc()
         return {"status": "error", "error": str(e), "job_id": job_id}
 
 
 @app.get("/garfield/download/{job_id}")
 async def garfield_download(job_id: str):
-    """Proxy download request to GARField service"""
-    try:
-        import requests
-        response = requests.get(f"{GARFIELD_SERVICE_URL}/download/{job_id}", timeout=30, stream=True)
-        if response.status_code == 200:
-            return Response(
-                content=response.content,
-                media_type="application/octet-stream",
-                headers={"Content-Disposition": f"attachment; filename=extracted_{job_id}.ply"}
+    """Download extracted PLY file from local cache"""
+    if job_id in extraction_cache:
+        output_path = Path(extraction_cache[job_id].get('output_path', ''))
+        if output_path.exists():
+            from fastapi.responses import FileResponse
+            return FileResponse(
+                path=str(output_path),
+                filename=f"extracted_{job_id}.ply",
+                media_type="application/octet-stream"
             )
-        return JSONResponse({"error": "Download failed"}, status_code=response.status_code)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"error": "Extraction not found"}, status_code=404)
 
 
 @app.get("/garfield/status")
@@ -2651,6 +3125,27 @@ async def garfield_status():
 extraction_cache = {}
 
 
+@app.post("/garfield/clear")
+async def garfield_clear():
+    """Clear all extraction cache and delete temp PLY files"""
+    global extraction_cache
+    deleted = 0
+    for job_id, data in list(extraction_cache.items()):
+        output_path = data.get('output_path')
+        if output_path:
+            p = Path(output_path)
+            if p.exists():
+                p.unlink()
+                deleted += 1
+    extraction_cache = {}
+    # Also clean any orphaned extraction files
+    for f in MODEL_DIR.glob("_extraction_*.ply"):
+        f.unlink()
+        deleted += 1
+    logger.info(f"Cleared extraction cache, deleted {deleted} temp files")
+    return {"status": "ok", "deleted": deleted}
+
+
 @app.get("/garfield/render_extraction")
 async def render_extraction_view(
     job_id: str = Query(...),
@@ -2660,22 +3155,11 @@ async def render_extraction_view(
     width: int = Query(1024),
     height: int = Query(768)
 ):
-    """Render only the extracted gaussians with rotation"""
-    global extraction_cache
-    
-    # Get extraction indices from cache or from last extraction
+    """Render only the extracted sub-splat with orbit rotation"""
     if job_id not in extraction_cache:
-        # For local extractions, we need to re-extract with saved params
         return Response(content=b"Extraction not in cache", status_code=404)
     
-    ext_data = extraction_cache[job_id]
-    indices = ext_data.get('indices', [])
-    
-    if not indices:
-        return Response(content=b"No indices in extraction", status_code=400)
-    
-    # Render only the extracted gaussians
-    img = render_extracted_gaussians(indices, width, height, azimuth, elevation, zoom)
+    img = render_extracted_gaussians(job_id, width, height, azimuth, elevation, zoom)
     
     if img is None:
         return Response(content=b"Render failed", status_code=500)
@@ -2689,102 +3173,188 @@ async def render_extraction_view(
     return Response(content=buffer.getvalue(), media_type="image/png")
 
 
-def render_extracted_gaussians(indices, width, height, azimuth, elevation, zoom):
-    """Render full scene with camera focused on extracted region centroid"""
+def render_extracted_gaussians(job_id, width, height, azimuth, elevation, zoom):
+    """Render extracted object in-focus by cropping full-scene render to extraction bbox.
+    
+    Strategy:
+    1. Find the best training camera for the desired orbit angle
+    2. Render the full scene from that camera (sharp, trained viewpoint)
+    3. Project extracted Gaussian means to 2D → bounding box
+    4. Crop the full-scene render to the extraction bbox
+    5. Resize crop to fill the output viewport
+    
+    This gives sharp, in-focus results because we render the full scene (with all
+    trained view-dependent colors) and simply crop to the region of interest.
+    """
     import torch
     import fvdb
+    from PIL import Image as PILImage
     
-    if gsplat is None or model_metadata is None:
+    if job_id not in extraction_cache:
+        return None
+    
+    ext_data = extraction_cache[job_id]
+    indices = ext_data.get('indices', [])
+    
+    if gsplat is None or model_metadata is None or not indices:
         return None
     
     try:
-        # Get extraction data to find centroid
-        ext_data = None
-        for job_id, data in extraction_cache.items():
-            if data.get('indices') == indices:
-                ext_data = data
-                break
+        ext_cam_idx = ext_data.get('cam_idx', 0)
+        ext_azimuth = ext_data.get('azimuth', 0)
+        ext_elevation = ext_data.get('elevation', 0)
+        ext_zoom_orig = ext_data.get('zoom', 1.0)
         
-        if ext_data is None or 'positions' not in ext_data:
-            return render_view(width, height, azimuth, elevation, zoom, 0)
-        
-        positions = np.array(ext_data['positions'])
-        if len(positions) == 0:
-            return render_view(width, height, azimuth, elevation, zoom, 0)
-        
-        # Calculate centroid of extracted region
-        centroid = torch.tensor(positions.mean(axis=0), dtype=torch.float32, device=device)
-        
-        # Get camera matrices from metadata
         c2w_all = model_metadata.get('camera_to_world_matrices')
         K_all = model_metadata.get('projection_matrices')
+        sizes = model_metadata.get('image_sizes')
         
         if c2w_all is None or K_all is None:
-            return render_view(width, height, azimuth, elevation, zoom, 0)
+            return None
         
-        K = K_all[0].to(device).clone()
+        num_cams = c2w_all.shape[0]
+        ext_cam_idx = ext_cam_idx % num_cams
         
-        # Apply rotation around centroid
-        az_rad = math.radians(azimuth)
-        el_rad = math.radians(elevation)
+        # Get extraction centroid for nearest-camera search
+        idx_tensor = torch.tensor(indices, device=device, dtype=torch.long)
+        ext_means = gsplat.means[idx_tensor]
+        centroid = ext_means.mean(dim=0)
         
-        cos_az, sin_az = math.cos(az_rad), math.sin(az_rad)
-        cos_el, sin_el = math.cos(el_rad), math.sin(el_rad)
+        # Compute desired viewing direction (extraction camera + user orbit)
+        ext_c2w = c2w_all[ext_cam_idx].to(device).clone()
+        scene_center = gsplat.means.mean(dim=0)
         
-        # Rotation matrices (GPU accelerated via torch)
-        rot_y = torch.tensor([
-            [cos_az, 0, sin_az],
-            [0, 1, 0],
-            [-sin_az, 0, cos_az]
-        ], dtype=torch.float32, device=device)
+        if ext_azimuth != 0 or ext_elevation != 0:
+            az_rad = math.radians(ext_azimuth)
+            el_rad = math.radians(ext_elevation)
+            Ry = torch.tensor([[math.cos(az_rad),0,math.sin(az_rad),0],[0,1,0,0],[-math.sin(az_rad),0,math.cos(az_rad),0],[0,0,0,1]], device=device, dtype=torch.float32)
+            Rx = torch.tensor([[1,0,0,0],[0,math.cos(el_rad),-math.sin(el_rad),0],[0,math.sin(el_rad),math.cos(el_rad),0],[0,0,0,1]], device=device, dtype=torch.float32)
+            T_to = torch.eye(4, device=device, dtype=torch.float32); T_to[:3,3] = -scene_center
+            T_back = torch.eye(4, device=device, dtype=torch.float32); T_back[:3,3] = scene_center
+            ext_c2w = (T_back @ Ry @ Rx @ T_to) @ ext_c2w
         
-        rot_x = torch.tensor([
-            [1, 0, 0],
-            [0, cos_el, -sin_el],
-            [0, sin_el, cos_el]
-        ], dtype=torch.float32, device=device)
+        cam_pos_ext = ext_c2w[:3, 3].clone()
+        vd = scene_center - cam_pos_ext
+        vd = vd / (vd.norm() + 1e-8)
+        dist_val = (scene_center - cam_pos_ext).norm().item()
+        ext_c2w[:3, 3] = scene_center - vd * (dist_val / max(ext_zoom_orig, 0.1))
         
-        rot = rot_x @ rot_y
+        desired_dir = centroid - ext_c2w[:3, 3]
+        desired_dir = desired_dir / (desired_dir.norm() + 1e-8)
         
-        # Camera orbit around centroid
-        cam_distance = 1.5 / max(zoom, 0.1)
-        cam_offset = torch.tensor([0, 0, cam_distance], dtype=torch.float32, device=device)
-        cam_pos = centroid + (rot.T @ cam_offset)
+        if azimuth != 0 or elevation != 0:
+            az_rad = math.radians(azimuth)
+            el_rad = math.radians(elevation)
+            Ry3 = torch.tensor([[math.cos(az_rad),0,math.sin(az_rad)],[0,1,0],[-math.sin(az_rad),0,math.cos(az_rad)]], device=device, dtype=torch.float32)
+            Rx3 = torch.tensor([[1,0,0],[0,math.cos(el_rad),-math.sin(el_rad)],[0,math.sin(el_rad),math.cos(el_rad)]], device=device, dtype=torch.float32)
+            desired_dir = Ry3 @ Rx3 @ desired_dir
+            desired_dir = desired_dir / (desired_dir.norm() + 1e-8)
         
-        # Look at centroid
-        forward = centroid - cam_pos
-        forward = forward / (forward.norm() + 1e-8)
-        world_up = torch.tensor([0, 1, 0], dtype=torch.float32, device=device)
-        right = torch.cross(forward, world_up)
-        right = right / (right.norm() + 1e-8)
-        up = torch.cross(right, forward)
+        # Find nearest training camera for desired viewing angle
+        best_cam = ext_cam_idx
+        best_score = -2.0
+        for i in range(num_cams):
+            cam_pos_i = c2w_all[i, :3, 3].to(device)
+            d2c = centroid - cam_pos_i
+            d2c_norm = d2c.norm().item()
+            if d2c_norm < 0.01:
+                continue
+            d2c = d2c / d2c_norm
+            score = torch.dot(desired_dir, d2c).item()
+            cam_fwd = -c2w_all[i, :3, 2].to(device)
+            if torch.dot(cam_fwd, d2c).item() > 0.3 and score > best_score:
+                best_score = score
+                best_cam = i
         
-        # Build camera-to-world matrix
-        c2w = torch.eye(4, dtype=torch.float32, device=device)
-        c2w[:3, 0] = right
-        c2w[:3, 1] = up  
-        c2w[:3, 2] = -forward
-        c2w[:3, 3] = cam_pos
+        # Render full scene at 2x resolution from best training camera
+        render_w = width * 2
+        render_h = height * 2
         
-        # Render full scene with new camera (GPU accelerated via fVDB/CUDA)
-        with torch.cuda.amp.autocast():  # Use mixed precision for TensorRT-like acceleration
-            img_tensor = gsplat.render(c2w, K, width, height)
+        c2w = c2w_all[best_cam].to(device).clone()
+        c2w_batch = c2w.unsqueeze(0).contiguous()
+        w2c = torch.inverse(c2w_batch).contiguous()
         
-        img_np = (img_tensor.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+        orig_h, orig_w = sizes[best_cam].tolist()
+        K = K_all[best_cam:best_cam+1].to(device).clone()
+        K[:, 0, :] *= render_w / orig_w
+        K[:, 1, :] *= render_h / orig_h
+        K = K.contiguous()
         
-        # Add border to indicate extraction view mode
-        img_np[:2, :] = [255, 200, 0]
-        img_np[-2:, :] = [255, 200, 0]
-        img_np[:, :2] = [255, 200, 0]
-        img_np[:, -2:] = [255, 200, 0]
+        full_images, _ = gsplat.render_images(
+            world_to_camera_matrices=w2c,
+            projection_matrices=K,
+            image_width=render_w,
+            image_height=render_h,
+            near=0.01,
+            far=200.0
+        )
+        full_img = full_images[0].clamp(0, 1).cpu().numpy()
+        if full_img.shape[-1] > 3:
+            full_img = full_img[..., :3]
+        full_img = (full_img * 255).astype(np.uint8)
         
-        return img_np
+        # Project extracted Gaussian means to 2D to find bounding box
+        ones = torch.ones(len(indices), 1, device=device, dtype=ext_means.dtype)
+        means_h = torch.cat([ext_means, ones], dim=1)
+        p_cam = (w2c[0] @ means_h.T).T
+        z_vals = p_cam[:, 2]
+        valid = z_vals > 0.01
+        
+        K_mat = K[0]
+        p_2d = (K_mat @ p_cam[valid, :3].T).T
+        px = (p_2d[:, 0] / (p_2d[:, 2] + 1e-8)).cpu().numpy()
+        py = (p_2d[:, 1] / (p_2d[:, 2] + 1e-8)).cpu().numpy()
+        
+        # Filter to in-bounds projections
+        in_bounds = (px >= 0) & (px < render_w) & (py >= 0) & (py < render_h)
+        px = px[in_bounds]
+        py = py[in_bounds]
+        
+        if len(px) < 5:
+            logger.warning("Too few extraction points visible from this camera")
+            return None
+        
+        # Compute bounding box with padding
+        pad = max(render_w, render_h) * 0.05
+        x_min = max(0, int(np.percentile(px, 2) - pad))
+        x_max = min(render_w, int(np.percentile(px, 98) + pad))
+        y_min = max(0, int(np.percentile(py, 2) - pad))
+        y_max = min(render_h, int(np.percentile(py, 98) + pad))
+        
+        # Make bbox square (centered) for uniform zoom
+        cx_box = (x_min + x_max) / 2
+        cy_box = (y_min + y_max) / 2
+        side = max(x_max - x_min, y_max - y_min)
+        side = side / max(zoom, 0.1)
+        
+        x_min = max(0, int(cx_box - side / 2))
+        y_min = max(0, int(cy_box - side / 2))
+        x_max = min(render_w, int(cx_box + side / 2))
+        y_max = min(render_h, int(cy_box + side / 2))
+        
+        if x_max - x_min < 10 or y_max - y_min < 10:
+            return None
+        
+        # Crop and resize to output dimensions
+        cropped = full_img[y_min:y_max, x_min:x_max]
+        pil_crop = PILImage.fromarray(cropped)
+        pil_crop = pil_crop.resize((width, height), PILImage.LANCZOS)
+        img = np.array(pil_crop)
+        
+        # Golden border to indicate extraction view mode
+        border = 3
+        img[:border, :] = [255, 200, 0]
+        img[-border:, :] = [255, 200, 0]
+        img[:, :border] = [255, 200, 0]
+        img[:, -border:] = [255, 200, 0]
+        
+        return img
         
     except Exception as e:
         logger.error(f"Extraction render error: {e}")
         import traceback
         traceback.print_exc()
-        return render_view(width, height, azimuth, elevation, zoom, 0)
+        return None
 
 
 if __name__ == "__main__":
