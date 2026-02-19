@@ -704,7 +704,7 @@ def get_ui_html():
                     </div>
                     <div class="status-indicator">
                         <span class="status-dot" id="colmapStatus"></span>
-                        <span>COLMAP</span>
+                        <span>cuVSLAM</span>
                     </div>
                     <div class="status-indicator">
                         <span class="status-dot" id="trainingStatus"></span>
@@ -717,7 +717,7 @@ def get_ui_html():
             <!-- Right Panel: Workflow -->
             <div class="panel">
                 <h2>� SVO to Gaussian Splat</h2>
-                <p style="font-size: 0.8em; color: #888; margin-bottom: 10px;">Extract frames, run COLMAP, train splat</p>
+                <p style="font-size: 0.8em; color: #888; margin-bottom: 10px;">Extract frames, run cuVSLAM, train splat</p>
                 
                 <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; margin-bottom: 12px;">
                     <div class="workflow-param">
@@ -755,7 +755,7 @@ def get_ui_html():
                         <div class="workflow-progress"><div class="fill" id="stepExtractProgress" style="width: 0%;"></div></div>
                     </div>
                     <div class="workflow-step" id="stepColmap">
-                        <div class="step-title">2. COLMAP (Structure from Motion)</div>
+                        <div class="step-title">2. cuVSLAM (Visual SLAM)</div>
                         <div class="step-detail" id="stepColmapDetail">Waiting...</div>
                         <div class="workflow-progress"><div class="fill" id="stepColmapProgress" style="width: 0%;"></div></div>
                     </div>
@@ -819,11 +819,11 @@ def get_ui_html():
             } catch(e) {
                 document.getElementById('depthStatus').className = 'status-dot warning';
             }
-            // Check COLMAP
+            // Check cuVSLAM
             try {
                 const resp = await fetch(COLMAP_API + '/health');
                 const data2 = await resp.json();
-                document.getElementById('colmapStatus').className = (resp.ok && data2.colmap_available) ? 'status-dot' : 'status-dot warning';
+                document.getElementById('colmapStatus').className = (resp.ok && (data2.colmap_available || data2.cuvslam_available)) ? 'status-dot' : 'status-dot warning';
             } catch(e) {
                 document.getElementById('colmapStatus').className = 'status-dot error';
             }
@@ -1366,7 +1366,7 @@ def get_ui_html():
                     setStepState('stepExtract', 'completed', status.num_frames ? status.num_frames + ' frames' : 'Done', 100);
                 }
                 
-                // Step 2: COLMAP (0.2-0.7)
+                // Step 2: cuVSLAM (0.2-0.7)
                 if (progress >= 0.2 && progress < 0.7) {
                     setStepState('stepColmap', 'active', step, Math.round((progress - 0.2) / 0.5 * 100));
                 } else if (progress >= 0.7) {
@@ -1778,7 +1778,9 @@ async def workflow_extract_frames(request: dict = None):
     # Create output directories
     output_dir = FRAME_DIR / dataset_name
     images_dir = output_dir / "images"
+    images_right_dir = output_dir / "images_right"
     images_dir.mkdir(parents=True, exist_ok=True)
+    images_right_dir.mkdir(parents=True, exist_ok=True)
     
     if include_depth:
         depth_dir = output_dir / "depth"
@@ -1795,6 +1797,7 @@ async def workflow_extract_frames(request: dict = None):
     
     num_extracted = 0
     frame_idx = 0
+    has_stereo = False
     
     while True:
         ret, raw_frame = cap.read()
@@ -1811,6 +1814,13 @@ async def workflow_extract_frames(request: dict = None):
             left_bgr = cv2.cvtColor(left, cv2.COLOR_RGB2BGR)
             cv2.imwrite(str(images_dir / f"frame_{num_extracted:04d}.jpg"), left_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
             
+            # Extract right image for cuVSLAM stereo processing
+            if is_stereo:
+                has_stereo = True
+                right = rgb[:, w//2:, :]
+                right_bgr = cv2.cvtColor(right, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(str(images_right_dir / f"frame_{num_extracted:04d}.jpg"), right_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            
             # Extract depth if requested
             if include_depth:
                 depth_img = estimate_depth_from_service(left)
@@ -1823,20 +1833,21 @@ async def workflow_extract_frames(request: dict = None):
     
     cap.release()
     
-    logger.info(f"Extracted {num_extracted} frames from {current_file} to {output_dir}")
+    logger.info(f"Extracted {num_extracted} frames (stereo={has_stereo}) from {current_file} to {output_dir}")
     return {
         "status": "ok",
         "dataset_name": dataset_name,
         "num_frames": num_extracted,
         "output_dir": str(output_dir),
-        "include_depth": include_depth
+        "include_depth": include_depth,
+        "has_stereo": has_stereo
     }
 
 
 @app.post("/workflow/start")
 async def workflow_start(request: dict, background_tasks: BackgroundTasks = None):
     """Start the full SVO to Gaussian Splat pipeline.
-    Steps: Extract frames -> COLMAP/cuSFM -> fVDB Training -> View in :8085"""
+    Steps: Extract frames -> cuVSLAM -> fVDB Training -> View in :8085"""
     if not current_file:
         return JSONResponse({"error": "No file loaded"}, status_code=400)
     
@@ -1891,7 +1902,7 @@ async def workflow_list():
 
 async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
                             num_training_steps: int, include_depth: bool):
-    """Background task: full SVO -> COLMAP -> Train -> View pipeline"""
+    """Background task: full SVO -> cuVSLAM -> Train -> View pipeline"""
     wf = active_workflows[workflow_id]
     
     try:
@@ -1912,7 +1923,9 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
         
         output_dir = FRAME_DIR / dataset_name
         images_dir = output_dir / "images"
+        images_right_dir = output_dir / "images_right"
         images_dir.mkdir(parents=True, exist_ok=True)
+        images_right_dir.mkdir(parents=True, exist_ok=True)
         
         cap = cv2.VideoCapture(file_path)
         if not cap.isOpened():
@@ -1949,6 +1962,7 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
         logger.info(f"[{workflow_id}] Sampling: interval={frame_interval}, expected={total_readable // frame_interval} frames")
         
         num_extracted = 0
+        has_stereo = False
         for frame_idx, raw_frame in enumerate(all_frames):
             if frame_idx % frame_interval == 0:
                 rgb = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
@@ -1958,6 +1972,13 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
                 left_bgr = cv2.cvtColor(left, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(str(images_dir / f"frame_{num_extracted:04d}.jpg"), left_bgr,
                             [cv2.IMWRITE_JPEG_QUALITY, 95])
+                # Extract right stereo image for cuVSLAM
+                if is_stereo:
+                    has_stereo = True
+                    right = rgb[:, w//2:, :]
+                    right_bgr = cv2.cvtColor(right, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(str(images_right_dir / f"frame_{num_extracted:04d}.jpg"), right_bgr,
+                                [cv2.IMWRITE_JPEG_QUALITY, 95])
                 num_extracted += 1
                 wf["progress"] = min(0.18, 0.05 + (frame_idx / total_readable) * 0.13)
         
@@ -1970,22 +1991,35 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
         if num_extracted < 3:
             raise Exception(f"Only {num_extracted} frames extracted, need at least 3")
         
-        # === Step 2: Send to COLMAP service (Structure from Motion) ===
-        wf["current_step"] = "Sending frames to COLMAP"
+        # === Step 2: Send to cuVSLAM service (Visual SLAM) ===
+        wf["current_step"] = "Sending frames to cuVSLAM"
         wf["progress"] = 0.22
         
-        # Create a ZIP of the images for upload
+        # Create a ZIP of the images (left + right stereo) for upload
         zip_path = output_dir / "images.zip"
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for img_file in sorted(images_dir.glob("*.jpg")):
                 zf.write(img_file, f"images/{img_file.name}")
+            # Include right stereo frames if available
+            if has_stereo and images_right_dir.exists():
+                for img_file in sorted(images_right_dir.glob("*.jpg")):
+                    zf.write(img_file, f"images_right/{img_file.name}")
         
-        # Upload ZIP to COLMAP service photos-to-model workflow
+        # Upload ZIP + camera params to cuVSLAM service
+        # Include camera intrinsics JSON for accurate pose estimation
+        camera_params = json.dumps({
+            "fx": 527.6, "fy": 527.6,
+            "cx": 636.4, "cy": 361.5,
+            "baseline": 0.12
+        })
         with open(zip_path, 'rb') as f:
-            files = {'files': ('images.zip', f, 'application/zip')}
+            files = {
+                'files': ('images.zip', f, 'application/zip'),
+                'camera_params.json': ('camera_params.json', camera_params, 'application/json'),
+            }
             data = {
                 'dataset_id': dataset_name,
-                'camera_model': 'SIMPLE_RADIAL',
+                'camera_model': 'PINHOLE',
                 'matcher': 'sequential',
                 'num_training_steps': str(num_training_steps),
             }
@@ -2000,16 +2034,16 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
         zip_path.unlink(missing_ok=True)
         
         if colmap_resp.status_code != 200:
-            raise Exception(f"COLMAP service returned {colmap_resp.status_code}: {colmap_resp.text[:200]}")
+            raise Exception(f"cuVSLAM service returned {colmap_resp.status_code}: {colmap_resp.text[:200]}")
         
         colmap_data = colmap_resp.json()
         colmap_workflow_id = colmap_data.get("workflow_id", "")
         wf["colmap_workflow_id"] = colmap_workflow_id
         wf["progress"] = 0.25
-        wf["current_step"] = "COLMAP processing started"
-        logger.info(f"[{workflow_id}] COLMAP workflow: {colmap_workflow_id}")
+        wf["current_step"] = "cuVSLAM processing started"
+        logger.info(f"[{workflow_id}] cuVSLAM workflow: {colmap_workflow_id}")
         
-        # Poll COLMAP status until complete
+        # Poll cuVSLAM status until complete
         max_wait = 3600  # 1 hour max
         elapsed = 0
         while elapsed < max_wait:
@@ -2026,22 +2060,22 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
                     colmap_progress = colmap_status.get("progress", 0)
                     colmap_step = colmap_status.get("current_step", "")
                     
-                    # Map COLMAP progress (0-1) to our range (0.25-0.7)
+                    # Map cuVSLAM progress (0-1) to our range (0.25-0.7)
                     wf["progress"] = 0.25 + colmap_progress * 0.45
-                    wf["current_step"] = f"COLMAP: {colmap_step}"
+                    wf["current_step"] = f"cuVSLAM: {colmap_step}"
                     
                     if colmap_status.get("status") in ("completed", "training", "completed_colmap_only"):
                         wf["progress"] = 0.7
-                        wf["current_step"] = "COLMAP complete - sparse output ready"
-                        logger.info(f"[{workflow_id}] COLMAP complete")
+                        wf["current_step"] = "cuVSLAM complete - sparse output ready"
+                        logger.info(f"[{workflow_id}] cuVSLAM complete")
                         break
                     elif colmap_status.get("status") == "failed":
-                        raise Exception(f"COLMAP failed: {colmap_status.get('error', 'Unknown')}")
+                        raise Exception(f"cuVSLAM failed: {colmap_status.get('error', 'Unknown')}")
             except requests.exceptions.ConnectionError:
-                logger.warning(f"[{workflow_id}] COLMAP status check failed, retrying...")
+                logger.warning(f"[{workflow_id}] cuVSLAM status check failed, retrying...")
         
-        # === Step 3: Training (may have been started by COLMAP workflow) ===
-        # Check if COLMAP workflow already triggered training
+        # === Step 3: Training (may have been started by cuVSLAM workflow) ===
+        # Check if cuVSLAM workflow already triggered training
         training_job_id = None
         try:
             status_resp = requests.get(

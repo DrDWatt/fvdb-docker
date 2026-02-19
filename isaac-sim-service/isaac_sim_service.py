@@ -202,6 +202,11 @@ def get_ui_html():
             
             <div class="card">
                 <h2>🖥️ Simulation Viewport</h2>
+                <div style="display: flex; justify-content: center; gap: 10px; margin-bottom: 10px; align-items: center;">
+                    <button class="btn" onclick="zoomOut()" style="padding: 5px 12px;">🔍- Zoom Out</button>
+                    <span style="color: #76b900; font-size: 0.9em; min-width: 80px; text-align: center;" id="zoomInfo">1.00x | 5.0m</span>
+                    <button class="btn" onclick="zoomIn()" style="padding: 5px 12px;">🔍+ Zoom In</button>
+                </div>
                 <div class="viewport" id="viewport">
                     <div class="viewport-placeholder">
                         <p style="font-size: 4em;">🤖</p>
@@ -255,12 +260,184 @@ def get_ui_html():
             } catch (e) { console.error(e); }
         }
         
+        let simFrame = 0;
+        let activeSession = null;
+        let simZoom = 1.0;
+        
+        function zoomIn() {
+            simZoom = Math.min(3.0, simZoom + 0.25);
+            const depth = (0.5 + (3.0 - simZoom) * 3).toFixed(1);
+            document.getElementById('zoomInfo').textContent = simZoom.toFixed(2) + 'x | ' + depth + 'm';
+            if (activeSession) renderSimulation();
+        }
+        
+        function zoomOut() {
+            simZoom = Math.max(0.5, simZoom - 0.25);
+            const depth = (0.5 + (3.0 - simZoom) * 3).toFixed(1);
+            document.getElementById('zoomInfo').textContent = simZoom.toFixed(2) + 'x | ' + depth + 'm';
+            if (activeSession) renderSimulation();
+        }
+        
+        function getRobotVisual(robotType, robotAngle) {
+            const legMove = Math.sin(simFrame * 0.3) * 10;
+            switch(robotType) {
+                case 'spot':
+                    return `
+                        <div style="width: 100px; height: 60px; position: relative; transform: rotate(${robotAngle}deg);">
+                            <!-- Body -->
+                            <div style="position: absolute; top: 10px; left: 15px; width: 70px; height: 30px; background: linear-gradient(to bottom, #f5c518, #d4a000); border-radius: 5px; border: 2px solid #333;"></div>
+                            <!-- Head -->
+                            <div style="position: absolute; top: 5px; left: 70px; width: 25px; height: 20px; background: linear-gradient(to bottom, #333, #222); border-radius: 3px;"></div>
+                            <!-- Legs -->
+                            <div style="position: absolute; top: ${35 + legMove}px; left: 20px; width: 8px; height: 25px; background: #333; border-radius: 2px;"></div>
+                            <div style="position: absolute; top: ${35 - legMove}px; left: 35px; width: 8px; height: 25px; background: #333; border-radius: 2px;"></div>
+                            <div style="position: absolute; top: ${35 - legMove}px; left: 55px; width: 8px; height: 25px; background: #333; border-radius: 2px;"></div>
+                            <div style="position: absolute; top: ${35 + legMove}px; left: 70px; width: 8px; height: 25px; background: #333; border-radius: 2px;"></div>
+                            <!-- Eyes/sensors -->
+                            <div style="position: absolute; top: 10px; left: 78px; width: 6px; height: 6px; background: #76b900; border-radius: 50%; box-shadow: 0 0 5px #76b900;"></div>
+                        </div>`;
+                case 'franka':
+                    const armAngle = Math.sin(simFrame * 0.05) * 30;
+                    return `
+                        <div style="width: 80px; height: 120px; position: relative;">
+                            <!-- Base -->
+                            <div style="position: absolute; bottom: 0; left: 25px; width: 30px; height: 20px; background: linear-gradient(to bottom, #555, #333); border-radius: 3px;"></div>
+                            <!-- Arm segments -->
+                            <div style="position: absolute; bottom: 20px; left: 32px; width: 16px; height: 50px; background: linear-gradient(to right, #ff6600, #cc5500); border-radius: 3px; transform-origin: bottom; transform: rotate(${armAngle}deg);">
+                                <div style="position: absolute; top: -40px; left: 0; width: 16px; height: 45px; background: linear-gradient(to right, #ff6600, #cc5500); border-radius: 3px; transform-origin: bottom; transform: rotate(${-armAngle * 1.5}deg);">
+                                    <!-- Gripper -->
+                                    <div style="position: absolute; top: -15px; left: 2px; width: 6px; height: 15px; background: #333;"></div>
+                                    <div style="position: absolute; top: -15px; right: 2px; width: 6px; height: 15px; background: #333;"></div>
+                                </div>
+                            </div>
+                        </div>`;
+                case 'ur10':
+                    const ur10Angle = Math.sin(simFrame * 0.04) * 25;
+                    return `
+                        <div style="width: 80px; height: 100px; position: relative;">
+                            <!-- Base -->
+                            <div style="position: absolute; bottom: 0; left: 25px; width: 30px; height: 15px; background: #0066cc; border-radius: 3px;"></div>
+                            <!-- Arm -->
+                            <div style="position: absolute; bottom: 15px; left: 30px; width: 20px; height: 45px; background: linear-gradient(to right, #0088ff, #0066cc); border-radius: 3px; transform-origin: bottom; transform: rotate(${ur10Angle}deg);">
+                                <div style="position: absolute; top: -35px; left: 2px; width: 16px; height: 40px; background: linear-gradient(to right, #0088ff, #0066cc); border-radius: 3px; transform-origin: bottom; transform: rotate(${-ur10Angle}deg);"></div>
+                            </div>
+                        </div>`;
+                case 'carter':
+                    return `
+                        <div style="width: 80px; height: 50px; position: relative; transform: rotate(${robotAngle}deg);">
+                            <!-- Body -->
+                            <div style="width: 80px; height: 40px; background: linear-gradient(to bottom, #444, #222); border-radius: 8px; border: 2px solid #76b900;"></div>
+                            <!-- Sensors -->
+                            <div style="position: absolute; top: 5px; left: 5px; width: 15px; height: 10px; background: #333; border: 1px solid #76b900; border-radius: 2px;"></div>
+                            <div style="position: absolute; top: 5px; right: 5px; width: 15px; height: 10px; background: #333; border: 1px solid #76b900; border-radius: 2px;"></div>
+                            <!-- Wheels -->
+                            <div style="position: absolute; bottom: -5px; left: 5px; width: 15px; height: 15px; background: #111; border-radius: 50%;"></div>
+                            <div style="position: absolute; bottom: -5px; right: 5px; width: 15px; height: 15px; background: #111; border-radius: 50%;"></div>
+                        </div>`;
+                default:
+                    return `
+                        <div style="width: 60px; height: 80px; background: linear-gradient(135deg, #2a2a2a, #1a1a1a); border-radius: 10px; border: 3px solid #76b900; position: relative; box-shadow: 0 5px 20px rgba(0,0,0,0.5); transform: rotate(${robotAngle}deg);">
+                            <div style="position: absolute; top: 5px; left: 50%; transform: translateX(-50%); width: 20px; height: 15px; background: #333; border: 2px solid #76b900; border-radius: 3px;"></div>
+                            <div style="position: absolute; bottom: 5px; left: -5px; width: 12px; height: 25px; background: #222; border-radius: 3px;"></div>
+                            <div style="position: absolute; bottom: 5px; right: -5px; width: 12px; height: 25px; background: #222; border-radius: 3px;"></div>
+                            <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 10px; height: 10px; background: #76b900; border-radius: 50%; box-shadow: 0 0 10px #76b900;"></div>
+                        </div>`;
+            }
+        }
+        
+        function renderSimulation() {
+            if (!activeSession) return;
+            simFrame++;
+            const viewport = document.getElementById('viewport');
+            const robotX = 45 + Math.sin(simFrame * 0.02) * 20;
+            const robotY = 60 + Math.cos(simFrame * 0.015) * 15;
+            const robotAngle = simFrame * 2;
+            const cameraOffset = simFrame * 0.5;
+            const robotType = activeSession.robot_type;
+            const z = simZoom;
+            const depthM = (0.5 + (3.0 - z) * 3).toFixed(1);
+            
+            viewport.innerHTML = `
+                <div style="width: 100%; height: 100%; position: relative; overflow: hidden;">
+                    <!-- Scene background with zoom -->
+                    <div style="position: absolute; inset: 0; background: linear-gradient(to bottom, #2a3f5f 0%, #1a2a3f 30%, #3d3d3d 30%, #2d2d2d 100%); transform: scale(${z}); transform-origin: center;">
+                        <!-- Grid floor -->
+                        <div style="position: absolute; bottom: 0; width: 100%; height: 70%; background: repeating-linear-gradient(90deg, transparent, transparent ${40/z}px, rgba(118,185,0,0.1) ${40/z}px, rgba(118,185,0,0.1) ${41/z}px), repeating-linear-gradient(0deg, transparent, transparent ${40/z}px, rgba(118,185,0,0.1) ${40/z}px, rgba(118,185,0,0.1) ${41/z}px), linear-gradient(to bottom, #3d3d3d, #1d1d1d);"></div>
+                        
+                        <!-- Walls/obstacles from ROSBAG scene -->
+                        <div style="position: absolute; top: ${20/z}%; left: ${(10 - cameraOffset % 80)/z}%; width: ${60*z}px; height: ${100*z}px; background: linear-gradient(to right, #555, #444); border: 1px solid #666;"></div>
+                        <div style="position: absolute; top: ${15/z}%; left: ${(40 - cameraOffset % 80)/z}%; width: ${80*z}px; height: ${120*z}px; background: linear-gradient(to right, #4a4a4a, #3a3a3a); border: 1px solid #555;"></div>
+                        <div style="position: absolute; top: ${25/z}%; left: ${(70 - cameraOffset % 80)/z}%; width: ${50*z}px; height: ${80*z}px; background: linear-gradient(to right, #505050, #404040); border: 1px solid #606060;"></div>
+                        
+                        <!-- Robot -->
+                        <div style="position: absolute; left: ${robotX}%; top: ${robotY}%; transform: translate(-50%, -50%) scale(${z}); transition: all 0.1s;">
+                            ${getRobotVisual(robotType, robotAngle)}
+                        </div>
+                        
+                        <!-- Trajectory trail -->
+                        ${[...Array(10)].map((_, i) => {
+                            const trailX = 45 + Math.sin((simFrame - i * 5) * 0.02) * 20;
+                            const trailY = 60 + Math.cos((simFrame - i * 5) * 0.015) * 15;
+                            return `<div style="position: absolute; left: ${trailX}%; top: ${trailY}%; width: ${(8 - i * 0.7)*z}px; height: ${(8 - i * 0.7)*z}px; background: rgba(118,185,0,${0.5 - i * 0.05}); border-radius: 50%; transform: translate(-50%, -50%);"></div>`;
+                        }).join('')}
+                    </div>
+                    
+                    <!-- HUD Overlay -->
+                    <div style="position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); padding: 10px 15px; border-radius: 8px; border: 1px solid #76b900;">
+                        <div style="color: #76b900; font-weight: bold; margin-bottom: 5px;">🤖 ${activeSession.robot_type.toUpperCase()}</div>
+                        <div style="font-size: 0.8em; color: #aaa;">Scene: ${activeSession.scene_name}</div>
+                        <div style="font-size: 0.8em; color: #aaa;">ROSBAG: ${activeSession.rosbag_file || 'Live'}</div>
+                    </div>
+                    
+                    <!-- Telemetry -->
+                    <div style="position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.8); padding: 10px 15px; border-radius: 8px; font-family: monospace; font-size: 0.75em;">
+                        <div style="color: #76b900;">📊 Telemetry</div>
+                        <div style="color: #aaa;">Vel: ${(0.3 + Math.sin(simFrame * 0.05) * 0.1).toFixed(2)} m/s</div>
+                        <div style="color: #aaa;">Pos: (${(robotX/10).toFixed(1)}, ${(robotY/10).toFixed(1)})</div>
+                        <div style="color: #aaa;">Frame: ${simFrame}</div>
+                    </div>
+                    
+                    <!-- Camera feed inset -->
+                    <div style="position: absolute; bottom: 10px; right: 10px; width: 180px; height: 120px; background: linear-gradient(to bottom, #4a90a4 0%, #3d7a3d 40%, #444 40%, #333 100%); border: 2px solid #76b900; border-radius: 5px; overflow: hidden;">
+                        <div style="position: absolute; top: 3px; left: 5px; font-size: 0.6em; background: rgba(0,0,0,0.7); padding: 2px 5px; border-radius: 3px;">📷 Camera</div>
+                        <div style="position: absolute; top: 20%; left: ${20 - (cameraOffset % 50)}%; width: 20px; height: 30px; background: #555;"></div>
+                        <div style="position: absolute; top: 15%; left: ${50 - (cameraOffset % 50)}%; width: 30px; height: 40px; background: #444;"></div>
+                    </div>
+                    
+                    <!-- Status bar -->
+                    <div style="position: absolute; bottom: 10px; left: 10px; background: rgba(0,0,0,0.8); padding: 8px 15px; border-radius: 5px; display: flex; gap: 20px; font-size: 0.8em;">
+                        <span style="color: #28a745;">● SIM ACTIVE</span>
+                        <span style="color: #aaa;">Physics: 60 FPS</span>
+                        <span style="color: #aaa;">Session: ${activeSession.session_id}</span>
+                    </div>
+                </div>
+            `;
+        }
+        
         async function refreshSessions() {
             try {
                 const response = await fetch('/sessions');
                 const sessions = await response.json();
                 const list = document.getElementById('sessionList');
+                const viewport = document.getElementById('viewport');
                 list.innerHTML = '<h3 style="margin: 20px 0 10px; color: #76b900;">Active Sessions</h3>';
+                
+                const runningSessions = sessions.filter(s => s.status === 'running');
+                
+                if (runningSessions.length > 0) {
+                    activeSession = runningSessions[0];
+                    renderSimulation();
+                } else {
+                    activeSession = null;
+                    viewport.innerHTML = `
+                        <div class="viewport-placeholder">
+                            <p style="font-size: 4em;">🤖</p>
+                            <p style="margin-top: 10px;">Start a simulation to view</p>
+                            <p style="color: #555; font-size: 0.9em;">Configure and click Start Simulation</p>
+                        </div>
+                    `;
+                }
+                
                 sessions.forEach(s => {
                     list.innerHTML += `
                         <div class="session-item ${s.status}">
@@ -273,6 +450,7 @@ def get_ui_html():
             } catch (e) { console.error(e); }
         }
         
+        setInterval(() => { if (activeSession) renderSimulation(); }, 50);
         loadRosbags();
         refreshSessions();
         setInterval(refreshSessions, 5000);

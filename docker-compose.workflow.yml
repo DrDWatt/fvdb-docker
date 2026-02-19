@@ -1,11 +1,12 @@
 services:
-  # COLMAP Processing Service
-  colmap-service:
+  # cuVSLAM Processing Service (replaces COLMAP for stereo visual SLAM)
+  cuvslam-service:
     build:
-      context: ./colmap-service
+      context: ./cuvslam-service
       dockerfile: Dockerfile
-    image: colmap-service:source
+    image: cuvslam-service:latest
     container_name: colmap-processor
+    runtime: nvidia
     ports:
       - "8003:8003"
     volumes:
@@ -14,7 +15,7 @@ services:
       - ./colmap-data/outputs:/app/outputs
       - ./colmap-data/temp:/app/temp
       # Mount service code for live updates
-      - ./colmap-service/colmap_service.py:/app/colmap_service.py:ro
+      - ./cuvslam-service/cuvslam_service.py:/app/cuvslam_service.py:ro
     deploy:
       resources:
         reservations:
@@ -25,14 +26,14 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    runtime: nvidia
+      - TRAINING_SERVICE_URL=http://fvdb-training-gpu:8000
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
       interval: 5s
       timeout: 2s
       retries: 3
-      start_period: 2s
+      start_period: 10s
     networks:
       - workflow-net
 
@@ -193,6 +194,50 @@ services:
     networks:
       - workflow-net
 
+  # Ollama LLM Service (for RAG queries)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-llm
+    runtime: nvidia
+    ports:
+      - "11435:11434"
+    volumes:
+      - ./ollama-data:/root/.ollama
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - workflow-net
+
+  # Ollama model puller (runs once to pre-download nemotron-mini)
+  ollama-pull:
+    image: curlimages/curl:latest
+    container_name: ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c 'echo "Pulling nemotron-mini model..." &&
+             curl -s http://ollama:11434/api/pull -d "{\"name\":\"nemotron-mini\"}" &&
+             echo "Model pull complete"'
+    restart: "no"
+    networks:
+      - workflow-net
+
   # fVDB Image-based Viewer (renders to PNG, no Vulkan video encoding needed)
   fvdb-viewer:
     image: fvdb-training-gpu:latest
@@ -214,10 +259,12 @@ services:
       - LD_LIBRARY_PATH=/host-fvdb/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cublas/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/cuda-13.0/lib64
       - MODEL_DIR=/app/models
       - VIEWER_PORT=8085
+      - OLLAMA_URL=http://ollama:11434
     command: ["python3", "/app/image_viewer_service.py"]
     restart: unless-stopped
     depends_on:
       - training-service
+      - ollama
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
       interval: 10s

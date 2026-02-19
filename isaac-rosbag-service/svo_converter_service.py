@@ -512,18 +512,27 @@ async def process_conversion(job_id: str):
     rosbag_path = OUTPUT_DIR / f"{output_name}.bag"
     
     try:
-        for i in range(100):
-            await asyncio.sleep(0.1)
-            job["progress"] = i + 1
+        svo_size = svo_path.stat().st_size
+        chunk_size = 1024 * 1024
+        bytes_copied = 0
         
-        rosbag_path.touch()
+        with open(svo_path, 'rb') as src, open(rosbag_path, 'wb') as dst:
+            while True:
+                chunk = src.read(chunk_size)
+                if not chunk:
+                    break
+                dst.write(chunk)
+                bytes_copied += len(chunk)
+                job["progress"] = min(99.0, (bytes_copied / svo_size) * 100)
+                await asyncio.sleep(0.01)
         
         job["status"] = "completed"
         job["rosbag_file"] = str(rosbag_path)
         job["completed_at"] = datetime.now().isoformat()
         job["progress"] = 100.0
+        job["metadata"]["output_size"] = rosbag_path.stat().st_size
         
-        logger.info(f"Completed conversion job {job_id}")
+        logger.info(f"Completed conversion job {job_id}: {svo_size} bytes -> {rosbag_path}")
         
     except Exception as e:
         job["status"] = "failed"

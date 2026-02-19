@@ -1,8 +1,0 @@
-{
-  "num_gaussians": 22201,
-  "device": "cuda:0",
-  "num_channels": 3,
-  "num_images": 4,
-  "training_steps": 50000,
-  "output_file": "/app/outputs/job_20260130_143903_631433/zed-kitch-backwall_model.ply"
-}

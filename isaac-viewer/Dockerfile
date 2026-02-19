@@ -1,17 +1,26 @@
-# ISAAC Viewer Service
+# ISAAC Viewer Service - Refactored with SVO/SAM2/GARField support
 FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+# Install system dependencies for OpenCV
+RUN apt-get update && apt-get install -y \
+    curl \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY isaac_viewer_service.py .
 
-RUN mkdir -p /app/rosbags /app/outputs /app/frames
+RUN mkdir -p /app/svo /app/rosbags /app/outputs /app/frames
 
+ENV SVO_DIR=/app/svo
 ENV ROSBAG_DIR=/app/rosbags
 ENV OUTPUT_DIR=/app/outputs
 ENV FRAME_DIR=/app/frames

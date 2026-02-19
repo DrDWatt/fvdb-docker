@@ -676,6 +676,29 @@ async def root():
                 border-radius: 8px;
                 max-width: 350px;
             }}
+            #rag-pane {{
+                position: fixed;
+                bottom: 10px;
+                left: 50%;
+                transform: translateX(-50%);
+                background: rgba(0,0,0,0.9);
+                padding: 12px 20px;
+                border-radius: 8px;
+                border: 1px solid #ffc107;
+                z-index: 100;
+                display: flex;
+                gap: 10px;
+                align-items: center;
+            }}
+            #rag-pane h2 {{ color: #ffc107; margin: 0; font-size: 14px; white-space: nowrap; }}
+            .rag-btn {{
+                padding: 8px 15px;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                font-weight: bold;
+                font-size: 13px;
+            }}
             #garfield {{
                 position: fixed;
                 bottom: 10px;
@@ -923,8 +946,8 @@ async def root():
                 <input type="range" id="elevation" min="-45" max="45" value="0">
             </div>
             <div class="slider-group">
-                <label>Zoom: <span id="zoom-val">0.5</span>x</label>
-                <input type="range" id="zoom" min="0.1" max="2" value="0.5" step="0.1">
+                <label>Zoom: <span id="zoom-val">1</span>x</label>
+                <input type="range" id="zoom" min="0.1" max="2" value="1" step="0.1">
             </div>
             <div class="slider-group">
                 <label>Camera: <span id="cam-val">0</span></label>
@@ -945,15 +968,17 @@ async def root():
                 <button class="seg-btn seg-btn-success" id="clickSegBtn" onclick="toggleClickMode()">Click to Segment</button>
                 <button class="seg-btn seg-btn-danger" onclick="clearSegments()">Clear</button>
             </div>
-            <div style="margin-top:8px;">
-                <button class="seg-btn" style="background:#6c757d;color:white;" onclick="showSummary()">📄 RAG Query</button>
-                <button class="seg-btn" style="background:#17a2b8;color:white;" onclick="showUploadModal()">⬆️ Upload Info</button>
-            </div>
             <div id="segStatus" style="margin-top:10px;font-size:12px;color:#888;">
                 Click "Auto Segment" to detect objects<br>
                 <span style="color:#00d4ff;">Double-click objects to view/edit summaries</span>
             </div>
             <div id="labels-list"></div>
+        </div>
+        
+        <div id="rag-pane">
+            <h2>📄 RAG Query</h2>
+            <button class="rag-btn" style="background:#ffc107;color:#000;" onclick="showSummary()">Ask AI</button>
+            <button class="rag-btn" style="background:#17a2b8;color:white;" onclick="showUploadModal()">⬆️ Upload Info</button>
         </div>
         
         <div id="hover-tooltip"></div>
@@ -1113,13 +1138,37 @@ async def root():
                     // Reset controls
                     azSlider.value = 0;
                     elSlider.value = 0;
-                    zoomSlider.value = 0.5;
+                    zoomSlider.value = 1;
                     camSlider.value = 0;
+                    document.getElementById('az-val').textContent = '0';
+                    document.getElementById('el-val').textContent = '0';
+                    document.getElementById('zoom-val').textContent = '1';
+                    document.getElementById('cam-val').textContent = '0';
+                    
+                    // Clear segmentation state
+                    showSegments = false;
+                    segmentMasks = [];
+                    segmentLabelMap = {{}};
+                    document.getElementById('segStatus').textContent = 'Click "Auto Segment" to detect objects';
+                    document.getElementById('labels-list').innerHTML = '';
+                    await fetch('/segment/clear', {{ method: 'POST' }}).catch(() => {{}});
+                    
+                    // Clear extraction state
+                    if (typeof viewingExtraction !== 'undefined') viewingExtraction = null;
+                    if (typeof extractions !== 'undefined') extractions = [];
+                    if (typeof extractMode !== 'undefined') extractMode = false;
+                    const extList = document.getElementById('extraction-list');
+                    if (extList) extList.innerHTML = '';
+                    const extStatus = document.getElementById('extractStatus');
+                    if (extStatus) extStatus.textContent = 'Click to extract 3D assets from scene';
+                    await fetch('/garfield/clear', {{ method: 'POST' }}).catch(() => {{}});
                     
                     // Update info and render
                     const info = await fetch('/info').then(r => r.json());
                     document.getElementById('num-gs').textContent = info.num_gaussians || 'N/A';
                     updateRender();
+                }} else {{
+                    loading.textContent = 'Failed to load model';
                 }}
             }});
             
@@ -1273,11 +1322,22 @@ async def root():
                     if (response.ok) {{
                         const blob = await response.blob();
                         img.src = URL.createObjectURL(blob);
-                        img.style.display = 'block';
-                        loading.style.display = 'none';
+                    }} else {{
+                        // Segment render failed, fall back to normal render
+                        console.warn('Segment render failed, falling back to normal render');
+                        showSegments = false;
+                        const fallback = await fetch(`/render?azimuth=${{az}}&elevation=${{el}}&zoom=${{zoom}}&cam_idx=${{cam}}&width=1024&height=768`);
+                        if (fallback.ok) {{
+                            const blob = await fallback.blob();
+                            img.src = URL.createObjectURL(blob);
+                        }}
                     }}
                 }} catch(e) {{
                     console.error('Render error:', e);
+                    showSegments = false;
+                }} finally {{
+                    img.style.display = 'block';
+                    loading.style.display = 'none';
                 }}
             }}
             
@@ -1927,10 +1987,14 @@ async def root():
                 formData.append('height', 768);
                 
                 try {{
+                    const controller = new AbortController();
+                    const timeout = setTimeout(() => controller.abort(), 120000);
                     const response = await fetch('/garfield/extract', {{
                         method: 'POST',
-                        body: formData
+                        body: formData,
+                        signal: controller.signal
                     }});
+                    clearTimeout(timeout);
                     const data = await response.json();
                     
                     if (data.status === 'completed') {{
@@ -1944,7 +2008,12 @@ async def root():
                         document.getElementById('extractStatus').textContent = '❌ Extraction failed: ' + (data.error || data.message);
                     }}
                 }} catch(e) {{
-                    document.getElementById('extractStatus').textContent = '❌ Error: ' + e.message;
+                    const msg = e.name === 'AbortError' ? 'Extraction timed out (model may be too large)' : e.message;
+                    document.getElementById('extractStatus').textContent = '❌ Error: ' + msg;
+                }} finally {{
+                    // Ensure loading overlay is cleared
+                    loading.style.display = 'none';
+                    img.style.display = 'block';
                 }}
             }});
             
@@ -2057,51 +2126,62 @@ async def root():
                 }}
             }});
             
-            // Keyboard controls for extraction view (more reliable than trackpad)
+            // Keyboard controls for rotation (works in both extraction and normal/segmentation views)
             document.addEventListener('keydown', (e) => {{
-                if (!viewingExtraction) return;
+                // Skip if focused on an input/textarea
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
                 
-                let changed = false;
                 const rotateStep = 10;
                 const zoomStep = 0.1;
                 
-                switch(e.key) {{
-                    case 'ArrowLeft':
-                        extAzimuth -= rotateStep;
-                        changed = true;
-                        break;
-                    case 'ArrowRight':
-                        extAzimuth += rotateStep;
-                        changed = true;
-                        break;
-                    case 'ArrowUp':
-                        extElevation = Math.min(89, extElevation + rotateStep);
-                        changed = true;
-                        break;
-                    case 'ArrowDown':
-                        extElevation = Math.max(-89, extElevation - rotateStep);
-                        changed = true;
-                        break;
-                    case '+':
-                    case '=':
-                        extZoom = Math.min(5, extZoom + zoomStep);
-                        changed = true;
-                        break;
-                    case '-':
-                    case '_':
-                        extZoom = Math.max(0.2, extZoom - zoomStep);
-                        changed = true;
-                        break;
-                    case 'Escape':
-                        exitExtractionView();
-                        return;
-                }}
-                
-                if (changed) {{
-                    e.preventDefault();
-                    if (!renderPending) {{
-                        renderPending = true;
-                        renderExtractionOverlay().finally(() => {{ renderPending = false; }});
+                if (viewingExtraction) {{
+                    // Extraction view: adjust extraction orbit
+                    let changed = false;
+                    switch(e.key) {{
+                        case 'ArrowLeft':  extAzimuth -= rotateStep; changed = true; break;
+                        case 'ArrowRight': extAzimuth += rotateStep; changed = true; break;
+                        case 'ArrowUp':    extElevation = Math.min(89, extElevation + rotateStep); changed = true; break;
+                        case 'ArrowDown':  extElevation = Math.max(-89, extElevation - rotateStep); changed = true; break;
+                        case '+': case '=': extZoom = Math.min(5, extZoom + zoomStep); changed = true; break;
+                        case '-': case '_': extZoom = Math.max(0.2, extZoom - zoomStep); changed = true; break;
+                        case 'Escape': exitExtractionView(); return;
+                    }}
+                    if (changed) {{
+                        e.preventDefault();
+                        if (!renderPending) {{
+                            renderPending = true;
+                            renderExtractionOverlay().finally(() => {{ renderPending = false; }});
+                        }}
+                    }}
+                }} else {{
+                    // Normal/segmentation view: adjust main sliders
+                    let changed = false;
+                    switch(e.key) {{
+                        case 'ArrowLeft':
+                            azSlider.value = Math.max(-180, parseInt(azSlider.value) - rotateStep);
+                            changed = true; break;
+                        case 'ArrowRight':
+                            azSlider.value = Math.min(180, parseInt(azSlider.value) + rotateStep);
+                            changed = true; break;
+                        case 'ArrowUp':
+                            elSlider.value = Math.min(45, parseInt(elSlider.value) + rotateStep);
+                            changed = true; break;
+                        case 'ArrowDown':
+                            elSlider.value = Math.max(-45, parseInt(elSlider.value) - rotateStep);
+                            changed = true; break;
+                        case '+': case '=':
+                            zoomSlider.value = Math.min(2, parseFloat(zoomSlider.value) + zoomStep).toFixed(1);
+                            changed = true; break;
+                        case '-': case '_':
+                            zoomSlider.value = Math.max(0.1, parseFloat(zoomSlider.value) - zoomStep).toFixed(1);
+                            changed = true; break;
+                    }}
+                    if (changed) {{
+                        e.preventDefault();
+                        document.getElementById('az-val').textContent = azSlider.value;
+                        document.getElementById('el-val').textContent = elSlider.value;
+                        document.getElementById('zoom-val').textContent = zoomSlider.value;
+                        debouncedUpdate();
                     }}
                 }}
             }});
@@ -2556,28 +2636,6 @@ async def get_all_object_summaries():
     return {"summaries": result, "count": len(result)}
 
 
-@app.post("/object_summary/{segment_idx}/training")
-async def link_training_data(
-    segment_idx: int,
-    training_job_id: str = Form(None),
-    model_path: str = Form(None)
-):
-    """Link training data to a specific segmented object"""
-    global object_summaries
-    
-    if segment_idx not in object_summaries:
-        object_summaries[segment_idx] = {"text": "", "files": [], "training_data": {}}
-    
-    object_summaries[segment_idx]["training_data"] = {
-        "job_id": training_job_id,
-        "model_path": model_path,
-        "linked_at": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
-    
-    logger.info(f"Linked training data for object {segment_idx}: job={training_job_id}")
-    return {"status": "ok", "segment_idx": segment_idx}
-
-
 # ===== Per-Extraction RAG Metadata Endpoints =====
 
 @app.get("/extraction_summary/{job_id}")
@@ -2683,8 +2741,52 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "nemotron-mini")
 
 
+def _extract_file_text(file_info: dict, max_chars: int = 2000) -> str:
+    """Extract readable text from an uploaded file for RAG context."""
+    ct = file_info.get("content_type", "")
+    data = file_info.get("data", b"")
+    name = file_info.get("name", "file")
+    
+    # Plain text, JSON, CSV, markdown, etc.
+    if "text" in ct or ct in ("application/json", "application/csv"):
+        try:
+            return data.decode("utf-8", errors="replace")[:max_chars]
+        except Exception:
+            return ""
+    
+    # PDF extraction
+    if ct == "application/pdf" or name.lower().endswith(".pdf"):
+        try:
+            import io
+            import PyPDF2
+            reader = PyPDF2.PdfReader(io.BytesIO(data))
+            text_parts = []
+            for page in reader.pages[:10]:
+                text_parts.append(page.extract_text() or "")
+            return "\n".join(text_parts)[:max_chars]
+        except Exception:
+            pass
+        # Fallback: try pdfminer
+        try:
+            from pdfminer.high_level import extract_text as pdf_extract
+            import io
+            return pdf_extract(io.BytesIO(data))[:max_chars]
+        except Exception:
+            return f"[PDF file: {name}, {file_info.get('size', 'unknown size')}]"
+    
+    # Non-text files: include name/type as context
+    return f"[Uploaded file: {name}, type: {ct}, size: {file_info.get('size', 'unknown')}]"
+
+
 def _build_rag_context(model_name: str = None) -> str:
-    """Build a text context from all available RAG data sources"""
+    """Build a text context from all available RAG data sources.
+    
+    Aggregates data from:
+    - Model info and metadata
+    - SAM-2 segmentation (current_segments, segment_labels, object_summaries)
+    - GARField 3D extractions (extraction_cache, extraction_summaries)
+    - Uploaded documents (text, PDF, and other files)
+    """
     parts = []
 
     # Model info
@@ -2700,52 +2802,78 @@ def _build_rag_context(model_name: str = None) -> str:
         if rag_labels:
             parts.append(f"Known objects (from metadata): {', '.join(rag_labels)}")
 
-    # SAM-2 segment labels and summaries
+    # === SAM-2 Segmentation Data ===
+    # Include segment count even without manual labels
+    if current_segments and current_segments.get("masks"):
+        num_segs = current_segments.get("num_segments", len(current_segments["masks"]))
+        parts.append(f"SAM-2 segmentation: {num_segs} object(s) detected in scene")
+    
+    # Include all segment labels (auto-generated and manual)
     if segment_labels:
         labels_list = [f"{idx}: {lbl}" for idx, lbl in sorted(segment_labels.items())]
         parts.append(f"Segmented objects: {'; '.join(labels_list)}")
+    
+    # Include per-object summaries and uploaded documents
     if object_summaries:
         for idx, s in sorted(object_summaries.items()):
             label = segment_labels.get(idx, f"Object {idx}")
             text = s.get("text", "")
-            file_count = len(s.get("files", []))
-            if text or file_count:
-                entry = f"Object '{label}'"
-                if text:
-                    entry += f": {text}"
-                if file_count:
-                    entry += f" ({file_count} document(s) uploaded)"
-                # Include text content of uploaded text files
-                for f in s.get("files", []):
-                    ct = f.get("content_type", "")
-                    if "text" in ct or ct in ("application/json",):
-                        try:
-                            doc_text = f["data"].decode("utf-8", errors="replace")[:2000]
-                            entry += f"\n  Document '{f['name']}': {doc_text}"
-                        except Exception:
-                            pass
-                parts.append(entry)
+            files = s.get("files", [])
+            entry = f"SAM-2 Object '{label}'"
+            if text:
+                entry += f": {text}"
+            if files:
+                entry += f" ({len(files)} document(s) uploaded)"
+            for f in files:
+                doc_text = _extract_file_text(f)
+                if doc_text:
+                    entry += f"\n  Document '{f.get('name', 'file')}': {doc_text}"
+            parts.append(entry)
 
-    # Extraction metadata
+    # === GARField 3D Extraction Data ===
+    # Include extraction_cache entries (actual extraction data, even without user-saved summaries)
+    if extraction_cache:
+        for job_id, ext_data in extraction_cache.items():
+            num_gs = len(ext_data.get('indices', []))
+            ext_model = ext_data.get('model_name', '')
+            cam_idx = ext_data.get('cam_idx', 0)
+            
+            # Check if there's a corresponding user-saved summary
+            summary = extraction_summaries.get(job_id, {})
+            label = summary.get("label", "") or f"extraction_{job_id}"
+            text = summary.get("text", "")
+            files = summary.get("files", [])
+            
+            entry = f"3D Extraction '{label}': {num_gs} gaussians extracted from camera {cam_idx}"
+            if text:
+                entry += f" - {text}"
+            if files:
+                entry += f" ({len(files)} document(s) uploaded)"
+                for f in files:
+                    doc_text = _extract_file_text(f)
+                    if doc_text:
+                        entry += f"\n  Document '{f.get('name', 'file')}': {doc_text}"
+            parts.append(entry)
+    
+    # Include extraction_summaries that may not have a corresponding cache entry
+    # (e.g., cache was cleared but summaries remain)
     if extraction_summaries:
         for job_id, s in extraction_summaries.items():
+            if job_id in extraction_cache:
+                continue  # Already handled above
             label = s.get("label", job_id)
             text = s.get("text", "")
-            file_count = len(s.get("files", []))
-            if text or label:
+            files = s.get("files", [])
+            if text or label or files:
                 entry = f"3D Extraction '{label}'"
                 if text:
                     entry += f": {text}"
-                if file_count:
-                    entry += f" ({file_count} document(s))"
-                for f in s.get("files", []):
-                    ct = f.get("content_type", "")
-                    if "text" in ct or ct in ("application/json",):
-                        try:
-                            doc_text = f["data"].decode("utf-8", errors="replace")[:2000]
-                            entry += f"\n  Document '{f['name']}': {doc_text}"
-                        except Exception:
-                            pass
+                if files:
+                    entry += f" ({len(files)} document(s))"
+                    for f in files:
+                        doc_text = _extract_file_text(f)
+                        if doc_text:
+                            entry += f"\n  Document '{f.get('name', 'file')}': {doc_text}"
                 parts.append(entry)
 
     # Model-level uploaded summary (from rendering service)
@@ -2771,6 +2899,12 @@ async def get_rag_context(model: str = Query(None)):
     seg_labels = [segment_labels.get(idx, f"Object {idx}") for idx in sorted(segment_labels.keys())] if segment_labels else []
     docs_count = sum(len(s.get("files", [])) for s in object_summaries.values())
     docs_count += sum(len(s.get("files", [])) for s in extraction_summaries.values())
+    
+    # Count extractions from both cache and summaries
+    all_extraction_ids = set(extraction_cache.keys()) | set(extraction_summaries.keys())
+    
+    # Count SAM-2 segments from current_segments (auto-detected)
+    sam2_count = current_segments.get("num_segments", 0) if current_segments else 0
 
     model_summary = None
     if model:
@@ -2787,9 +2921,9 @@ async def get_rag_context(model: str = Query(None)):
     return {
         "model_name": model,
         "model_summary": model_summary,
-        "segments_count": len(segment_labels),
+        "segments_count": max(len(segment_labels), sam2_count),
         "segment_labels": seg_labels,
-        "extractions_count": len(extraction_summaries),
+        "extractions_count": len(all_extraction_ids),
         "documents_count": docs_count,
         "context_length": len(context_text),
     }
@@ -2833,11 +2967,12 @@ async def rag_query(body: dict):
     # Build messages
     system_msg = (
         "You are an AI assistant for a 3D Gaussian Splat viewer application. "
-        "You help users understand what is in their 3D scene based on segmentation data, "
-        "uploaded documents, and metadata. Answer concisely and accurately based on the "
+        "You help users understand what is in their 3D scene based on available data including: "
+        "SAM-2 segmentation results, GARField 3D extractions, uploaded documents/data, "
+        "and scene metadata. Answer concisely and accurately based on the "
         "available context. If you don't have enough information, say so.\n\n"
         "=== Scene Context ===\n"
-        f"{context if context else 'No context data available yet. The user has not segmented objects or uploaded documents.'}\n"
+        f"{context if context else 'No context data available yet. Try: (1) Run SAM-2 Auto Segment to detect objects, (2) Use GARField Click to Extract for 3D extractions, (3) Upload documents via Upload Info.'}\n"
         "=== End Context ==="
     )
 
@@ -2886,8 +3021,6 @@ async def rag_query(body: dict):
 
 
 # ===== GARField 3D Extraction Endpoints =====
-
-GARFIELD_SERVICE_URL = os.environ.get("GARFIELD_SERVICE_URL", "http://garfield-extraction:8006")
 
 
 @app.post("/garfield/extract")
@@ -2995,9 +3128,12 @@ async def local_garfield_extract(x, y, model_name_param, scale_level, azimuth, e
         valid = (z_np > 0.01) & np.isfinite(px) & np.isfinite(py)
         in_bounds = valid & (px >= 0) & (px < width) & (py >= 0) & (py < height)
         
-        # Vectorized mask lookup (fast)
-        px_int = np.clip(px.astype(np.int32), 0, width - 1)
-        py_int = np.clip(py.astype(np.int32), 0, height - 1)
+        # Vectorized mask lookup — only cast valid in_bounds pixels to int
+        # NaN/inf values would produce garbage int indices, so zero them first
+        px_safe = np.where(in_bounds, px, 0)
+        py_safe = np.where(in_bounds, py, 0)
+        px_int = np.clip(px_safe.astype(np.int32), 0, width - 1)
+        py_int = np.clip(py_safe.astype(np.int32), 0, height - 1)
         in_mask = in_bounds & (mask[py_int, px_int] > 0)
         
         selected_indices = np.where(in_mask)[0]
@@ -3005,6 +3141,14 @@ async def local_garfield_extract(x, y, model_name_param, scale_level, azimuth, e
         
         if len(selected_indices) == 0:
             return {"status": "no_selection", "message": "No gaussians found at click position", "job_id": job_id}
+        
+        # Cap selection to prevent OOM on very large models
+        MAX_EXTRACTION_GAUSSIANS = 200000
+        if len(selected_indices) > MAX_EXTRACTION_GAUSSIANS:
+            logger.warning(f"Selection too large ({len(selected_indices)}), sampling down to {MAX_EXTRACTION_GAUSSIANS}")
+            rng = np.random.default_rng(42)
+            selected_indices = rng.choice(selected_indices, MAX_EXTRACTION_GAUSSIANS, replace=False)
+            selected_indices.sort()
         
         # 6. DBSCAN 3D clustering to remove outlier Gaussians
         if len(selected_indices) > 10:
@@ -3017,15 +3161,35 @@ async def local_garfield_extract(x, y, model_name_param, scale_level, azimuth, e
                 eps = np.percentile(dists, 75) * 0.3 * max(scale_level, 0.2)
                 eps = max(eps, 0.005)
                 
-                clustering = DBSCAN(eps=eps, min_samples=5).fit(positions_sel)
-                labels = clustering.labels_
-                unique_labels = set(labels) - {-1}
-                
-                if unique_labels:
-                    largest = max(unique_labels, key=lambda l: np.sum(labels == l))
-                    cluster_mask = labels == largest
-                    selected_indices = selected_indices[cluster_mask]
-                    logger.info(f"DBSCAN filtered to {len(selected_indices)} Gaussians (largest cluster)")
+                # Subsample for DBSCAN if too many points (prevent OOM)
+                DBSCAN_MAX = 50000
+                if len(positions_sel) > DBSCAN_MAX:
+                    logger.info(f"Subsampling {len(positions_sel)} -> {DBSCAN_MAX} for DBSCAN")
+                    rng = np.random.default_rng(42)
+                    subsample_idx = rng.choice(len(positions_sel), DBSCAN_MAX, replace=False)
+                    clustering = DBSCAN(eps=eps, min_samples=5).fit(positions_sel[subsample_idx])
+                    # Assign remaining points to nearest cluster via centroid distance
+                    sub_labels = clustering.labels_
+                    unique_labels = set(sub_labels) - {-1}
+                    if unique_labels:
+                        largest = max(unique_labels, key=lambda l: np.sum(sub_labels == l))
+                        cluster_pts = positions_sel[subsample_idx][sub_labels == largest]
+                        cluster_centroid = cluster_pts.mean(axis=0)
+                        cluster_radius = np.percentile(np.linalg.norm(cluster_pts - cluster_centroid, axis=1), 95) * 1.2
+                        all_dists = np.linalg.norm(positions_sel - cluster_centroid, axis=1)
+                        cluster_mask = all_dists <= cluster_radius
+                        selected_indices = selected_indices[cluster_mask]
+                        logger.info(f"DBSCAN (subsampled) filtered to {len(selected_indices)} Gaussians")
+                else:
+                    clustering = DBSCAN(eps=eps, min_samples=5).fit(positions_sel)
+                    labels = clustering.labels_
+                    unique_labels = set(labels) - {-1}
+                    
+                    if unique_labels:
+                        largest = max(unique_labels, key=lambda l: np.sum(labels == l))
+                        cluster_mask = labels == largest
+                        selected_indices = selected_indices[cluster_mask]
+                        logger.info(f"DBSCAN filtered to {len(selected_indices)} Gaussians (largest cluster)")
             except ImportError:
                 # Fallback: median absolute deviation outlier removal
                 median_pos = np.median(positions_sel, axis=0)
@@ -3108,19 +3272,6 @@ async def garfield_download(job_id: str):
     return JSONResponse({"error": "Extraction not found"}, status_code=404)
 
 
-@app.get("/garfield/status")
-async def garfield_status():
-    """Check GARField service status"""
-    try:
-        import requests
-        response = requests.get(f"{GARFIELD_SERVICE_URL}/health", timeout=5)
-        if response.status_code == 200:
-            return response.json()
-    except:
-        pass
-    return {"status": "unavailable", "message": "GARField service not connected"}
-
-
 # Store extraction data for viewing
 extraction_cache = {}
 
@@ -3174,20 +3325,16 @@ async def render_extraction_view(
 
 
 def render_extracted_gaussians(job_id, width, height, azimuth, elevation, zoom):
-    """Render extracted object in-focus by cropping full-scene render to extraction bbox.
+    """Render extracted object by orbiting around extraction centroid and cropping.
     
     Strategy:
-    1. Find the best training camera for the desired orbit angle
-    2. Render the full scene from that camera (sharp, trained viewpoint)
+    1. Start from extraction camera, apply user orbit around extraction centroid
+    2. Render the full scene from the orbited camera
     3. Project extracted Gaussian means to 2D → bounding box
     4. Crop the full-scene render to the extraction bbox
     5. Resize crop to fill the output viewport
-    
-    This gives sharp, in-focus results because we render the full scene (with all
-    trained view-dependent colors) and simply crop to the region of interest.
     """
     import torch
-    import fvdb
     from PIL import Image as PILImage
     
     if job_id not in extraction_cache:
@@ -3215,15 +3362,16 @@ def render_extracted_gaussians(job_id, width, height, azimuth, elevation, zoom):
         num_cams = c2w_all.shape[0]
         ext_cam_idx = ext_cam_idx % num_cams
         
-        # Get extraction centroid for nearest-camera search
+        # Get extraction centroid and compute camera orbit
         idx_tensor = torch.tensor(indices, device=device, dtype=torch.long)
         ext_means = gsplat.means[idx_tensor]
         centroid = ext_means.mean(dim=0)
         
-        # Compute desired viewing direction (extraction camera + user orbit)
-        ext_c2w = c2w_all[ext_cam_idx].to(device).clone()
+        # Start from extraction camera, recreating the user's original viewpoint
+        c2w = c2w_all[ext_cam_idx].to(device).clone()
         scene_center = gsplat.means.mean(dim=0)
         
+        # Apply extraction orbit around scene center (matching render_view)
         if ext_azimuth != 0 or ext_elevation != 0:
             az_rad = math.radians(ext_azimuth)
             el_rad = math.radians(ext_elevation)
@@ -3231,51 +3379,34 @@ def render_extracted_gaussians(job_id, width, height, azimuth, elevation, zoom):
             Rx = torch.tensor([[1,0,0,0],[0,math.cos(el_rad),-math.sin(el_rad),0],[0,math.sin(el_rad),math.cos(el_rad),0],[0,0,0,1]], device=device, dtype=torch.float32)
             T_to = torch.eye(4, device=device, dtype=torch.float32); T_to[:3,3] = -scene_center
             T_back = torch.eye(4, device=device, dtype=torch.float32); T_back[:3,3] = scene_center
-            ext_c2w = (T_back @ Ry @ Rx @ T_to) @ ext_c2w
+            c2w = (T_back @ Ry @ Rx @ T_to) @ c2w
         
-        cam_pos_ext = ext_c2w[:3, 3].clone()
-        vd = scene_center - cam_pos_ext
+        # Apply extraction zoom
+        cam_pos = c2w[:3, 3].clone()
+        vd = scene_center - cam_pos
         vd = vd / (vd.norm() + 1e-8)
-        dist_val = (scene_center - cam_pos_ext).norm().item()
-        ext_c2w[:3, 3] = scene_center - vd * (dist_val / max(ext_zoom_orig, 0.1))
+        dist_val = (scene_center - cam_pos).norm().item()
+        c2w[:3, 3] = scene_center - vd * (dist_val / max(ext_zoom_orig, 0.1))
         
-        desired_dir = centroid - ext_c2w[:3, 3]
-        desired_dir = desired_dir / (desired_dir.norm() + 1e-8)
-        
+        # Apply user orbit rotation around extraction CENTROID
         if azimuth != 0 or elevation != 0:
             az_rad = math.radians(azimuth)
             el_rad = math.radians(elevation)
-            Ry3 = torch.tensor([[math.cos(az_rad),0,math.sin(az_rad)],[0,1,0],[-math.sin(az_rad),0,math.cos(az_rad)]], device=device, dtype=torch.float32)
-            Rx3 = torch.tensor([[1,0,0],[0,math.cos(el_rad),-math.sin(el_rad)],[0,math.sin(el_rad),math.cos(el_rad)]], device=device, dtype=torch.float32)
-            desired_dir = Ry3 @ Rx3 @ desired_dir
-            desired_dir = desired_dir / (desired_dir.norm() + 1e-8)
+            Ry = torch.tensor([[math.cos(az_rad),0,math.sin(az_rad),0],[0,1,0,0],[-math.sin(az_rad),0,math.cos(az_rad),0],[0,0,0,1]], device=device, dtype=torch.float32)
+            Rx = torch.tensor([[1,0,0,0],[0,math.cos(el_rad),-math.sin(el_rad),0],[0,math.sin(el_rad),math.cos(el_rad),0],[0,0,0,1]], device=device, dtype=torch.float32)
+            T_to = torch.eye(4, device=device, dtype=torch.float32); T_to[:3,3] = -centroid
+            T_back = torch.eye(4, device=device, dtype=torch.float32); T_back[:3,3] = centroid
+            c2w = (T_back @ Ry @ Rx @ T_to) @ c2w
         
-        # Find nearest training camera for desired viewing angle
-        best_cam = ext_cam_idx
-        best_score = -2.0
-        for i in range(num_cams):
-            cam_pos_i = c2w_all[i, :3, 3].to(device)
-            d2c = centroid - cam_pos_i
-            d2c_norm = d2c.norm().item()
-            if d2c_norm < 0.01:
-                continue
-            d2c = d2c / d2c_norm
-            score = torch.dot(desired_dir, d2c).item()
-            cam_fwd = -c2w_all[i, :3, 2].to(device)
-            if torch.dot(cam_fwd, d2c).item() > 0.3 and score > best_score:
-                best_score = score
-                best_cam = i
-        
-        # Render full scene at 2x resolution from best training camera
+        # Render full scene at 2x resolution from orbited camera
         render_w = width * 2
         render_h = height * 2
         
-        c2w = c2w_all[best_cam].to(device).clone()
         c2w_batch = c2w.unsqueeze(0).contiguous()
         w2c = torch.inverse(c2w_batch).contiguous()
         
-        orig_h, orig_w = sizes[best_cam].tolist()
-        K = K_all[best_cam:best_cam+1].to(device).clone()
+        orig_h, orig_w = sizes[ext_cam_idx].tolist()
+        K = K_all[ext_cam_idx:ext_cam_idx+1].to(device).clone()
         K[:, 0, :] *= render_w / orig_w
         K[:, 1, :] *= render_h / orig_h
         K = K.contiguous()
