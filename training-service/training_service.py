@@ -23,6 +23,8 @@ import sys
 import ssl
 import urllib.request
 import subprocess
+import httpx
+from fastapi import Form, Request, Response
 
 # Disable SSL verification for downloads (training environment)
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -108,6 +110,7 @@ class TrainingRequest(BaseModel):
     dataset_id: str
     num_training_steps: Optional[int] = 62200
     output_name: Optional[str] = None
+    use_mcmc: Optional[bool] = False
 
 class DatasetUploadURL(BaseModel):
     """Request to upload dataset from URL"""
@@ -191,7 +194,8 @@ def find_colmap_dir(dataset_path: Path) -> Optional[Path]:
     return None
 
 async def train_gaussian_splat(job_id: str, dataset_path: Path, 
-                               num_steps: int, output_name: str):
+                               num_steps: int, output_name: str,
+                               use_mcmc: bool = False):
     """Background task to train Gaussian splat"""
     try:
         # Lazy import fVDB to avoid import errors at startup
@@ -240,19 +244,30 @@ async def train_gaussian_splat(job_id: str, dataset_path: Path,
         refine_until = int(total_epochs * 0.95)
         
         config = frc.radiance_fields.GaussianSplatReconstructionConfig(
-            max_steps=num_steps,
+            max_epochs=total_epochs,
             refine_stop_epoch=refine_until,  # Continue refining until 95% done
             refine_every_epoch=0.5  # More frequent refinement (default is 0.65)
         )
         
-        logger.info(f"Training config: {num_steps} steps, {total_epochs} epochs, refining until epoch {refine_until}")
+        # Select optimizer: MCMC or standard
+        if use_mcmc:
+            optimizer_config = frc.radiance_fields.GaussianSplatOptimizerMCMCConfig(
+                max_gaussians=1_000_000,  # Cap to prevent OOM from unbounded 5% growth
+                noise_lr=5e2,  # Reduced from 5e5 default to prevent position explosion
+            )
+            logger.info(f"Using MCMC optimizer: {num_steps} steps, {total_epochs} epochs, max_gaussians=1M, noise_lr=500, refining until epoch {refine_until}")
+        else:
+            optimizer_config = frc.radiance_fields.GaussianSplatOptimizerConfig()
+            logger.info(f"Using standard optimizer: {num_steps} steps, {total_epochs} epochs, refining until epoch {refine_until}")
         
         runner = frc.radiance_fields.GaussianSplatReconstruction.from_sfm_scene(
             scene,
-            config=config
+            config=config,
+            optimizer_config=optimizer_config
         )
         
-        training_jobs[job_id]["message"] = f"Training {num_steps} steps..."
+        optimizer_label = "MCMC" if use_mcmc else "Standard"
+        training_jobs[job_id]["message"] = f"{optimizer_label} training {num_steps} steps..."
         training_jobs[job_id]["progress"] = 0.3
         
         # Train (no parameters needed - steps configured in config)
@@ -943,6 +958,8 @@ async def start_training(
     job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
     output_name = request.output_name or f"model_{job_id}"
     
+    use_mcmc = request.use_mcmc or False
+    
     # Initialize job state
     initial_state = {
         "job_id": job_id,
@@ -951,7 +968,8 @@ async def start_training(
         "message": "Starting training subprocess...",
         "created_at": datetime.now().isoformat(),
         "dataset_id": request.dataset_id,
-        "num_training_steps": request.num_training_steps
+        "num_training_steps": request.num_training_steps,
+        "use_mcmc": use_mcmc
     }
     save_job_state(job_id, initial_state)
     
@@ -964,7 +982,8 @@ async def start_training(
                 str(dataset_path),
                 str(request.num_training_steps),
                 output_name,
-                str(OUTPUT_DIR)
+                str(OUTPUT_DIR),
+                str(use_mcmc)
             ],
             stdout=open(f"/tmp/train_{job_id}.log", "w"),
             stderr=subprocess.STDOUT,
@@ -1114,7 +1133,8 @@ async def complete_workflow(
     url: Optional[str] = None,
     dataset_name: Optional[str] = None,
     num_steps: int = 30000,  # Default to 30000 for professional quality (3DGS standard)
-    output_name: Optional[str] = None
+    output_name: Optional[str] = None,
+    use_mcmc: bool = False
 ):
     """
     End-to-end workflow: Upload dataset (ZIP or URL) → Train → Export
@@ -1180,7 +1200,8 @@ async def complete_workflow(
             "message": "Workflow started - training queued",
             "created_at": datetime.now().isoformat(),
             "dataset_id": dataset_id,
-            "num_training_steps": num_steps
+            "num_training_steps": num_steps,
+            "use_mcmc": use_mcmc
         }
         
         background_tasks.add_task(
@@ -1188,7 +1209,8 @@ async def complete_workflow(
             job_id=job_id,
             dataset_path=dataset_path,
             num_steps=num_steps,
-            output_name=model_name
+            output_name=model_name,
+            use_mcmc=use_mcmc
         )
         
         return {
@@ -1208,6 +1230,73 @@ async def complete_workflow(
     except Exception as e:
         logger.error(f"Workflow failed: {e}")
         raise HTTPException(500, f"Workflow failed: {e}")
+
+# ===========================================================================
+# Workflow proxy endpoints - forward to cuvslam-service (colmap-processor:8003)
+# Keeps uploads same-origin to avoid cross-origin issues with large files
+# ===========================================================================
+
+CUVSLAM_URL = os.environ.get("CUVSLAM_SERVICE_URL", "http://colmap-processor:8003")
+
+@app.post("/workflow/video-to-model")
+async def proxy_video_to_model(request: Request):
+    """Proxy video upload to cuvslam-service to avoid cross-origin upload issues"""
+    body = await request.body()
+    content_type = request.headers.get("content-type", "")
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        resp = await client.post(
+            f"{CUVSLAM_URL}/workflow/video-to-model",
+            content=body,
+            headers={"content-type": content_type}
+        )
+    return Response(content=resp.content, status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type"))
+
+@app.post("/workflow/photos-to-model")
+async def proxy_photos_to_model(request: Request):
+    """Proxy photos upload to cuvslam-service"""
+    body = await request.body()
+    content_type = request.headers.get("content-type", "")
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        resp = await client.post(
+            f"{CUVSLAM_URL}/workflow/photos-to-model",
+            content=body,
+            headers={"content-type": content_type}
+        )
+    return Response(content=resp.content, status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type"))
+
+@app.get("/workflow/list")
+async def proxy_workflow_list():
+    """Proxy workflow list from cuvslam-service"""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(f"{CUVSLAM_URL}/workflow/list")
+    return Response(content=resp.content, status_code=resp.status_code,
+                    media_type="application/json")
+
+@app.get("/workflow/status/{workflow_id}")
+async def proxy_workflow_status(workflow_id: str):
+    """Proxy workflow status from cuvslam-service"""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(f"{CUVSLAM_URL}/workflow/status/{workflow_id}")
+    return Response(content=resp.content, status_code=resp.status_code,
+                    media_type="application/json")
+
+@app.delete("/workflow/clear/all")
+async def proxy_clear_all_workflows():
+    """Proxy clear all workflows to cuvslam-service"""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.delete(f"{CUVSLAM_URL}/workflow/clear/all")
+    return Response(content=resp.content, status_code=resp.status_code,
+                    media_type="application/json")
+
+@app.delete("/workflow/{workflow_id}")
+async def proxy_delete_workflow(workflow_id: str):
+    """Proxy delete workflow to cuvslam-service"""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.delete(f"{CUVSLAM_URL}/workflow/{workflow_id}")
+    return Response(content=resp.content, status_code=resp.status_code,
+                    media_type="application/json")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

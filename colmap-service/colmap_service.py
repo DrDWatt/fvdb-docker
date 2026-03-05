@@ -503,6 +503,7 @@ async def workflow_video_to_model(
     camera_model: str = Form("SIMPLE_RADIAL"),
     matcher: str = Form("exhaustive"),
     num_training_steps: int = Form(30000),
+    use_mcmc: str = Form("false"),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
@@ -675,7 +676,8 @@ async def workflow_video_to_model(
                         json={
                             "dataset_id": dataset_id,
                             "num_training_steps": num_training_steps,
-                            "output_name": f"{dataset_id}_model"
+                            "output_name": f"{dataset_id}_model",
+                            "use_mcmc": use_mcmc.lower() == "true"
                         }
                     )
                     
@@ -850,6 +852,7 @@ async def workflow_photos_to_model(
     camera_model: str = Form("SIMPLE_RADIAL"),
     matcher: str = Form("exhaustive"),
     num_training_steps: int = Form(30000),
+    use_mcmc: str = Form("false"),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
@@ -1026,7 +1029,8 @@ async def workflow_photos_to_model(
                         json={
                             "dataset_id": dataset_id,
                             "num_training_steps": num_training_steps,
-                            "output_name": f"{dataset_id}_model"
+                            "output_name": f"{dataset_id}_model",
+                            "use_mcmc": use_mcmc.lower() == "true"
                         }
                     )
                     

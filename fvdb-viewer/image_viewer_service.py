@@ -936,6 +936,8 @@ async def root():
                 </select>
                 <button onclick="refreshModels()" style="margin-left:5px;padding:5px 8px;background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer;" title="Refresh model list">🔄</button>
                 <button onclick="deleteCurrentModel()" style="margin-left:10px;padding:5px 10px;background:#dc3545;color:white;border:none;border-radius:4px;cursor:pointer;">🗑️ Delete</button>
+                <button onclick="document.getElementById('ply-upload').click()" style="margin-left:10px;padding:5px 10px;background:#6c63ff;color:white;border:none;border-radius:4px;cursor:pointer;">⬆️ Upload .ply</button>
+                <input type="file" id="ply-upload" accept=".ply" style="display:none;" onchange="uploadPlyFile(this)" />
             </div>
             <div class="slider-group">
                 <label>Rotation: <span id="az-val">0</span>°</label>
@@ -952,6 +954,23 @@ async def root():
             <div class="slider-group">
                 <label>Camera: <span id="cam-val">0</span></label>
                 <input type="range" id="camera" min="0" max="14" value="0" step="1">
+            </div>
+            <hr style="border-color:#444;margin:10px 0;">
+            <div style="margin-bottom:6px;"><strong style="color:#76b900;">🎥 Flythrough</strong></div>
+            <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
+                <button id="flyBtn" onclick="toggleFlythrough()" style="padding:5px 12px;background:#76b900;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">▶ Play</button>
+                <button onclick="exportFlythrough()" id="exportBtn" style="padding:5px 10px;background:#17a2b8;color:white;border:none;border-radius:4px;cursor:pointer;">📥 Export MP4</button>
+                <label style="font-size:11px;">Frames:</label>
+                <input type="number" id="flyFrames" value="120" min="10" max="600" style="width:50px;padding:3px;">
+                <label style="font-size:11px;">FPS:</label>
+                <input type="number" id="flyFps" value="24" min="1" max="60" style="width:40px;padding:3px;">
+            </div>
+            <div style="margin-top:6px;">
+                <input type="range" id="flyProgress" min="0" max="119" value="0" style="width:100%;" oninput="seekFlythrough(this.value)">
+                <div style="display:flex;justify-content:space-between;font-size:11px;color:#888;">
+                    <span id="flyFrameLabel">Frame 0 / 120</span>
+                    <span id="flyStatus" style="color:#76b900;"></span>
+                </div>
             </div>
         </div>
         
@@ -1190,6 +1209,46 @@ async def root():
                 }}
             }}
             
+            // Upload a .ply file
+            async function uploadPlyFile(input) {{
+                const file = input.files[0];
+                if (!file) return;
+                if (!file.name.endsWith('.ply')) {{
+                    alert('Please select a .ply file');
+                    input.value = '';
+                    return;
+                }}
+                const btn = input.previousElementSibling;
+                const origText = btn.textContent;
+                btn.textContent = '⏳ Uploading...';
+                btn.disabled = true;
+                try {{
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    const resp = await fetch('/upload_model', {{
+                        method: 'POST',
+                        body: formData
+                    }});
+                    const data = await resp.json();
+                    if (resp.ok) {{
+                        alert('Uploaded ' + file.name + ' successfully!');
+                        await refreshModels();
+                        // Auto-load the uploaded model
+                        const select = document.getElementById('model-select');
+                        select.value = file.name;
+                        select.dispatchEvent(new Event('change'));
+                    }} else {{
+                        alert('Upload failed: ' + (data.detail || data.message || 'Unknown error'));
+                    }}
+                }} catch(e) {{
+                    alert('Upload error: ' + e);
+                }} finally {{
+                    btn.textContent = origText;
+                    btn.disabled = false;
+                    input.value = '';
+                }}
+            }}
+
             // Refresh models list from server
             async function refreshModels() {{
                 const response = await fetch('/info');
@@ -1220,6 +1279,134 @@ async def root():
             
             // Initial load
             refreshModels().then(() => updateRender());
+            
+            // ==================== Flythrough Functions ====================
+            let flyPlaying = false;
+            let flyFrame = 0;
+            let flyTimer = null;
+            let flyFrameCache = {{}};
+            
+            function toggleFlythrough() {{
+                if (flyPlaying) {{
+                    stopFlythrough();
+                }} else {{
+                    startFlythrough();
+                }}
+            }}
+            
+            function startFlythrough() {{
+                flyPlaying = true;
+                const btn = document.getElementById('flyBtn');
+                btn.textContent = '⏸ Pause';
+                btn.style.background = '#dc3545';
+                document.getElementById('flyStatus').textContent = 'Playing...';
+                playNextFrame();
+            }}
+            
+            function stopFlythrough() {{
+                flyPlaying = false;
+                if (flyTimer) clearTimeout(flyTimer);
+                flyTimer = null;
+                const btn = document.getElementById('flyBtn');
+                btn.textContent = '▶ Play';
+                btn.style.background = '#76b900';
+                document.getElementById('flyStatus').textContent = 'Paused';
+            }}
+            
+            async function playNextFrame() {{
+                if (!flyPlaying) return;
+                const numFrames = parseInt(document.getElementById('flyFrames').value) || 120;
+                const fps = parseInt(document.getElementById('flyFps').value) || 24;
+                const camIdx = parseInt(document.getElementById('camera').value) || 0;
+                
+                // Update progress bar
+                document.getElementById('flyProgress').max = numFrames - 1;
+                document.getElementById('flyProgress').value = flyFrame;
+                document.getElementById('flyFrameLabel').textContent = `Frame ${{flyFrame}} / ${{numFrames}}`;
+                
+                // Fetch and display frame
+                const url = `/flythrough/frame/${{flyFrame}}?num_frames=${{numFrames}}&width=1024&height=768&cam_idx=${{camIdx}}`;
+                try {{
+                    const response = await fetch(url);
+                    if (response.ok) {{
+                        const blob = await response.blob();
+                        const img = document.getElementById('render');
+                        img.src = URL.createObjectURL(blob);
+                        img.style.display = 'block';
+                    }}
+                }} catch(e) {{
+                    console.error('Flythrough frame error:', e);
+                }}
+                
+                // Advance to next frame
+                flyFrame = (flyFrame + 1) % numFrames;
+                if (flyFrame === 0 && flyPlaying) {{
+                    // Loop completed
+                    document.getElementById('flyStatus').textContent = 'Looping...';
+                }}
+                
+                if (flyPlaying) {{
+                    // Schedule next frame - adapt delay based on actual render time
+                    flyTimer = setTimeout(playNextFrame, 1000 / fps);
+                }}
+            }}
+            
+            async function seekFlythrough(frameNum) {{
+                flyFrame = parseInt(frameNum);
+                const numFrames = parseInt(document.getElementById('flyFrames').value) || 120;
+                const camIdx = parseInt(document.getElementById('camera').value) || 0;
+                document.getElementById('flyFrameLabel').textContent = `Frame ${{flyFrame}} / ${{numFrames}}`;
+                
+                const url = `/flythrough/frame/${{flyFrame}}?num_frames=${{numFrames}}&width=1024&height=768&cam_idx=${{camIdx}}`;
+                try {{
+                    const response = await fetch(url);
+                    if (response.ok) {{
+                        const blob = await response.blob();
+                        const img = document.getElementById('render');
+                        img.src = URL.createObjectURL(blob);
+                        img.style.display = 'block';
+                    }}
+                }} catch(e) {{
+                    console.error('Seek error:', e);
+                }}
+            }}
+            
+            async function exportFlythrough() {{
+                const numFrames = parseInt(document.getElementById('flyFrames').value) || 120;
+                const fps = parseInt(document.getElementById('flyFps').value) || 24;
+                const camIdx = parseInt(document.getElementById('camera').value) || 0;
+                const btn = document.getElementById('exportBtn');
+                btn.disabled = true;
+                btn.textContent = '⏳ Rendering...';
+                document.getElementById('flyStatus').textContent = `Exporting ${{numFrames}} frames...`;
+                
+                try {{
+                    const response = await fetch(
+                        `/flythrough/export?num_frames=${{numFrames}}&fps=${{fps}}&width=1024&height=768&cam_idx=${{camIdx}}`,
+                        {{ method: 'POST' }}
+                    );
+                    if (response.ok) {{
+                        const blob = await response.blob();
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = 'flythrough.mp4';
+                        a.click();
+                        URL.revokeObjectURL(url);
+                        document.getElementById('flyStatus').textContent = 'Export complete!';
+                    }} else {{
+                        const err = await response.json();
+                        alert('Export failed: ' + (err.message || 'Unknown error'));
+                        document.getElementById('flyStatus').textContent = 'Export failed';
+                    }}
+                }} catch(e) {{
+                    alert('Export error: ' + e);
+                    document.getElementById('flyStatus').textContent = '';
+                }} finally {{
+                    btn.disabled = false;
+                    btn.textContent = '📥 Export MP4';
+                }}
+            }}
             
             // ==================== Segmentation Functions ====================
             let clickMode = false;
@@ -2271,6 +2458,40 @@ async def info():
 @app.get("/health")
 async def health():
     return {"status": "healthy", "model_loaded": gsplat is not None}
+
+@app.post("/upload_model")
+async def upload_model_endpoint(file: UploadFile = File(...)):
+    """Upload a .ply model file to the models directory"""
+    if not file.filename.endswith('.ply'):
+        return JSONResponse(
+            status_code=400,
+            content={"message": "Only .ply files are accepted"}
+        )
+    
+    dest_path = MODEL_DIR / file.filename
+    try:
+        content = await file.read()
+        with open(dest_path, "wb") as f:
+            f.write(content)
+        
+        logger.info(f"Uploaded model: {file.filename} ({len(content) / 1024 / 1024:.1f} MB)")
+        
+        # Refresh available models list
+        global available_models
+        available_models = get_available_models()
+        
+        return {
+            "status": "ok",
+            "message": f"Uploaded {file.filename}",
+            "filename": file.filename,
+            "size_mb": round(len(content) / 1024 / 1024, 1)
+        }
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"Upload failed: {str(e)}"}
+        )
 
 @app.delete("/delete_model")
 async def delete_model_endpoint(model: str = Query(...)):
@@ -3486,6 +3707,125 @@ def render_extracted_gaussians(job_id, width, height, azimuth, elevation, zoom):
         import traceback
         traceback.print_exc()
         return None
+
+
+# ===== Camera Flythrough Endpoints =====
+
+def generate_flythrough_params(num_frames=120, cam_idx=0):
+    """Generate smooth camera path params for a flythrough animation.
+    
+    Creates a circular orbit with sinusoidal elevation and zoom variation,
+    keeping the model center in focus throughout.
+    """
+    frames = []
+    for i in range(num_frames):
+        t = i / num_frames  # 0.0 to 1.0
+        
+        # Full 360° orbit
+        azimuth = -180 + t * 360
+        
+        # Sinusoidal elevation: gently bob between -20° and 20°
+        elevation = 15 * math.sin(t * 2 * math.pi)
+        
+        # Sinusoidal zoom: vary between 0.6x and 1.4x
+        zoom = 1.0 + 0.4 * math.sin(t * 3 * math.pi)
+        
+        # Cycle through a few camera indices for perspective variety
+        cam = cam_idx
+        
+        frames.append({
+            "frame": i,
+            "azimuth": round(azimuth, 2),
+            "elevation": round(elevation, 2),
+            "zoom": round(zoom, 3),
+            "cam_idx": cam
+        })
+    
+    return frames
+
+
+@app.get("/flythrough/config")
+async def flythrough_config(
+    num_frames: int = Query(120, ge=10, le=600),
+    cam_idx: int = Query(0, ge=0)
+):
+    """Get the flythrough camera path configuration"""
+    params = generate_flythrough_params(num_frames, cam_idx)
+    return {"num_frames": num_frames, "frames": params}
+
+
+@app.get("/flythrough/frame/{frame_num}")
+async def flythrough_frame(
+    frame_num: int,
+    num_frames: int = Query(120, ge=10, le=600),
+    width: int = Query(1024, ge=100, le=1920),
+    height: int = Query(768, ge=100, le=1080),
+    cam_idx: int = Query(0, ge=0)
+):
+    """Render a single flythrough frame"""
+    params = generate_flythrough_params(num_frames, cam_idx)
+    if frame_num < 0 or frame_num >= len(params):
+        return Response(content="Frame out of range", status_code=400)
+    
+    p = params[frame_num]
+    img = render_view(width, height, p["azimuth"], p["elevation"], p["zoom"], p["cam_idx"])
+    
+    if img is None:
+        return Response(content="Render failed", status_code=500)
+    
+    from PIL import Image as PILImage
+    pil_img = PILImage.fromarray(img)
+    buffer = io.BytesIO()
+    pil_img.save(buffer, format='JPEG', quality=90)
+    buffer.seek(0)
+    
+    return Response(content=buffer.getvalue(), media_type="image/jpeg")
+
+
+@app.post("/flythrough/export")
+async def flythrough_export(
+    num_frames: int = Query(120, ge=10, le=600),
+    width: int = Query(1024, ge=100, le=1920),
+    height: int = Query(768, ge=100, le=1080),
+    fps: int = Query(30, ge=1, le=60),
+    cam_idx: int = Query(0, ge=0)
+):
+    """Export flythrough as MP4 video using OpenCV"""
+    import cv2
+    
+    params = generate_flythrough_params(num_frames, cam_idx)
+    output_path = MODEL_DIR / f"{model_name}_flythrough.mp4"
+    
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    
+    if not writer.isOpened():
+        return JSONResponse(status_code=500, content={"message": "Failed to initialize video writer"})
+    
+    try:
+        rendered = 0
+        for i, p in enumerate(params):
+            img = render_view(width, height, p["azimuth"], p["elevation"], p["zoom"], p["cam_idx"])
+            if img is None:
+                continue
+            # OpenCV expects BGR
+            bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            writer.write(bgr)
+            rendered += 1
+    finally:
+        writer.release()
+    
+    if rendered == 0:
+        return JSONResponse(status_code=500, content={"message": "No frames rendered"})
+    
+    logger.info(f"Flythrough exported: {output_path} ({rendered} frames at {fps}fps)")
+    
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        path=str(output_path),
+        media_type="video/mp4",
+        filename=f"{model_name}_flythrough.mp4"
+    )
 
 
 if __name__ == "__main__":

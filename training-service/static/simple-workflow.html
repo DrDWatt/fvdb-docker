@@ -227,6 +227,14 @@
                         <label>Training Steps</label>
                         <input type="number" id="steps" value="30000" min="10000" max="50000" step="1000">
                     </div>
+                    <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="useMcmc" style="width: auto; margin: 0;" checked>
+                        <label for="useMcmc" style="margin: 0; cursor: pointer;" title="Monte Carlo Markov Chain optimizer - better quality for complex scenes">MCMC Training</label>
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="filterBlur" style="width: auto; margin: 0;" checked>
+                        <label for="filterBlur" style="margin: 0; cursor: pointer;" title="Use sharp-frames to remove blurry frames before reconstruction">Filter Blurry Frames</label>
+                    </div>
                 </div>
                 <button type="submit" class="btn" id="uploadBtn">🎬 Start Video Workflow</button>
             </form>
@@ -256,6 +264,14 @@
                         <label>Training Steps</label>
                         <input type="number" id="photosSteps" value="30000" min="10000" max="50000" step="1000">
                     </div>
+                    <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="photosUseMcmc" style="width: auto; margin: 0;" checked>
+                        <label for="photosUseMcmc" style="margin: 0; cursor: pointer;" title="Monte Carlo Markov Chain optimizer - better quality for complex scenes">MCMC Training</label>
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="photosFilterBlur" style="width: auto; margin: 0;" checked>
+                        <label for="photosFilterBlur" style="margin: 0; cursor: pointer;" title="Use sharp-frames to remove blurry frames before reconstruction">Filter Blurry Frames</label>
+                    </div>
                 </div>
                 <button type="submit" class="btn" id="photosBtn">📷 Start Photos Workflow</button>
             </form>
@@ -278,8 +294,8 @@
     </div>
 
     <script>
-        // Use dynamic hostname for remote access
-        const COLMAP_API = `http://${window.location.hostname}:8003`;
+        // Use same-origin API to avoid cross-origin issues with large file uploads
+        const COLMAP_API = `http://${window.location.hostname}:${window.location.port || 8000}`;
         
         let selectedWorkflowId = null;
         let updateInterval = null;
@@ -298,6 +314,8 @@
             formData.append('camera_model', 'SIMPLE_RADIAL');
             formData.append('matcher', 'exhaustive');
             formData.append('num_training_steps', document.getElementById('steps').value);
+            formData.append('use_mcmc', document.getElementById('useMcmc').checked ? 'true' : 'false');
+            formData.append('filter_blur', document.getElementById('filterBlur').checked ? 'true' : 'false');
 
             try {
                 const response = await fetch(`${COLMAP_API}/workflow/video-to-model`, {
@@ -337,6 +355,8 @@
             formData.append('camera_model', 'SIMPLE_RADIAL');
             formData.append('matcher', document.getElementById('photosMatcher').value);
             formData.append('num_training_steps', document.getElementById('photosSteps').value);
+            formData.append('use_mcmc', document.getElementById('photosUseMcmc').checked ? 'true' : 'false');
+            formData.append('filter_blur', document.getElementById('photosFilterBlur').checked ? 'true' : 'false');
 
             try {
                 const response = await fetch(`${COLMAP_API}/workflow/photos-to-model`, {

@@ -8,6 +8,8 @@ import json
 import base64
 import asyncio
 import logging
+import subprocess
+import shutil
 import requests
 import numpy as np
 from pathlib import Path
@@ -229,6 +231,88 @@ def frame_to_base64(frame: np.ndarray) -> str:
     """Convert numpy frame to base64 string"""
     png_bytes = frame_to_png(frame)
     return base64.b64encode(png_bytes).decode('utf-8')
+
+
+def filter_sharp_frames(images_dir: Path, images_right_dir: Path = None,
+                        workflow_id: str = "") -> int:
+    """Filter blurry frames using sharp-frames library (outlier-removal method).
+    Keeps stereo pairs in sync by filtering left images and retaining matching right images.
+    Returns the number of frames kept after filtering."""
+    filtered_dir = images_dir.parent / "images_sharp_filtered"
+    filtered_dir.mkdir(exist_ok=True, parents=True)
+
+    try:
+        result = subprocess.run(
+            [
+                "sharp-frames",
+                str(images_dir),
+                str(filtered_dir),
+                "--selection-method", "outlier-removal",
+                "--outlier-sensitivity", "50",
+                "--force-overwrite",
+            ],
+            capture_output=True, text=True, timeout=300
+        )
+
+        if result.returncode != 0:
+            logger.warning(f"[{workflow_id}] sharp-frames failed: {result.stderr[:500]}")
+            if filtered_dir.exists():
+                shutil.rmtree(filtered_dir)
+            return len(list(images_dir.glob("*.jpg"))) + len(list(images_dir.glob("*.png")))
+
+        # Determine which original filenames were kept
+        kept_names = set(f.name for f in filtered_dir.iterdir()
+                         if f.suffix.lower() in ('.jpg', '.jpeg', '.png'))
+        num_kept = len(kept_names)
+        total_original = len(list(images_dir.glob("*.jpg"))) + len(list(images_dir.glob("*.png")))
+        logger.info(f"[{workflow_id}] sharp-frames kept {num_kept}/{total_original} frames")
+
+        if num_kept == 0:
+            logger.warning(f"[{workflow_id}] sharp-frames kept 0 frames, skipping filter")
+            shutil.rmtree(filtered_dir)
+            return total_original
+
+        # Replace left images with filtered set, re-numbered sequentially
+        for f in images_dir.iterdir():
+            if f.suffix.lower() in ('.jpg', '.jpeg', '.png'):
+                f.unlink()
+
+        # Also filter right images to keep stereo pairs in sync
+        kept_right_names = set()
+        if images_right_dir and images_right_dir.exists():
+            for f in images_right_dir.iterdir():
+                if f.suffix.lower() in ('.jpg', '.jpeg', '.png'):
+                    if f.name in kept_names:
+                        kept_right_names.add(f.name)
+                    else:
+                        f.unlink()
+
+        # Re-number left frames sequentially
+        for idx, name in enumerate(sorted(kept_names)):
+            src = filtered_dir / name
+            dst = images_dir / f"frame_{idx:04d}.jpg"
+            shutil.move(str(src), str(dst))
+
+        # Re-number right frames sequentially (matching left order)
+        if images_right_dir and images_right_dir.exists() and kept_right_names:
+            temp_right = images_right_dir.parent / "images_right_temp"
+            temp_right.mkdir(exist_ok=True)
+            for name in sorted(kept_right_names):
+                shutil.move(str(images_right_dir / name), str(temp_right / name))
+            for idx, name in enumerate(sorted(kept_right_names)):
+                shutil.move(str(temp_right / name), str(images_right_dir / f"frame_{idx:04d}.jpg"))
+            shutil.rmtree(temp_right, ignore_errors=True)
+
+        shutil.rmtree(filtered_dir, ignore_errors=True)
+        return num_kept
+
+    except FileNotFoundError:
+        logger.warning(f"[{workflow_id}] sharp-frames not installed, skipping blur filter")
+        return len(list(images_dir.glob("*.jpg"))) + len(list(images_dir.glob("*.png")))
+    except subprocess.TimeoutExpired:
+        logger.warning(f"[{workflow_id}] sharp-frames timed out, skipping blur filter")
+        shutil.rmtree(filtered_dir, ignore_errors=True)
+        return len(list(images_dir.glob("*.jpg"))) + len(list(images_dir.glob("*.png")))
 
 
 def get_ui_html():
@@ -739,6 +823,14 @@ def get_ui_html():
                     <div class="workflow-param">
                         <label>Include Depth</label>
                         <input type="checkbox" id="wfIncludeDepth" checked style="width: auto;">
+                    </div>
+                    <div class="workflow-param">
+                        <label title="Monte Carlo Markov Chain optimizer - better quality for complex scenes">MCMC Training</label>
+                        <input type="checkbox" id="wfUseMcmc" style="width: auto;">
+                    </div>
+                    <div class="workflow-param">
+                        <label title="Use sharp-frames to remove blurry frames before reconstruction">Filter Blurry Frames</label>
+                        <input type="checkbox" id="wfFilterBlur" checked style="width: auto;">
                     </div>
                 </div>
                 
@@ -1260,6 +1352,7 @@ def get_ui_html():
             const datasetName = document.getElementById('wfDatasetName').value || currentFile.replace(/\.[^.]+$/, '');
             const fps = document.getElementById('wfFps').value;
             const includeDepth = document.getElementById('wfIncludeDepth').checked;
+            const filterBlur = document.getElementById('wfFilterBlur').checked;
             
             resetWorkflowUI();
             setStepState('stepExtract', 'active', 'Extracting frames...', 10);
@@ -1274,7 +1367,8 @@ def get_ui_html():
                     body: JSON.stringify({
                         dataset_name: datasetName,
                         fps: parseFloat(fps),
-                        include_depth: includeDepth
+                        include_depth: includeDepth,
+                        filter_blur: filterBlur
                     })
                 });
                 const data = await response.json();
@@ -1306,12 +1400,14 @@ def get_ui_html():
             const fps = document.getElementById('wfFps').value;
             const steps = document.getElementById('wfSteps').value;
             const includeDepth = document.getElementById('wfIncludeDepth').checked;
+            const useMcmc = document.getElementById('wfUseMcmc').checked;
+            const filterBlur = document.getElementById('wfFilterBlur').checked;
             
             resetWorkflowUI();
             document.getElementById('wfStartBtn').disabled = true;
             document.getElementById('wfExtractBtn').disabled = true;
             document.getElementById('wfStatus').textContent = 'Pipeline running...';
-            wfLog('Starting full pipeline: ' + datasetName);
+            wfLog('Starting full pipeline: ' + datasetName + (useMcmc ? ' (MCMC)' : ''));
             
             try {
                 const response = await fetch('/workflow/start', {
@@ -1321,7 +1417,9 @@ def get_ui_html():
                         dataset_name: datasetName,
                         fps: parseFloat(fps),
                         num_training_steps: parseInt(steps),
-                        include_depth: includeDepth
+                        include_depth: includeDepth,
+                        use_mcmc: useMcmc,
+                        filter_blur: filterBlur
                     })
                 });
                 const data = await response.json();
@@ -1763,6 +1861,7 @@ async def workflow_extract_frames(request: dict = None):
     dataset_name = request.get("dataset_name", current_file.rsplit(".", 1)[0])
     fps = request.get("fps", 2.0)
     include_depth = request.get("include_depth", True)
+    filter_blur = request.get("filter_blur", False)
     
     # Find file path
     file_path = None
@@ -1834,6 +1933,13 @@ async def workflow_extract_frames(request: dict = None):
     cap.release()
     
     logger.info(f"Extracted {num_extracted} frames (stereo={has_stereo}) from {current_file} to {output_dir}")
+    
+    # Filter blurry frames if enabled
+    if filter_blur and num_extracted > 3:
+        right_dir = images_right_dir if has_stereo else None
+        num_extracted = filter_sharp_frames(images_dir, right_dir)
+        logger.info(f"After blur filter: {num_extracted} frames kept")
+    
     return {
         "status": "ok",
         "dataset_name": dataset_name,
@@ -1855,6 +1961,8 @@ async def workflow_start(request: dict, background_tasks: BackgroundTasks = None
     fps = request.get("fps", 2.0)
     num_training_steps = request.get("num_training_steps", 30000)
     include_depth = request.get("include_depth", True)
+    use_mcmc = request.get("use_mcmc", False)
+    filter_blur = request.get("filter_blur", False)
     
     workflow_id = f"wf_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
     
@@ -1865,6 +1973,7 @@ async def workflow_start(request: dict, background_tasks: BackgroundTasks = None
         "current_step": "Starting frame extraction",
         "dataset_name": dataset_name,
         "num_frames": 0,
+        "use_mcmc": use_mcmc,
         "error": None,
         "started_at": datetime.now().isoformat()
     }
@@ -1876,7 +1985,9 @@ async def workflow_start(request: dict, background_tasks: BackgroundTasks = None
             dataset_name=dataset_name,
             fps=fps,
             num_training_steps=num_training_steps,
-            include_depth=include_depth
+            include_depth=include_depth,
+            use_mcmc=use_mcmc,
+            filter_blur=filter_blur
         )
     
     return {
@@ -1901,7 +2012,8 @@ async def workflow_list():
 
 
 async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
-                            num_training_steps: int, include_depth: bool):
+                            num_training_steps: int, include_depth: bool,
+                            use_mcmc: bool = False, filter_blur: bool = False):
     """Background task: full SVO -> cuVSLAM -> Train -> View pipeline"""
     wf = active_workflows[workflow_id]
     
@@ -1984,9 +2096,20 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
         
         del all_frames  # Free memory
         wf["num_frames"] = num_extracted
-        wf["progress"] = 0.2
+        wf["progress"] = 0.18
         wf["current_step"] = f"Extracted {num_extracted} frames"
         logger.info(f"[{workflow_id}] Extracted {num_extracted} frames")
+        
+        # Filter blurry frames using sharp-frames if enabled
+        if filter_blur and num_extracted > 3:
+            wf["current_step"] = "Filtering blurry frames..."
+            wf["progress"] = 0.19
+            right_dir = images_right_dir if has_stereo else None
+            num_extracted = filter_sharp_frames(images_dir, right_dir, workflow_id)
+            wf["num_frames"] = num_extracted
+            wf["progress"] = 0.2
+            wf["current_step"] = f"Sharp filter: kept {num_extracted} frames"
+            logger.info(f"[{workflow_id}] After blur filter: {num_extracted} frames")
         
         if num_extracted < 3:
             raise Exception(f"Only {num_extracted} frames extracted, need at least 3")
@@ -2022,6 +2145,7 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
                 'camera_model': 'PINHOLE',
                 'matcher': 'sequential',
                 'num_training_steps': str(num_training_steps),
+                'use_mcmc': 'true' if use_mcmc else 'false',
             }
             
             colmap_resp = requests.post(
@@ -2086,7 +2210,6 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
                 training_job_id = status_resp.json().get("training_job_id")
         except Exception:
             pass
-        
         if not training_job_id:
             # Trigger training manually
             wf["current_step"] = "Starting Gaussian Splat training"
@@ -2097,7 +2220,8 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
                 json={
                     "dataset_id": dataset_name,
                     "num_training_steps": num_training_steps,
-                    "output_name": f"{dataset_name}_model"
+                    "output_name": f"{dataset_name}_model",
+                    "use_mcmc": use_mcmc
                 },
                 timeout=30
             )
@@ -2120,7 +2244,7 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
             try:
                 train_status = requests.get(
                     f"{TRAINING_SERVICE_URL}/jobs/{training_job_id}",
-                    timeout=10
+                    timeout=30
                 )
                 if train_status.status_code == 200:
                     tdata = train_status.json()
