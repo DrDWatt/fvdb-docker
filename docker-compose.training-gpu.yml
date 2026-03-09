@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   fvdb-training-gpu:
     image: fvdb-training-gpu:latest
@@ -12,30 +10,38 @@ services:
       memlock: -1
       stack: 67108864
     environment:
+      # ---- GPU ----
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - CUDA_VISIBLE_DEVICES=0
-      - PYTHONPATH=/fvdb-reality-capture:/host-fvdb:/host-fvdb/lib/python3.12/site-packages:/app
-      - PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/cuda/bin:/host-fvdb/bin
-      - LD_LIBRARY_PATH=/host-fvdb/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
-      - UCX_TLS=^dc,ud
-      - UCX_ERROR_SIGNALS=
-      - CURL_CA_BUNDLE=
-      - REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      # ---- Paths (match docker-compose.master.yml exactly) ----
+      - PYTHONPATH=/fvdb-reality-capture:/host-fvdb/lib/python3.12/site-packages:/app
+      - PATH=/host-fvdb/bin:/usr/local/cuda-13.0/bin:/usr/local/bin:/usr/bin:/bin
+      - LD_LIBRARY_PATH=/host-fvdb/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cublas/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/cuda-13.0/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+      - CUDA_HOME=/usr/local/cuda-13.0
+      - TORCH_CUDA_ARCH_LIST=12.1
+      - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+      - TORCH_HOME=/app/.cache/torch
     ports:
       - "8000:8000"
     volumes:
-      # Mount host fVDB conda environment
+      # Host conda env + fvdb-reality-capture
       - /home/dwatkins3/miniforge3/envs/fvdb:/host-fvdb:ro
-      # Mount fvdb-reality-capture source (editable install)
       - /home/dwatkins3/fvdb-reality-capture:/fvdb-reality-capture:ro
-      # Data directories
-      - ./data:/app/data
+      # CUDA 13.0 from host (provides libnvrtc.so.13)
+      - /usr/local/cuda-13.0:/usr/local/cuda-13.0:ro
+      # Data directories (colmap-data/outputs is where COLMAP stores datasets)
+      - ./colmap-data/outputs:/app/data
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
       - ./models:/app/models
-      # Optional: mount training service code for live updates
+      - ./cache/torch:/app/.cache/torch
+      # Training service code (live updates without rebuild)
       - ./training-service/training_service.py:/app/training_service.py:ro
+      - ./training-service/train_subprocess.py:/app/train_subprocess.py:ro
+      - ./training-service/clean_gaussians.py:/app/clean_gaussians.py:ro
+      - ./training-service/extract_frames.py:/app/extract_frames.py:ro
+      - ./training-service/static:/app/static:ro
     deploy:
       resources:
         reservations:
@@ -43,14 +49,19 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    networks:
+      - workflow-net
+      - fvdb-docker_workflow-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
+      interval: 10s
+      timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 30s
 
 networks:
-  default:
-    name: fvdb-training-net
+  workflow-net:
+    external: true
+  fvdb-docker_workflow-net:
+    external: true

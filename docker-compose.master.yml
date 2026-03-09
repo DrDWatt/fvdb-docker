@@ -127,6 +127,8 @@ services:
       - ./cache/torch:/app/.cache/torch
       - ./training-service/training_service.py:/app/training_service.py:ro
       - ./training-service/train_subprocess.py:/app/train_subprocess.py:ro
+      - ./training-service/clean_gaussians.py:/app/clean_gaussians.py:ro
+      - ./training-service/extract_frames.py:/app/extract_frames.py:ro
       - ./training-service/static:/app/static:ro
     deploy:
       resources:

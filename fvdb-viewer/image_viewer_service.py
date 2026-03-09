@@ -18,6 +18,21 @@ from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
+# Patch GPU arch detection for GB10 (compute 12.1) - nvrtc doesn't support sm_121,
+# so we force it to use sm_120 which is the closest supported architecture.
+try:
+    import torch
+    _orig_get_device_capability = torch.cuda.get_device_capability
+    def _patched_get_device_capability(device=None):
+        major, minor = _orig_get_device_capability(device)
+        if major == 12 and minor == 1:
+            return (12, 0)
+        return (major, minor)
+    torch.cuda.get_device_capability = _patched_get_device_capability
+    logger.info = lambda msg, _log=logging.getLogger(__name__).info: _log(msg)  # pre-logger
+except Exception:
+    pass
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -447,13 +462,38 @@ def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx
         sizes = model_metadata.get('image_sizes')
         
         if c2w_all is None or K_all is None:
-            logger.error("No camera matrices in metadata")
-            return None
+            # Fallback: create synthetic camera looking at model center
+            logger.warning("No camera matrices in metadata - using synthetic camera")
+            means = gsplat.means
+            center = means.mean(dim=0)
+            # Compute scene radius from Gaussian spread
+            dists = (means - center).norm(dim=1)
+            scene_radius = dists.quantile(0.95).item()
+            cam_dist = scene_radius * 2.5 / max(zoom, 0.1)
+            
+            # Place camera along +Z, looking at center
+            c2w = torch.eye(4, device=device, dtype=torch.float32)
+            c2w[2, 3] = cam_dist  # camera at z = cam_dist
+            c2w[:3, 3] += center  # offset to scene center
+            
+            # Build simple perspective intrinsics
+            focal = max(width, height) * 1.2
+            K = torch.zeros(1, 3, 3, device=device, dtype=torch.float32)
+            K[0, 0, 0] = focal
+            K[0, 1, 1] = focal
+            K[0, 0, 2] = width / 2.0
+            K[0, 1, 2] = height / 2.0
+            K[0, 2, 2] = 1.0
+            
+            sizes = None
+            num_cams = 1
+            cam_idx = 0
+        else:
+            num_cams = c2w_all.shape[0]
+            cam_idx = cam_idx % num_cams
+            c2w = c2w_all[cam_idx].to(device).clone()
+            K = K_all[cam_idx:cam_idx+1].to(device).clone()
         
-        num_cams = c2w_all.shape[0]
-        cam_idx = cam_idx % num_cams
-        
-        c2w = c2w_all[cam_idx].to(device).clone()
         means = gsplat.means
         center = means.mean(dim=0)
         
@@ -466,7 +506,7 @@ def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx
         
         # zoom > 1 = closer, zoom < 1 = farther
         dist_to_center = (center - cam_pos).norm().item()
-        new_dist = dist_to_center / zoom
+        new_dist = dist_to_center / max(zoom, 0.1)
         new_pos = center - view_dir * new_dist
         c2w[:3, 3] = new_pos
         
@@ -3711,37 +3751,129 @@ def render_extracted_gaussians(job_id, width, height, azimuth, elevation, zoom):
 
 # ===== Camera Flythrough Endpoints =====
 
-def generate_flythrough_params(num_frames=120, cam_idx=0):
-    """Generate smooth camera path params for a flythrough animation.
+def _slerp_rotation_np(R1_np, R2_np, t):
+    """Spherical linear interpolation between two 3x3 rotation matrices (numpy, CPU).
+    Uses SVD re-orthogonalization to ensure a proper rotation."""
+    R_blend = (1 - t) * R1_np + t * R2_np
+    U, _, Vt = np.linalg.svd(R_blend)
+    # Ensure proper rotation (det = +1)
+    det = np.linalg.det(U @ Vt)
+    diag = np.array([1, 1, np.sign(det)])
+    return U @ np.diag(diag) @ Vt
+
+
+def _catmull_rom_np(p0, p1, p2, p3, t):
+    """Catmull-Rom spline interpolation for smooth position curves (numpy, CPU)."""
+    return 0.5 * (
+        2 * p1 +
+        (-p0 + p2) * t +
+        (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t +
+        (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t
+    )
+
+
+def _has_camera_path():
+    """Check if current model has multiple trained camera positions for path interpolation."""
+    if model_metadata is None:
+        return False
+    c2w = model_metadata.get('camera_to_world_matrices')
+    K = model_metadata.get('projection_matrices')
+    return c2w is not None and K is not None and c2w.shape[0] >= 2
+
+
+def render_flythrough_frame(frame_num, num_frames, width, height, cam_idx=0):
+    """Render a flythrough frame. Uses camera path interpolation if trained cameras
+    are available, otherwise falls back to orbit around model center."""
+    if _has_camera_path():
+        return _render_camera_path_frame(frame_num, num_frames, width, height)
+    else:
+        return _render_orbit_frame(frame_num, num_frames, width, height, cam_idx)
+
+
+def _render_orbit_frame(frame_num, num_frames, width, height, cam_idx=0):
+    """Fallback: orbit around model center (works for all models including non-ZED)."""
+    t = frame_num / num_frames
+    azimuth = -180 + t * 360
+    elevation = 15 * math.sin(t * 2 * math.pi)
+    zoom = 1.0 + 0.4 * math.sin(t * 3 * math.pi)
+    return render_view(width, height, azimuth, elevation, zoom, cam_idx)
+
+
+def _render_camera_path_frame(frame_num, num_frames, width, height):
+    """Interpolate between trained camera positions using Catmull-Rom + SLERP.
+    All interpolation done on CPU (numpy) to avoid nvrtc JIT issues on aarch64.
+    Only the final matrices are sent to GPU for rendering."""
+    import torch
     
-    Creates a circular orbit with sinusoidal elevation and zoom variation,
-    keeping the model center in focus throughout.
-    """
-    frames = []
-    for i in range(num_frames):
-        t = i / num_frames  # 0.0 to 1.0
-        
-        # Full 360° orbit
-        azimuth = -180 + t * 360
-        
-        # Sinusoidal elevation: gently bob between -20° and 20°
-        elevation = 15 * math.sin(t * 2 * math.pi)
-        
-        # Sinusoidal zoom: vary between 0.6x and 1.4x
-        zoom = 1.0 + 0.4 * math.sin(t * 3 * math.pi)
-        
-        # Cycle through a few camera indices for perspective variety
-        cam = cam_idx
-        
-        frames.append({
-            "frame": i,
-            "azimuth": round(azimuth, 2),
-            "elevation": round(elevation, 2),
-            "zoom": round(zoom, 3),
-            "cam_idx": cam
-        })
+    if gsplat is None or model_metadata is None:
+        return None
     
-    return frames
+    try:
+        c2w_all = model_metadata.get('camera_to_world_matrices')
+        K_all = model_metadata.get('projection_matrices')
+        sizes = model_metadata.get('image_sizes')
+        
+        num_cams = c2w_all.shape[0]
+        
+        # Map frame number to position along camera path (0 to num_cams, wrapping)
+        t_total = frame_num / num_frames
+        pos = t_total * num_cams
+        idx = int(pos)
+        frac = pos - idx
+        
+        # 4 camera indices for Catmull-Rom (wrapping)
+        def ci(i):
+            return i % num_cams
+        
+        i0, i1, i2, i3 = ci(idx - 1), ci(idx), ci(idx + 1), ci(idx + 2)
+        
+        # Convert to numpy for CPU interpolation
+        c0 = c2w_all[i0].cpu().numpy().astype(np.float32)
+        c1 = c2w_all[i1].cpu().numpy().astype(np.float32)
+        c2_np = c2w_all[i2].cpu().numpy().astype(np.float32)
+        c3 = c2w_all[i3].cpu().numpy().astype(np.float32)
+        
+        # Catmull-Rom for position, SLERP for rotation (all numpy/CPU)
+        pos_interp = _catmull_rom_np(c0[:3, 3], c1[:3, 3], c2_np[:3, 3], c3[:3, 3], frac)
+        rot_interp = _slerp_rotation_np(c1[:3, :3], c2_np[:3, :3], frac)
+        
+        # Build interpolated c2w on CPU then transfer to GPU
+        c2w_np = np.eye(4, dtype=np.float32)
+        c2w_np[:3, :3] = rot_interp
+        c2w_np[:3, 3] = pos_interp
+        
+        c2w = torch.from_numpy(c2w_np).unsqueeze(0).to(device).contiguous()
+        w2c = torch.inverse(c2w).contiguous()
+        
+        # Projection matrix from nearest camera, scaled to output size
+        nearest_idx = i1 if frac < 0.5 else i2
+        orig_h, orig_w = sizes[nearest_idx].tolist()
+        K = K_all[nearest_idx:nearest_idx+1].to(device).clone()
+        K[:, 0, :] *= width / orig_w
+        K[:, 1, :] *= height / orig_h
+        K = K.contiguous()
+        
+        images, alpha = gsplat.render_images(
+            world_to_camera_matrices=w2c,
+            projection_matrices=K,
+            image_width=width,
+            image_height=height,
+            near=0.01,
+            far=100.0
+        )
+        
+        img = images[0].clamp(0, 1).cpu().numpy()
+        if img.shape[-1] > 3:
+            img = img[..., :3]
+        img = (img * 255).astype(np.uint8)
+        
+        return img
+        
+    except Exception as e:
+        logger.error(f"Flythrough render error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 @app.get("/flythrough/config")
@@ -3750,8 +3882,16 @@ async def flythrough_config(
     cam_idx: int = Query(0, ge=0)
 ):
     """Get the flythrough camera path configuration"""
-    params = generate_flythrough_params(num_frames, cam_idx)
-    return {"num_frames": num_frames, "frames": params}
+    num_cams = 0
+    if model_metadata:
+        c2w = model_metadata.get('camera_to_world_matrices')
+        if c2w is not None:
+            num_cams = c2w.shape[0]
+    return {
+        "num_frames": num_frames,
+        "num_cameras": num_cams,
+        "mode": "camera_path_interpolation"
+    }
 
 
 @app.get("/flythrough/frame/{frame_num}")
@@ -3762,13 +3902,11 @@ async def flythrough_frame(
     height: int = Query(768, ge=100, le=1080),
     cam_idx: int = Query(0, ge=0)
 ):
-    """Render a single flythrough frame"""
-    params = generate_flythrough_params(num_frames, cam_idx)
-    if frame_num < 0 or frame_num >= len(params):
+    """Render a single flythrough frame using camera path interpolation"""
+    if frame_num < 0 or frame_num >= num_frames:
         return Response(content="Frame out of range", status_code=400)
     
-    p = params[frame_num]
-    img = render_view(width, height, p["azimuth"], p["elevation"], p["zoom"], p["cam_idx"])
+    img = render_flythrough_frame(frame_num, num_frames, width, height)
     
     if img is None:
         return Response(content="Render failed", status_code=500)
@@ -3793,7 +3931,6 @@ async def flythrough_export(
     """Export flythrough as MP4 video using OpenCV"""
     import cv2
     
-    params = generate_flythrough_params(num_frames, cam_idx)
     output_path = MODEL_DIR / f"{model_name}_flythrough.mp4"
     
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -3804,11 +3941,10 @@ async def flythrough_export(
     
     try:
         rendered = 0
-        for i, p in enumerate(params):
-            img = render_view(width, height, p["azimuth"], p["elevation"], p["zoom"], p["cam_idx"])
+        for i in range(num_frames):
+            img = render_flythrough_frame(i, num_frames, width, height)
             if img is None:
                 continue
-            # OpenCV expects BGR
             bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             writer.write(bgr)
             rendered += 1

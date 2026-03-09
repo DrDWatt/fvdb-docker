@@ -1243,7 +1243,7 @@ async def proxy_video_to_model(request: Request):
     """Proxy video upload to cuvslam-service to avoid cross-origin upload issues"""
     body = await request.body()
     content_type = request.headers.get("content-type", "")
-    async with httpx.AsyncClient(timeout=600.0) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)) as client:
         resp = await client.post(
             f"{CUVSLAM_URL}/workflow/video-to-model",
             content=body,
@@ -1257,7 +1257,7 @@ async def proxy_photos_to_model(request: Request):
     """Proxy photos upload to cuvslam-service"""
     body = await request.body()
     content_type = request.headers.get("content-type", "")
-    async with httpx.AsyncClient(timeout=600.0) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)) as client:
         resp = await client.post(
             f"{CUVSLAM_URL}/workflow/photos-to-model",
             content=body,

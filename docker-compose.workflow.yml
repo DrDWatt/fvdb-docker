@@ -7,6 +7,8 @@ services:
     image: cuvslam-service:latest
     container_name: colmap-processor
     runtime: nvidia
+    # Keep-alive 120s for large file uploads (2GB+) over slow networks
+    command: ["uvicorn", "cuvslam_service:app", "--host", "0.0.0.0", "--port", "8003", "--timeout-keep-alive", "120"]
     ports:
       - "8003:8003"
     volumes:
@@ -84,6 +86,8 @@ services:
       # Training service code
       - ./training-service/training_service.py:/app/training_service.py:ro
       - ./training-service/train_subprocess.py:/app/train_subprocess.py:ro
+      - ./training-service/clean_gaussians.py:/app/clean_gaussians.py:ro
+      - ./training-service/extract_frames.py:/app/extract_frames.py:ro
       - ./training-service/static:/app/static:ro
     deploy:
       resources:
@@ -260,6 +264,8 @@ services:
       - MODEL_DIR=/app/models
       - VIEWER_PORT=8085
       - OLLAMA_URL=http://ollama:11434
+      - TORCH_CUDA_ARCH_LIST=12.0
+      - CUDA_HOME=/usr/local/cuda-13.0
     command: ["python3", "/app/image_viewer_service.py"]
     restart: unless-stopped
     depends_on:

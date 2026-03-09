@@ -7,6 +7,7 @@ import json
 import logging
 import ssl
 import os
+import time
 import threading
 import signal
 from pathlib import Path
@@ -129,6 +130,18 @@ def run_training(job_id: str, dataset_path: str, num_steps: int, output_name: st
             refine_every_epoch=0.5
         )
         
+        # Calculate safe Gaussian cap for high-res images to prevent int32 overflow
+        # in the CUDA rasterizer's cumulative tile-Gaussian intersection counter.
+        # With tile_size=16: tiles = (W/16)*(H/16). Safe limit ≈ int32_max / avg_tiles_per_gaussian.
+        # Conservative estimate: avg ~500 tiles/gaussian at high counts → cap at ~2M for large images.
+        max_dim = max(scene.images[0].image_size) if scene.images else 0
+        if max_dim > 1920:
+            safe_max_gaussians = 1_500_000
+            logger.info(f"High-res images ({max_dim}px max dim): capping Gaussians at {safe_max_gaussians:,}")
+        else:
+            safe_max_gaussians = -1  # unlimited for normal resolution
+            logger.info(f"Normal-res images ({max_dim}px max dim): no Gaussian cap")
+        
         # Select optimizer: MCMC or standard
         if use_mcmc:
             optimizer_config = frc.radiance_fields.GaussianSplatOptimizerMCMCConfig(
@@ -137,8 +150,10 @@ def run_training(job_id: str, dataset_path: str, num_steps: int, output_name: st
             )
             logger.info(f"Using MCMC optimizer: {num_steps} steps, {total_epochs} epochs, max_gaussians=1M, noise_lr=500")
         else:
-            optimizer_config = frc.radiance_fields.GaussianSplatOptimizerConfig()
-            logger.info(f"Using standard optimizer: {num_steps} steps, {total_epochs} epochs")
+            optimizer_config = frc.radiance_fields.GaussianSplatOptimizerConfig(
+                max_gaussians=safe_max_gaussians
+            )
+            logger.info(f"Using standard optimizer: {num_steps} steps, {total_epochs} epochs, max_gaussians={safe_max_gaussians}")
         
         runner = frc.radiance_fields.GaussianSplatReconstruction.from_sfm_scene(
             scene,
@@ -151,24 +166,52 @@ def run_training(job_id: str, dataset_path: str, num_steps: int, output_name: st
             "message": f"{optimizer_label} training {num_steps} steps..."
         })
         
-        # Train with Gaussian count monitoring
-        GAUSSIAN_KILL_THRESHOLD = 2_000_000
-        MONITOR_INTERVAL = 60  # seconds
+        # Train with progress and Gaussian count monitoring
+        GAUSSIAN_KILL_THRESHOLD = 15_000_000  # GB10 has 120GB unified memory, can handle 15M+ easily
+        MONITOR_INTERVAL = 30  # seconds - check every 30s for responsive progress
         monitor_stop = threading.Event()
+        training_start_time = time.time()
         
-        def monitor_gaussians():
-            """Background thread: check Gaussian count every 60s, abort if runaway."""
+        def monitor_training():
+            """Background thread: track step progress, Gaussian count, and ETA."""
             while not monitor_stop.is_set():
                 monitor_stop.wait(MONITOR_INTERVAL)
                 if monitor_stop.is_set():
                     break
                 try:
                     count = runner.model.num_gaussians
-                    logger.info(f"[Monitor] Gaussian count: {count:,}")
+                    
+                    # Get current step from the optimizer's internal counter
+                    current_step = getattr(runner.optimizer, '_step_count', 0)
+                    pct = min(current_step / num_steps * 100, 100) if num_steps > 0 else 0
+                    
+                    # Calculate ETA from elapsed time and step rate
+                    elapsed = time.time() - training_start_time
+                    if current_step > 0:
+                        steps_per_sec = current_step / elapsed
+                        remaining_steps = num_steps - current_step
+                        eta_secs = remaining_steps / steps_per_sec if steps_per_sec > 0 else 0
+                        if eta_secs > 3600:
+                            eta_str = f"{eta_secs/3600:.1f}h"
+                        elif eta_secs > 60:
+                            eta_str = f"{eta_secs/60:.0f}min"
+                        else:
+                            eta_str = f"{eta_secs:.0f}s"
+                        msg = f"Step {current_step:,}/{num_steps:,} ({pct:.0f}%) | {count:,} gaussians | ETA: {eta_str}"
+                    else:
+                        elapsed_min = elapsed / 60
+                        msg = f"Initializing... {elapsed_min:.0f}min elapsed | {count:,} gaussians"
+                    
+                    # Training progress maps to 0.3-0.95 range in overall workflow
+                    train_progress = 0.3 + (0.65 * min(current_step / num_steps, 1.0)) if num_steps > 0 else 0.3
+                    
+                    logger.info(f"[Monitor] {msg}")
                     update_state(state_file, {
+                        "progress": round(train_progress, 3),
                         "gaussian_count": count,
-                        "message": f"{optimizer_label} training {num_steps} steps... ({count:,} gaussians)"
+                        "message": msg
                     })
+                    
                     if count > GAUSSIAN_KILL_THRESHOLD:
                         logger.error(f"[Monitor] RUNAWAY DETECTED: {count:,} gaussians > {GAUSSIAN_KILL_THRESHOLD:,} threshold. Aborting!")
                         update_state(state_file, {
@@ -179,7 +222,7 @@ def run_training(job_id: str, dataset_path: str, num_steps: int, output_name: st
                 except Exception as e:
                     logger.warning(f"[Monitor] Check failed: {e}")
         
-        monitor_thread = threading.Thread(target=monitor_gaussians, daemon=True)
+        monitor_thread = threading.Thread(target=monitor_training, daemon=True)
         monitor_thread.start()
         
         try:
@@ -204,15 +247,47 @@ def run_training(job_id: str, dataset_path: str, num_steps: int, output_name: st
         ply_file = job_output_dir / f"{output_name}.ply"
         model.save_ply(str(ply_file), metadata=runner.reconstruction_metadata)
         
+        # --- Post-training cleanup: remove floaters and artifacts ---
+        update_state(state_file, {
+            "status": "cleaning",
+            "progress": 0.92,
+            "message": "Cleaning Gaussians (removing floaters)..."
+        })
+        
+        cleanup_stats = {}
+        try:
+            from clean_gaussians import clean_gaussians
+            cleaned_ply = job_output_dir / f"{output_name}_cleaned.ply"
+            cleanup_stats = clean_gaussians(
+                str(ply_file), str(cleaned_ply),
+                opacity_threshold=0.005,
+                scale_percentile=99.5,
+                spatial_percentile=99.0,
+                neighbor_percentile=95.0,
+                k_neighbors=10,
+            )
+            # Replace original with cleaned version
+            import shutil
+            shutil.move(str(ply_file), str(job_output_dir / f"{output_name}_raw.ply"))
+            shutil.move(str(cleaned_ply), str(ply_file))
+            logger.info(f"Gaussian cleanup complete: {cleanup_stats.get('removed', 0):,} removed "
+                         f"({cleanup_stats.get('pct_removed', 0):.1f}%), "
+                         f"{cleanup_stats.get('final', 0):,} kept")
+        except Exception as e:
+            logger.warning(f"Gaussian cleanup failed (non-fatal): {e}")
+            cleanup_stats = {"error": str(e)}
+        
         # Save metadata
         metadata = {
             "num_gaussians": model.num_gaussians,
+            "num_gaussians_cleaned": cleanup_stats.get("final", model.num_gaussians),
             "device": str(model.device),
             "num_channels": model.num_channels,
             "num_images": len(scene.images),
             "training_steps": num_steps,
             "optimizer": "mcmc" if use_mcmc else "standard",
-            "output_file": str(ply_file)
+            "output_file": str(ply_file),
+            "cleanup_stats": cleanup_stats
         }
         
         with open(job_output_dir / "metadata.json", 'w') as f:

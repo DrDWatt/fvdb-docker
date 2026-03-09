@@ -173,6 +173,33 @@
             border-radius: 15px;
             font-size: 0.8rem;
         }
+        .suggest-btn {
+            background: linear-gradient(135deg, #00b894 0%, #00cec9 100%);
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+            margin-bottom: 10px;
+        }
+        .suggest-btn:hover:not(:disabled) { transform: translateY(-1px); }
+        .suggest-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .suggest-info {
+            background: linear-gradient(135deg, #e0f9f4 0%, #e0feff 100%);
+            border: 2px solid #00b894;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            display: none;
+        }
+        .suggest-info b { color: #00796b; }
+        .suggest-info .rec-item { margin: 3px 0; }
+        .suggest-info .rec-label { font-weight: 600; color: #333; }
     </style>
 </head>
 <body>
@@ -225,10 +252,10 @@
                     </div>
                     <div class="form-group">
                         <label>Training Steps</label>
-                        <input type="number" id="steps" value="30000" min="10000" max="50000" step="1000">
+                        <input type="number" id="steps" value="30000" min="1000" max="65000" step="100">
                     </div>
                     <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
-                        <input type="checkbox" id="useMcmc" style="width: auto; margin: 0;" checked>
+                        <input type="checkbox" id="useMcmc" style="width: auto; margin: 0;">
                         <label for="useMcmc" style="margin: 0; cursor: pointer;" title="Monte Carlo Markov Chain optimizer - better quality for complex scenes">MCMC Training</label>
                     </div>
                     <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
@@ -236,6 +263,8 @@
                         <label for="filterBlur" style="margin: 0; cursor: pointer;" title="Use sharp-frames to remove blurry frames before reconstruction">Filter Blurry Frames</label>
                     </div>
                 </div>
+                <button type="button" class="suggest-btn" id="videoSuggestBtn" onclick="analyzeVideo()">🔍 Analyze & Suggest Settings</button>
+                <div class="suggest-info" id="videoSuggestInfo"><div id="videoAnalysisText"></div></div>
                 <button type="submit" class="btn" id="uploadBtn">🎬 Start Video Workflow</button>
             </form>
         </div>
@@ -262,10 +291,10 @@
                     </div>
                     <div class="form-group">
                         <label>Training Steps</label>
-                        <input type="number" id="photosSteps" value="30000" min="10000" max="50000" step="1000">
+                        <input type="number" id="photosSteps" value="30000" min="1000" max="65000" step="100">
                     </div>
                     <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
-                        <input type="checkbox" id="photosUseMcmc" style="width: auto; margin: 0;" checked>
+                        <input type="checkbox" id="photosUseMcmc" style="width: auto; margin: 0;">
                         <label for="photosUseMcmc" style="margin: 0; cursor: pointer;" title="Monte Carlo Markov Chain optimizer - better quality for complex scenes">MCMC Training</label>
                     </div>
                     <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
@@ -273,6 +302,8 @@
                         <label for="photosFilterBlur" style="margin: 0; cursor: pointer;" title="Use sharp-frames to remove blurry frames before reconstruction">Filter Blurry Frames</label>
                     </div>
                 </div>
+                <button type="button" class="suggest-btn" id="photosSuggestBtn" onclick="analyzePhotos()">🔍 Analyze & Suggest Settings</button>
+                <div class="suggest-info" id="photosSuggestInfo"><div id="photosAnalysisText"></div></div>
                 <button type="submit" class="btn" id="photosBtn">📷 Start Photos Workflow</button>
             </form>
         </div>
@@ -294,11 +325,229 @@
     </div>
 
     <script>
-        // Use same-origin API to avoid cross-origin issues with large file uploads
+        // Upload directly to colmap-processor for reliability with large files (2GB+)
+        // CORS is enabled on colmap-processor with allow_origins=["*"]
+        const COLMAP_UPLOAD_API = `http://${window.location.hostname}:8003`;
+        // Status/list polling goes through training service proxy (lightweight)
         const COLMAP_API = `http://${window.location.hostname}:${window.location.port || 8000}`;
         
         let selectedWorkflowId = null;
         let updateInterval = null;
+
+        // ==================== Analyze & Suggest Functions ====================
+        
+        function getResClass(w, h) {
+            const maxDim = Math.max(w, h);
+            if (maxDim >= 2000) return 'HD2K';
+            if (maxDim >= 1200) return 'HD1080';
+            if (maxDim >= 800) return 'HD720';
+            return 'VGA';
+        }
+        
+        function suggestParams(numImages, width, height, duration, videoFps, hasLidar) {
+            const resClass = getResClass(width, height);
+            const isVideo = duration > 0;
+            let sugFps = 1, estFrames = numImages, sugSteps, sugMcmc = false, sugBlur = true;
+            
+            if (isVideo) {
+                // Target ~120 frames for crisp reconstruction (min 100)
+                const targetFrames = 120;
+                sugFps = Math.round((targetFrames / Math.max(duration, 1)) * 10) / 10;
+                sugFps = Math.max(0.5, Math.min(sugFps, videoFps));
+                estFrames = Math.round(duration * sugFps);
+            }
+            
+            // Training steps based on resolution, frame count, and Gaussian cap.
+            // HD2K images (>1920px) are capped at 1.5M Gaussians to prevent CUDA
+            // rasterizer int32 overflow. With fewer Gaussians, the model converges
+            // faster — 30K-40K steps is sufficient for crisp results.
+            const isHighRes = resClass === 'HD2K';
+            if (isHighRes) {
+                // Gaussian cap (1.5M) means model converges faster
+                sugSteps = estFrames >= 80 ? 40000 : 30000;
+            } else if (estFrames > 80 || resClass === 'HD1080') {
+                sugSteps = 30000;
+            } else if (estFrames < 30) {
+                sugSteps = 7000;
+            } else {
+                sugSteps = 30000;
+            }
+            
+            // LiDAR data enables better depth - can train more aggressively
+            if (hasLidar && estFrames >= 50) {
+                sugSteps = Math.max(sugSteps, 30000);
+            }
+            
+            const stepsLabel = sugSteps >= 40000 ? '40K (Best)' : sugSteps >= 30000 ? '30K (Good)' : '7K (Quick)';
+            
+            // Build reasoning
+            const reasons = {};
+            if (isVideo) {
+                reasons.fps = `At ${videoFps.toFixed(0)} FPS source over ${duration.toFixed(1)}s, extracting at ${sugFps} FPS yields ~${estFrames} frames (min ~100 recommended)`;
+            }
+            reasons.steps = isHighRes
+                ? `${stepsLabel} for ${resClass} ${width}x${height} — Gaussians capped at 1.5M for high-res, model converges faster`
+                : `${stepsLabel} for ${resClass} ${width}x${height} with ${estFrames} ${isVideo ? 'extracted' : ''} frames`;
+            reasons.mcmc = 'Standard training recommended - allows Gaussians to grow freely for maximum crispness';
+            reasons.blur = estFrames > 30 ? 'Filtering removes blurry frames for crisper Gaussian Splat results' : 'Few frames - keep all to ensure sufficient coverage';
+            if (hasLidar) {
+                reasons.lidar = 'LiDAR depth data detected - provides real 3D measurements for accurate Gaussian placement';
+            }
+            
+            if (estFrames <= 30) sugBlur = false;
+            
+            return { sugFps, estFrames, sugSteps, sugMcmc, sugBlur, stepsLabel, resClass, reasons, hasLidar };
+        }
+        
+        async function analyzeVideo() {
+            const fileInput = document.getElementById('videoFile');
+            if (!fileInput.files.length) {
+                alert('Select a video file first');
+                return;
+            }
+            
+            const btn = document.getElementById('videoSuggestBtn');
+            btn.disabled = true;
+            btn.textContent = '🔍 Analyzing...';
+            
+            const file = fileInput.files[0];
+            const video = document.createElement('video');
+            video.preload = 'metadata';
+            
+            const analyzed = new Promise((resolve) => {
+                video.onloadedmetadata = () => {
+                    const duration = video.duration;
+                    const w = video.videoWidth;
+                    const h = video.videoHeight;
+                    // Estimate source FPS from file size and duration (rough heuristic)
+                    // Most phones record at 30 FPS, metaglasses at 30 FPS
+                    const srcFps = 30; // Safe default for most devices
+                    URL.revokeObjectURL(video.src);
+                    resolve({ duration, w, h, srcFps });
+                };
+                video.onerror = () => {
+                    URL.revokeObjectURL(video.src);
+                    resolve(null);
+                };
+                video.src = URL.createObjectURL(file);
+            });
+            
+            const info = await analyzed;
+            if (!info) {
+                btn.disabled = false;
+                btn.textContent = '🔍 Analyze & Suggest Settings';
+                alert('Could not read video metadata');
+                return;
+            }
+            
+            // Check filename for lidar hints
+            const fname = file.name.toLowerCase();
+            const hasLidar = fname.includes('lidar') || fname.includes('depth') || fname.includes('tof');
+            
+            const s = suggestParams(0, info.w, info.h, info.duration, info.srcFps, hasLidar);
+            
+            // Apply to form
+            document.getElementById('fps').value = s.sugFps;
+            document.getElementById('steps').value = s.sugSteps;
+            document.getElementById('useMcmc').checked = s.sugMcmc;
+            document.getElementById('filterBlur').checked = s.sugBlur;
+            
+            // Show info
+            const textDiv = document.getElementById('videoAnalysisText');
+            let html = '<div><b>📊 File Analysis</b></div>' +
+                '<div>' + s.resClass + ' ' + info.w + 'x' + info.h +
+                ' | ' + info.duration.toFixed(1) + 's | ~' + info.srcFps + ' FPS source</div>';
+            if (s.hasLidar) html += '<div style="color:#00796b;font-weight:600;">📡 LiDAR depth data detected</div>';
+            html += '<div style="margin-top:8px;"><b>📋 Recommendations</b></div>' +
+                '<div class="rec-item">• <b>FPS ' + s.sugFps + '</b>: ' + s.reasons.fps + '</div>' +
+                '<div class="rec-item">• <b>' + s.stepsLabel + '</b>: ' + s.reasons.steps + '</div>' +
+                '<div class="rec-item">• <b>MCMC OFF</b>: ' + s.reasons.mcmc + '</div>' +
+                '<div class="rec-item">• <b>Blur filter ' + (s.sugBlur ? 'ON' : 'OFF') + '</b>: ' + s.reasons.blur + '</div>';
+            if (s.hasLidar) html += '<div class="rec-item">• <b>📡 LiDAR</b>: ' + s.reasons.lidar + '</div>';
+            html += '<div style="margin-top:6px;color:#00796b;font-weight:600;">~' + s.estFrames + ' frames will be extracted</div>';
+            
+            textDiv.innerHTML = html;
+            document.getElementById('videoSuggestInfo').style.display = 'block';
+            
+            btn.disabled = false;
+            btn.textContent = '🔍 Analyze & Suggest Settings';
+        }
+        
+        async function analyzePhotos() {
+            const fileInput = document.getElementById('photoFiles');
+            if (!fileInput.files.length) {
+                alert('Select photo files first');
+                return;
+            }
+            
+            const btn = document.getElementById('photosSuggestBtn');
+            btn.disabled = true;
+            btn.textContent = '🔍 Analyzing...';
+            
+            const files = fileInput.files;
+            let imageFiles = [];
+            let hasLidar = false;
+            let hasZip = false;
+            let zipImageCount = 0;
+            
+            for (let i = 0; i < files.length; i++) {
+                const f = files[i];
+                const fname = f.name.toLowerCase();
+                if (fname.endsWith('.zip')) {
+                    hasZip = true;
+                    // Estimate image count from ZIP size (~500KB per image average)
+                    zipImageCount = Math.round(f.size / (500 * 1024));
+                    if (fname.includes('lidar') || fname.includes('depth')) hasLidar = true;
+                } else if (fname.match(/\.(jpg|jpeg|png)$/)) {
+                    imageFiles.push(f);
+                    if (fname.includes('depth') || fname.includes('lidar') || fname.includes('confidence')) {
+                        hasLidar = true;
+                    }
+                }
+            }
+            
+            const numImages = hasZip ? Math.max(zipImageCount, 20) : imageFiles.length;
+            
+            // Read first image dimensions
+            let w = 1920, h = 1080;
+            if (imageFiles.length > 0) {
+                const dims = await new Promise((resolve) => {
+                    const img = new Image();
+                    img.onload = () => { resolve({ w: img.naturalWidth, h: img.naturalHeight }); URL.revokeObjectURL(img.src); };
+                    img.onerror = () => { resolve({ w: 1920, h: 1080 }); URL.revokeObjectURL(img.src); };
+                    img.src = URL.createObjectURL(imageFiles[0]);
+                });
+                w = dims.w;
+                h = dims.h;
+            }
+            
+            const s = suggestParams(numImages, w, h, 0, 0, hasLidar);
+            
+            // Apply to form
+            document.getElementById('photosSteps').value = s.sugSteps;
+            document.getElementById('photosUseMcmc').checked = s.sugMcmc;
+            document.getElementById('photosFilterBlur').checked = s.sugBlur;
+            
+            // Show info
+            const textDiv = document.getElementById('photosAnalysisText');
+            let html = '<div><b>📊 File Analysis</b></div>' +
+                '<div>' + s.resClass + ' ' + w + 'x' + h + ' | ' + numImages + ' images' +
+                (hasZip ? ' (estimated from ZIP)' : '') + '</div>';
+            if (s.hasLidar) html += '<div style="color:#00796b;font-weight:600;">📡 LiDAR/depth data detected in filenames</div>';
+            html += '<div style="margin-top:8px;"><b>📋 Recommendations</b></div>' +
+                '<div class="rec-item">• <b>' + s.stepsLabel + '</b>: ' + s.reasons.steps + '</div>' +
+                '<div class="rec-item">• <b>MCMC OFF</b>: ' + s.reasons.mcmc + '</div>' +
+                '<div class="rec-item">• <b>Blur filter ' + (s.sugBlur ? 'ON' : 'OFF') + '</b>: ' + s.reasons.blur + '</div>';
+            if (s.hasLidar) html += '<div class="rec-item">• <b>📡 LiDAR</b>: ' + s.reasons.lidar + '</div>';
+            if (numImages < 100) html += '<div style="margin-top:6px;color:#e67e22;font-weight:600;">⚠️ ' + numImages + ' images - recommend 100+ for best results</div>';
+            else html += '<div style="margin-top:6px;color:#00796b;font-weight:600;">✅ ' + numImages + ' images - good coverage</div>';
+            
+            textDiv.innerHTML = html;
+            document.getElementById('photosSuggestInfo').style.display = 'block';
+            
+            btn.disabled = false;
+            btn.textContent = '🔍 Analyze & Suggest Settings';
+        }
 
         // Form submission
         document.getElementById('uploadForm').addEventListener('submit', async (e) => {
@@ -318,7 +567,7 @@
             formData.append('filter_blur', document.getElementById('filterBlur').checked ? 'true' : 'false');
 
             try {
-                const response = await fetch(`${COLMAP_API}/workflow/video-to-model`, {
+                const response = await fetch(`${COLMAP_UPLOAD_API}/workflow/video-to-model`, {
                     method: 'POST',
                     body: formData
                 });
@@ -359,7 +608,7 @@
             formData.append('filter_blur', document.getElementById('photosFilterBlur').checked ? 'true' : 'false');
 
             try {
-                const response = await fetch(`${COLMAP_API}/workflow/photos-to-model`, {
+                const response = await fetch(`${COLMAP_UPLOAD_API}/workflow/photos-to-model`, {
                     method: 'POST',
                     body: formData
                 });
