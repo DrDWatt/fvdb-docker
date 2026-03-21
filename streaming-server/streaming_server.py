@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 SIGNALING_PORT = 49100
-HTTP_PORT = 8080
+HTTP_PORT = 8090
 MODEL_DIR = Path("/app/models")
 
 # Global state
@@ -524,7 +524,7 @@ async def create_session(request):
     return web.json_response({
         "sessionId": session_id,
         "status": "created",
-        "signalingUrl": f"ws://localhost:8080/ws/signaling/{session_id}",
+        "signalingUrl": f"ws://localhost:8090/ws/signaling/{session_id}",
         "metadata": model_metadata
     })
 
@@ -561,15 +561,15 @@ async def index(request):
             <div class="status">
                 <h3>✅ Server Running</h3>
                 <p><strong>Signaling Port:</strong> 49100</p>
-                <p><strong>HTTP Port:</strong> 8080</p>
+                <p><strong>HTTP Port:</strong> 8090</p>
                 <p><strong>Active Connections:</strong> <span id="connections">0</span></p>
             </div>
             
             <div class="info">
                 <h3>📖 Quick Links</h3>
                 <ul>
-                    <li><a href="http://localhost:8080/workflow" target="_blank"><strong>Complete Workflow</strong></a> - Upload, COLMAP, Training</li>
-                    <li><a href="http://localhost:8080/test" target="_blank">3D Viewer</a> - WebRTC Stream</li>
+                    <li><a href="http://localhost:8090/workflow" target="_blank"><strong>Complete Workflow</strong></a> - Upload, COLMAP, Training</li>
+                    <li><a href="http://localhost:8090/test" target="_blank">3D Viewer</a> - WebRTC Stream</li>
                     <li><a href="http://localhost:8003/api" target="_blank">COLMAP API</a></li>
                     <li><a href="http://localhost:8000/api" target="_blank">Training API</a></li>
                     <li><a href="http://localhost:8002" target="_blank">USD Pipeline</a></li>

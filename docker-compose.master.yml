@@ -19,7 +19,11 @@
 #   8003 - COLMAP
 #   8004 - SAM-2 Segmentation
 #   8006 - GARField Extraction
-#   8080 - Streaming Server
+#   8009 - SVO to ROSBAG Converter
+#   8010 - ISAAC Sim
+#   8011 - ISAAC Lab
+#   8012 - ISAAC Viewer
+#   8090 - Streaming Server
 # =============================================================================
 
 services:
@@ -271,11 +275,13 @@ services:
       - SAM2_SERVICE_URL=http://sam2-segmentation:8004
       - TRAINING_SERVICE_URL=http://fvdb-training-gpu:8000
       - RENDERING_SERVICE_URL=http://fvdb-rendering:8001
+      - OLLAMA_URL=http://ollama:11434
     command: ["python3", "/app/image_viewer_service.py"]
     restart: unless-stopped
     depends_on:
       - training-service
       - rendering-service
+      - ollama
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
       interval: 15s
@@ -330,8 +336,198 @@ services:
       - workflow-net
 
   # ===========================================================================
+  # SVO TO ROSBAG CONVERTER - ZED X stereo camera SVO to ROSBAG
+  # Swagger: http://localhost:8009/api
+  # ===========================================================================
+  svo-converter:
+    build:
+      context: ./isaac-rosbag-service
+      dockerfile: Dockerfile
+    image: svo-rosbag-converter:latest
+    container_name: svo-converter
+    ports:
+      - "8009:8009"
+    volumes:
+      - ./isaac-data/svo-uploads:/app/uploads
+      - ./isaac-data/rosbags:/app/outputs
+      - ./isaac-data/processing:/app/processing
+      - ./isaac-rosbag-service/svo_converter_service.py:/app/svo_converter_service.py:ro
+    environment:
+      - UPLOAD_DIR=/app/uploads
+      - OUTPUT_DIR=/app/outputs
+      - PROCESSING_DIR=/app/processing
+      - PORT=8009
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8009/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - workflow-net
+
+  # ===========================================================================
+  # ISAAC SIM SERVICE - Robotics simulation on NVIDIA Omniverse
+  # Swagger: http://localhost:8010/api
+  # ===========================================================================
+  isaac-sim:
+    build:
+      context: ./isaac-sim-service
+      dockerfile: Dockerfile
+    image: isaac-sim-service:latest
+    container_name: isaac-sim
+    ports:
+      - "8010:8010"
+    volumes:
+      - ./isaac-data/rosbags:/app/rosbags:ro
+      - ./isaac-data/scenes:/app/scenes
+      - ./isaac-data/sim-outputs:/app/outputs
+      - ./isaac-sim-service/isaac_sim_service.py:/app/isaac_sim_service.py:ro
+    environment:
+      - ROSBAG_DIR=/app/rosbags
+      - SCENE_DIR=/app/scenes
+      - OUTPUT_DIR=/app/outputs
+      - PORT=8010
+    restart: unless-stopped
+    depends_on:
+      - svo-converter
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - workflow-net
+
+  # ===========================================================================
+  # ISAAC LAB SERVICE - Reinforcement learning for robotics
+  # Swagger: http://localhost:8011/api
+  # ===========================================================================
+  isaac-lab:
+    build:
+      context: ./isaac-lab-service
+      dockerfile: Dockerfile
+    image: isaac-lab-service:latest
+    container_name: isaac-lab
+    ports:
+      - "8011:8011"
+    volumes:
+      - ./isaac-data/checkpoints:/app/checkpoints
+      - ./isaac-data/logs:/app/logs
+      - ./isaac-data/lab-outputs:/app/outputs
+      - ./isaac-lab-service/isaac_lab_service.py:/app/isaac_lab_service.py:ro
+    environment:
+      - CHECKPOINT_DIR=/app/checkpoints
+      - LOG_DIR=/app/logs
+      - OUTPUT_DIR=/app/outputs
+      - PORT=8011
+    restart: unless-stopped
+    depends_on:
+      - isaac-sim
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - workflow-net
+
+  # ===========================================================================
+  # ISAAC VIEWER - SVO to Gaussian Splat workflow
+  # Swagger: http://localhost:8012/api
+  # ===========================================================================
+  isaac-viewer:
+    build:
+      context: ./isaac-viewer
+      dockerfile: Dockerfile
+    image: isaac-viewer:latest
+    container_name: isaac-viewer
+    ports:
+      - "8012:8012"
+    volumes:
+      - ./isaac-data/svo-uploads:/app/svo
+      - ./isaac-data/rosbags:/app/rosbags
+      - ./isaac-data/viewer-outputs:/app/outputs
+      - ./isaac-data/frames:/app/frames
+      - ./isaac-viewer/isaac_viewer_service.py:/app/isaac_viewer_service.py:ro
+    environment:
+      - SVO_DIR=/app/svo
+      - ROSBAG_DIR=/app/rosbags
+      - OUTPUT_DIR=/app/outputs
+      - FRAME_DIR=/app/frames
+      - PORT=8012
+      - COLMAP_SERVICE_URL=http://host.docker.internal:8003
+      - TRAINING_SERVICE_URL=http://host.docker.internal:8000
+      - FVDB_VIEWER_URL=http://host.docker.internal:8085
+      - DEPTH_SERVICE_URL=http://host.docker.internal:8013
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    depends_on:
+      - svo-converter
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8012/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - workflow-net
+
+  # ===========================================================================
+  # OLLAMA LLM SERVICE - Local LLM for RAG queries
+  # ===========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-llm
+    runtime: nvidia
+    ports:
+      - "11435:11434"
+    volumes:
+      - ./ollama-data:/root/.ollama
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - workflow-net
+
+  # ===========================================================================
+  # OLLAMA MODEL PULLER - Downloads nemotron-mini on first run
+  # ===========================================================================
+  ollama-pull:
+    image: curlimages/curl:latest
+    container_name: ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c 'echo "Pulling nemotron-mini model..." &&
+             curl -s http://ollama:11434/api/pull -d "{\"name\":\"nemotron-mini\"}" &&
+             echo "Model pull complete"'
+    restart: "no"
+    networks:
+      - workflow-net
+
+  # ===========================================================================
   # STREAMING SERVER - WebRTC Real-time 3D Streaming
-  # Web UI: http://localhost:8080/test
+  # Web UI: http://localhost:8090/test
   # ===========================================================================
   streaming-server:
     image: omniverse-streaming-server:latest
@@ -339,10 +535,11 @@ services:
     network_mode: "host"
     volumes:
       - ./models:/app/models
+      - ./streaming-server/streaming_server.py:/app/streaming_server.py:ro
       - ./streaming-server/workflow.html:/app/workflow.html:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
       interval: 15s
       timeout: 5s
       retries: 3

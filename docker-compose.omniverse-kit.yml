@@ -11,7 +11,7 @@ services:
       - WEBRTC_AUDIO_CODEC=opus
       - WEBRTC_VIDEO_CODEC=h264
       # Streaming configuration
-      - KIT_SIGNALING_PORT=8080
+      - KIT_SIGNALING_PORT=8090
       - KIT_MEDIA_PORT=8081
       # Display configuration
       - DISPLAY=:0
@@ -32,4 +32,4 @@ services:
     command: >
       --no-window
       --/app/livestream/enabled=true
-      --/app/livestream/port=8080
+      --/app/livestream/port=8090

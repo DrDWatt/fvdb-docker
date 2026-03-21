@@ -148,7 +148,7 @@ services:
       - ./streaming-server/workflow.html:/app/workflow.html:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
       interval: 5s
       timeout: 2s
       retries: 3

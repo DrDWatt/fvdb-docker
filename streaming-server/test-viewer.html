@@ -82,7 +82,7 @@
         // Fetch model info
         async function loadModelInfo() {
             try {
-                const response = await fetch('http://localhost:8080/health');
+                const response = await fetch('http://localhost:8090/health');
                 const data = await response.json();
                 modelInfo.textContent = `${data.model_info.name} (${data.model_info.num_gaussians} Gaussians, rendering ${data.model_info.rendered_points} points)`;
             } catch (error) {
@@ -164,7 +164,7 @@
                 };
 
                 // Connect via WebSocket
-                ws = new WebSocket('ws://localhost:8080/ws/signaling/test-session');
+                ws = new WebSocket('ws://localhost:8090/ws/signaling/test-session');
 
                 ws.onopen = async () => {
                     console.log('WebSocket connected');

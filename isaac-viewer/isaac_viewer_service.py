@@ -834,6 +834,10 @@ def get_ui_html():
                     </div>
                 </div>
                 
+                <button class="btn" id="wfSuggestBtn" onclick="suggestSettings()" style="background: #2196F3; margin-bottom: 6px;">🔍 Analyze &amp; Suggest Settings</button>
+                <div id="wfSuggestionInfo" style="display:none; background: rgba(33,150,243,0.15); border: 1px solid #2196F3; border-radius: 6px; padding: 8px; margin-bottom: 10px; font-size: 0.78em; color: #ccc;">
+                    <div id="wfAnalysisText"></div>
+                </div>
                 <button class="btn" id="wfStartBtn" onclick="startWorkflow()">🚀 Start Full Pipeline</button>
                 <button class="btn btn-secondary" id="wfExtractBtn" onclick="extractFramesOnly()">� Extract Frames Only</button>
                 
@@ -1390,6 +1394,70 @@ def get_ui_html():
             document.getElementById('wfExtractBtn').disabled = false;
         }
         
+        async function suggestSettings() {
+            if (!currentFile) {
+                document.getElementById('wfStatus').textContent = 'Load an SVO file first';
+                return;
+            }
+            
+            const btn = document.getElementById('wfSuggestBtn');
+            btn.disabled = true;
+            btn.textContent = '🔍 Analyzing...';
+            const infoDiv = document.getElementById('wfSuggestionInfo');
+            const textDiv = document.getElementById('wfAnalysisText');
+            infoDiv.style.display = 'none';
+            
+            try {
+                const resp = await fetch('/analyze_file');
+                if (!resp.ok) throw new Error('Analysis failed');
+                const data = await resp.json();
+                const s = data.suggestions;
+                const a = data.analysis;
+                const r = data.reasons;
+                
+                // Apply suggested values to form
+                document.getElementById('wfFps').value = s.fps;
+                
+                const stepsSelect = document.getElementById('wfSteps');
+                for (let opt of stepsSelect.options) {
+                    if (parseInt(opt.value) === s.training_steps) {
+                        opt.selected = true;
+                        break;
+                    }
+                }
+                
+                document.getElementById('wfIncludeDepth').checked = s.include_depth;
+                document.getElementById('wfUseMcmc').checked = s.use_mcmc;
+                document.getElementById('wfFilterBlur').checked = s.filter_blur;
+                
+                // Show analysis info
+                textDiv.innerHTML = 
+                    '<div style="margin-bottom:6px;"><b style="color:#2196F3;">File Analysis</b></div>' +
+                    '<div>' + a.resolution_class + ' ' + a.single_cam_dimensions + 
+                    ' | ' + a.stereo_layout + ' stereo' +
+                    ' | ' + a.total_frames + ' frames @ ' + a.video_fps + ' FPS' +
+                    ' | ' + a.duration_sec + 's</div>' +
+                    '<div style="margin-top:4px;">Sharpness: avg=' + a.sharpness_avg + 
+                    ', min=' + a.sharpness_min + ', max=' + a.sharpness_max + '</div>' +
+                    '<div style="margin-top:8px;"><b style="color:#2196F3;">Recommendations</b></div>' +
+                    '<div style="margin-top:2px;">&#8226; <b>FPS ' + s.fps + '</b>: ' + r.fps + '</div>' +
+                    '<div>&#8226; <b>' + (s.training_steps/1000) + 'K steps</b>: ' + r.steps + '</div>' +
+                    '<div>&#8226; <b>Depth ' + (s.include_depth ? 'ON' : 'OFF') + '</b>: ' + r.depth + '</div>' +
+                    '<div>&#8226; <b>MCMC ' + (s.use_mcmc ? 'ON' : 'OFF') + '</b>: ' + r.mcmc + '</div>' +
+                    '<div>&#8226; <b>Blur filter ' + (s.filter_blur ? 'ON' : 'OFF') + '</b>: ' + r.filter_blur + '</div>' +
+                    '<div style="margin-top:6px; color:#4CAF50;">~' + s.estimated_frames + ' frames will be extracted</div>';
+                
+                infoDiv.style.display = 'block';
+                wfLog('Analysis complete: ' + a.resolution_class + ' ' + a.stereo_layout + 
+                      ' stereo, suggested FPS=' + s.fps + ', steps=' + s.training_steps);
+            } catch(e) {
+                wfLog('ERROR: Analysis failed - ' + e.message);
+            }
+            
+            btn.disabled = false;
+            btn.textContent = '🔍 Analyze & Suggest Settings';
+        }
+        
         async function startWorkflow() {
             if (!currentFile) {
                 document.getElementById('wfStatus').textContent = 'Load an SVO file first';
@@ -1661,21 +1729,31 @@ def read_raw_frame(file_path: str, frame_idx: int) -> Optional[np.ndarray]:
 
 
 def extract_view_from_frame(full_frame: np.ndarray, view: str) -> np.ndarray:
-    """Extract a specific view (left/right/depth) from a full stereo frame"""
+    """Extract a specific view (left/right/depth) from a full stereo frame.
+    Supports both side-by-side and top-bottom stereo layouts."""
     h, w = full_frame.shape[:2]
-    is_stereo = w > h * 1.5  # Side-by-side stereo detection
+    is_side_by_side = w > h * 1.5
+    is_top_bottom = not is_side_by_side and h > w  # Portrait = top-bottom stereo (ZED never produces portrait natively)
     
     if view == 'left':
-        if is_stereo:
+        if is_side_by_side:
             return full_frame[:, :w//2, :]
+        elif is_top_bottom:
+            return full_frame[:h//2, :, :]
         return full_frame
     elif view == 'right':
-        if is_stereo:
+        if is_side_by_side:
             return full_frame[:, w//2:, :]
+        elif is_top_bottom:
+            return full_frame[h//2:, :, :]
         return full_frame
     elif view == 'depth':
-        # Use left image for monocular depth estimation via Depth Anything v2
-        left_img = full_frame[:, :w//2, :] if is_stereo else full_frame
+        if is_side_by_side:
+            left_img = full_frame[:, :w//2, :]
+        elif is_top_bottom:
+            left_img = full_frame[:h//2, :, :]
+        else:
+            left_img = full_frame
         return estimate_depth_from_service(left_img)
     
     return full_frame
@@ -1950,6 +2028,171 @@ async def workflow_extract_frames(request: dict = None):
     }
 
 
+@app.get("/analyze_file")
+async def analyze_file():
+    """Analyze the currently loaded SVO/video file and suggest optimal pipeline parameters
+    for producing a crisp Gaussian Splat."""
+    if not current_file:
+        return JSONResponse({"error": "No file loaded"}, status_code=400)
+
+    file_path = None
+    for d in [SVO_DIR, ROSBAG_DIR]:
+        p = d / current_file
+        if p.exists():
+            file_path = str(p)
+            break
+
+    if not file_path:
+        return JSONResponse({"error": "File not found on disk"}, status_code=404)
+
+    try:
+        cap = cv2.VideoCapture(file_path)
+        if not cap.isOpened():
+            return JSONResponse({"error": "Cannot open file"}, status_code=500)
+
+        video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+        # Count readable frames
+        all_frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            all_frames.append(frame)
+        cap.release()
+
+        total_frames = len(all_frames)
+        if total_frames == 0:
+            return JSONResponse({"error": "No readable frames"}, status_code=400)
+
+        h, w = all_frames[0].shape[:2]
+        duration = total_frames / max(video_fps, 1)
+
+        # Detect stereo layout
+        is_sbs = w > h * 1.5
+        is_tb = not is_sbs and h > w
+        is_stereo = is_sbs or is_tb
+        single_w = w // 2 if is_sbs else w
+        single_h = h // 2 if is_tb else h
+
+        # Resolution class
+        if single_w >= 2000:
+            res_class = "HD2K"
+        elif single_w >= 1200:
+            res_class = "HD1080"
+        elif single_w >= 800:
+            res_class = "HD720"
+        else:
+            res_class = "VGA"
+
+        # Sample sharpness (Laplacian variance) across ~20 frames
+        blur_scores = []
+        sample_indices = list(range(0, total_frames, max(1, total_frames // 20)))
+        for i in sample_indices:
+            f = all_frames[i]
+            if is_tb:
+                f = f[:h // 2, :, :]
+            elif is_sbs:
+                f = f[:, :w // 2, :]
+            gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+            blur_scores.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
+
+        del all_frames  # Free memory
+
+        avg_sharpness = float(np.mean(blur_scores))
+        min_sharpness = float(np.min(blur_scores))
+        max_sharpness = float(np.max(blur_scores))
+        sharpness_range = max_sharpness - min_sharpness
+
+        # --- Determine optimal parameters ---
+
+        # FPS: target 100-150 output frames for crisp Gaussian Splats
+        # Research shows minimum ~100 frames needed for good reconstruction
+        target_frames = 120
+        suggested_fps = round(target_frames / max(duration, 1), 1)
+        suggested_fps = max(0.5, min(suggested_fps, video_fps))
+        estimated_frames = int(duration * suggested_fps)
+
+        # Training steps: based on resolution and frame count
+        if res_class == "HD2K" and estimated_frames >= 100:
+            suggested_steps = 62200
+            steps_label = "62K (Best)"
+        elif estimated_frames > 80 or res_class in ("HD2K", "HD1080"):
+            suggested_steps = 30000
+            steps_label = "30K (Good)"
+        elif estimated_frames < 30:
+            suggested_steps = 7000
+            steps_label = "7K (Quick)"
+        else:
+            suggested_steps = 30000
+            steps_label = "30K (Good)"
+
+        # Include depth: always yes for stereo (ZED provides real depth)
+        suggested_depth = is_stereo
+
+        # MCMC: default OFF - 1M Gaussian cap can reduce crispness for HD scenes
+        suggested_mcmc = False
+
+        # Filter blurry frames: recommend if sharpness variance is high
+        blur_ratio = sharpness_range / max(avg_sharpness, 1)
+        suggested_filter_blur = blur_ratio > 0.5 or min_sharpness < 50
+
+        # Build reasoning strings
+        reasons = {}
+        reasons["fps"] = (
+            f"At {video_fps:.0f} FPS source over {duration:.1f}s, "
+            f"extracting at {suggested_fps} FPS yields ~{estimated_frames} frames "
+            f"(min ~100 frames recommended for crisp reconstruction)"
+        )
+        reasons["steps"] = (
+            f"{steps_label} recommended for {res_class} resolution with ~{estimated_frames} frames"
+        )
+        reasons["depth"] = (
+            "Stereo depth from ZED improves Gaussian placement accuracy"
+            if suggested_depth else
+            "No stereo depth available; monocular depth adds moderate benefit"
+        )
+        reasons["mcmc"] = (
+            "Standard training recommended - allows Gaussians to grow freely for maximum crispness. "
+            "MCMC's 1M cap can cause blurriness on HD scenes."
+        )
+        reasons["filter_blur"] = (
+            f"Sharpness varies significantly (min={min_sharpness:.0f}, max={max_sharpness:.0f}); "
+            f"filtering removes blurry frames for crisper results"
+            if suggested_filter_blur else
+            f"Frames are consistently sharp (avg={avg_sharpness:.0f}); filtering not critical"
+        )
+
+        return {
+            "file": current_file,
+            "analysis": {
+                "video_fps": video_fps,
+                "total_frames": total_frames,
+                "duration_sec": round(duration, 1),
+                "raw_dimensions": f"{w}x{h}",
+                "single_cam_dimensions": f"{single_w}x{single_h}",
+                "resolution_class": res_class,
+                "is_stereo": is_stereo,
+                "stereo_layout": "side-by-side" if is_sbs else "top-bottom" if is_tb else "mono",
+                "sharpness_avg": round(avg_sharpness, 1),
+                "sharpness_min": round(min_sharpness, 1),
+                "sharpness_max": round(max_sharpness, 1),
+            },
+            "suggestions": {
+                "fps": suggested_fps,
+                "training_steps": suggested_steps,
+                "include_depth": suggested_depth,
+                "use_mcmc": suggested_mcmc,
+                "filter_blur": suggested_filter_blur,
+                "estimated_frames": estimated_frames,
+            },
+            "reasons": reasons,
+        }
+    except Exception as e:
+        logger.error(f"File analysis failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/workflow/start")
 async def workflow_start(request: dict, background_tasks: BackgroundTasks = None):
     """Start the full SVO to Gaussian Splat pipeline.
@@ -2079,15 +2322,26 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
             if frame_idx % frame_interval == 0:
                 rgb = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
                 h, w = rgb.shape[:2]
-                is_stereo = w > h * 1.5
-                left = rgb[:, :w//2, :] if is_stereo else rgb
+                is_side_by_side = w > h * 1.5
+                is_top_bottom = not is_side_by_side and h > w  # Portrait = top-bottom stereo
+                is_stereo = is_side_by_side or is_top_bottom
+                # Extract left frame
+                if is_side_by_side:
+                    left = rgb[:, :w//2, :]
+                elif is_top_bottom:
+                    left = rgb[:h//2, :, :]
+                else:
+                    left = rgb
                 left_bgr = cv2.cvtColor(left, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(str(images_dir / f"frame_{num_extracted:04d}.jpg"), left_bgr,
                             [cv2.IMWRITE_JPEG_QUALITY, 95])
                 # Extract right stereo image for cuVSLAM
                 if is_stereo:
                     has_stereo = True
-                    right = rgb[:, w//2:, :]
+                    if is_side_by_side:
+                        right = rgb[:, w//2:, :]
+                    else:
+                        right = rgb[h//2:, :, :]
                     right_bgr = cv2.cvtColor(right, cv2.COLOR_RGB2BGR)
                     cv2.imwrite(str(images_right_dir / f"frame_{num_extracted:04d}.jpg"), right_bgr,
                                 [cv2.IMWRITE_JPEG_QUALITY, 95])

@@ -31,7 +31,7 @@ echo ""
 echo "🏥 Health Check:"
 echo "=============================================="
 
-services=("colmap-processor:8003" "fvdb-training-gpu:8000" "fvdb-rendering:8001" "usd-pipeline:8002" "streaming-server:8080")
+services=("colmap-processor:8003" "fvdb-training-gpu:8000" "fvdb-rendering:8001" "usd-pipeline:8002" "streaming-server:8090")
 
 for service in "${services[@]}"; do
     IFS=':' read -ra ADDR <<< "$service"
@@ -51,8 +51,8 @@ echo "🎉 Workflow Stack Ready!"
 echo "=============================================="
 echo ""
 echo "📍 Access Points:"
-echo "   🎬 Workflow UI:    http://localhost:8080/workflow"
-echo "   👁️  3D Viewer:      http://localhost:8080/test"
+echo "   🎬 Workflow UI:    http://localhost:8090/workflow"
+echo "   👁️  3D Viewer:      http://localhost:8090/test"
 echo "   🔬 COLMAP API:     http://localhost:8003/api"
 echo "   🎯 Training API:   http://localhost:8000/api"
 echo "   🎨 USD Pipeline:   http://localhost:8002"
@@ -62,7 +62,7 @@ echo "📊 Service Status:"
 docker compose -f docker-compose.workflow.yml ps
 echo ""
 echo "💡 Quick Start:"
-echo "   1. Open http://localhost:8080/workflow"
+echo "   1. Open http://localhost:8090/workflow"
 echo "   2. Upload MP4/MOV video or ZIP of photos"
 echo "   3. Run COLMAP processing"
 echo "   4. Train Gaussian Splat model"
