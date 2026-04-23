@@ -585,11 +585,14 @@ async def workflow_video_to_model(
         "error": None
     })
 
-    # Save video to temp
+    # Stream video to disk in chunks to avoid loading 600MB+ into memory
     video_path = TEMP_DIR / f"{dataset_id}_{file.filename}"
-    content = await file.read()
+    file_size = 0
     with open(video_path, "wb") as f:
-        f.write(content)
+        while chunk := await file.read(1024 * 1024):  # 1MB chunks
+            f.write(chunk)
+            file_size += len(chunk)
+    logger.info(f"[{workflow_id}] Video saved: {file_size / (1024*1024):.1f} MB")
 
     async def run_video_workflow():
         job_id = None

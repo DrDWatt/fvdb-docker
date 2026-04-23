@@ -570,7 +570,7 @@ async def workflow_video_to_model(
             update_workflow(workflow_id, {"current_step": "Extracting frames from video"})
             update_workflow(workflow_id, {"progress": 0.25})
             
-            result = subprocess.run([
+            result = await asyncio.to_thread(subprocess.run, [
                 "ffmpeg", "-i", str(video_path),
                 "-vf", f"fps={fps}",
                 "-q:v", "2",
@@ -609,10 +609,10 @@ async def workflow_video_to_model(
                 "--ImageReader.camera_model", camera_model,
                 "--SiftExtraction.max_image_size", "2048",
                 "--SiftExtraction.max_num_features", "16384",
-                "--SiftExtraction.use_gpu", "1"
+                "--SiftExtraction.use_gpu", "0"  # Disable GPU - COLMAP built without CUDA
             ]
             
-            result = subprocess.run(cmd_extract, capture_output=True, text=True, timeout=1800, env=env)
+            result = await asyncio.to_thread(subprocess.run, cmd_extract, capture_output=True, text=True, timeout=1800, env=env)
             if result.returncode != 0:
                 raise Exception(f"Feature extraction failed: {result.stderr}")
             
@@ -625,17 +625,17 @@ async def workflow_video_to_model(
                 cmd_match = [
                     "colmap", "exhaustive_matcher",
                     "--database_path", str(database_path),
-                    "--SiftMatching.use_gpu", "1"
+                    "--SiftMatching.use_gpu", "0"  # Disable GPU
                 ]
             else:
                 cmd_match = [
                     "colmap", "sequential_matcher",
                     "--database_path", str(database_path),
                     "--SequentialMatching.overlap", "10",
-                    "--SiftMatching.use_gpu", "1"
+                    "--SiftMatching.use_gpu", "0"  # Disable GPU
                 ]
             
-            result = subprocess.run(cmd_match, capture_output=True, text=True, timeout=1800, env=env)
+            result = await asyncio.to_thread(subprocess.run, cmd_match, capture_output=True, text=True, timeout=7200, env=env)
             if result.returncode != 0:
                 raise Exception(f"Feature matching failed: {result.stderr}")
             
@@ -651,7 +651,7 @@ async def workflow_video_to_model(
                 "--output_path", str(sparse_dir.parent)
             ]
             
-            result = subprocess.run(cmd_mapper, capture_output=True, text=True, timeout=3600, env=env)
+            result = await asyncio.to_thread(subprocess.run, cmd_mapper, capture_output=True, text=True, timeout=3600, env=env)
             if result.returncode != 0:
                 raise Exception(f"Sparse reconstruction failed: {result.stderr}")
             
@@ -962,10 +962,10 @@ async def workflow_photos_to_model(
                 "--ImageReader.camera_model", camera_model,
                 "--SiftExtraction.max_image_size", "2048",
                 "--SiftExtraction.max_num_features", "16384",
-                "--SiftExtraction.use_gpu", "1"
+                "--SiftExtraction.use_gpu", "0"  # Disable GPU - COLMAP built without CUDA
             ]
             
-            result = subprocess.run(cmd_extract, capture_output=True, text=True, timeout=1800, env=env)
+            result = await asyncio.to_thread(subprocess.run, cmd_extract, capture_output=True, text=True, timeout=1800, env=env)
             if result.returncode != 0:
                 raise Exception(f"Feature extraction failed: {result.stderr}")
             
@@ -978,17 +978,17 @@ async def workflow_photos_to_model(
                 cmd_match = [
                     "colmap", "exhaustive_matcher",
                     "--database_path", str(database_path),
-                    "--SiftMatching.use_gpu", "1"
+                    "--SiftMatching.use_gpu", "0"  # Disable GPU
                 ]
             else:
                 cmd_match = [
                     "colmap", "sequential_matcher",
                     "--database_path", str(database_path),
                     "--SequentialMatching.overlap", "10",
-                    "--SiftMatching.use_gpu", "1"
+                    "--SiftMatching.use_gpu", "0"  # Disable GPU
                 ]
             
-            result = subprocess.run(cmd_match, capture_output=True, text=True, timeout=1800, env=env)
+            result = await asyncio.to_thread(subprocess.run, cmd_match, capture_output=True, text=True, timeout=7200, env=env)
             if result.returncode != 0:
                 raise Exception(f"Feature matching failed: {result.stderr}")
             
@@ -1004,7 +1004,7 @@ async def workflow_photos_to_model(
                 "--output_path", str(sparse_dir.parent)
             ]
             
-            result = subprocess.run(cmd_mapper, capture_output=True, text=True, timeout=3600, env=env)
+            result = await asyncio.to_thread(subprocess.run, cmd_mapper, capture_output=True, text=True, timeout=3600, env=env)
             if result.returncode != 0:
                 raise Exception(f"Sparse reconstruction failed: {result.stderr}")
             

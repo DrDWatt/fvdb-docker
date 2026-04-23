@@ -794,10 +794,11 @@ async def upload_dataset(
     dataset_path = DATA_DIR / dataset_id
     dataset_path.mkdir(exist_ok=True)
     
-    # Save uploaded file
+    # Stream uploaded file to disk in chunks to handle 600MB+ files
     zip_path = UPLOAD_DIR / file.filename
     with open(zip_path, 'wb') as f:
-        shutil.copyfileobj(file.file, f)
+        while chunk := await file.read(1024 * 1024):  # 1MB chunks
+            f.write(chunk)
     
     # Extract
     try:
@@ -1082,13 +1083,15 @@ async def extract_video_frames(
         if not output_name:
             output_name = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
-        # Save uploaded video
+        # Stream uploaded video to disk in chunks to handle 600MB+ files
         video_path = UPLOAD_DIR / f"{output_name}{file_ext}"
+        file_size = 0
         with open(video_path, 'wb') as f:
-            content = await file.read()
-            f.write(content)
+            while chunk := await file.read(1024 * 1024):  # 1MB chunks
+                f.write(chunk)
+                file_size += len(chunk)
         
-        logger.info(f"Video uploaded: {video_path} ({len(content) / 1024 / 1024:.1f} MB)")
+        logger.info(f"Video uploaded: {video_path} ({file_size / 1024 / 1024:.1f} MB)")
         
         # Get video info
         video_info = get_video_info(str(video_path))
@@ -1159,7 +1162,8 @@ async def complete_workflow(
             
             zip_path = UPLOAD_DIR / file.filename
             with open(zip_path, 'wb') as f:
-                shutil.copyfileobj(file.file, f)
+                while chunk := await file.read(1024 * 1024):  # 1MB chunks
+                    f.write(chunk)
             
             extract_zip(zip_path, dataset_path)
             zip_path.unlink()
@@ -1240,13 +1244,13 @@ CUVSLAM_URL = os.environ.get("CUVSLAM_SERVICE_URL", "http://colmap-processor:800
 
 @app.post("/workflow/video-to-model")
 async def proxy_video_to_model(request: Request):
-    """Proxy video upload to cuvslam-service to avoid cross-origin upload issues"""
-    body = await request.body()
+    """Proxy video upload to cuvslam-service using streaming to handle 600MB+ files.
+    Streams the request body in chunks instead of buffering entirely in memory."""
     content_type = request.headers.get("content-type", "")
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)) as client:
         resp = await client.post(
             f"{CUVSLAM_URL}/workflow/video-to-model",
-            content=body,
+            content=request.stream(),
             headers={"content-type": content_type}
         )
     return Response(content=resp.content, status_code=resp.status_code,
@@ -1254,13 +1258,12 @@ async def proxy_video_to_model(request: Request):
 
 @app.post("/workflow/photos-to-model")
 async def proxy_photos_to_model(request: Request):
-    """Proxy photos upload to cuvslam-service"""
-    body = await request.body()
+    """Proxy photos upload to cuvslam-service using streaming to handle large uploads."""
     content_type = request.headers.get("content-type", "")
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)) as client:
         resp = await client.post(
             f"{CUVSLAM_URL}/workflow/photos-to-model",
-            content=body,
+            content=request.stream(),
             headers={"content-type": content_type}
         )
     return Response(content=resp.content, status_code=resp.status_code,

@@ -200,6 +200,29 @@
         .suggest-info b { color: #00796b; }
         .suggest-info .rec-item { margin: 3px 0; }
         .suggest-info .rec-label { font-weight: 600; color: #333; }
+        .upload-progress { display: none; margin-top: 10px; }
+        .upload-progress.active { display: block; }
+        .upload-progress-bar {
+            height: 10px;
+            background: #e0e0e0;
+            border-radius: 5px;
+            overflow: hidden;
+            margin: 8px 0;
+        }
+        .upload-progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            border-radius: 5px;
+            transition: width 0.3s;
+            width: 0%;
+        }
+        .upload-stats {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            color: #555;
+        }
+        .upload-stats span { font-weight: 600; }
     </style>
 </head>
 <body>
@@ -248,7 +271,7 @@
                     </div>
                     <div class="form-group">
                         <label>FPS</label>
-                        <input type="number" id="fps" value="1" min="1" max="5" step="0.5">
+                        <input type="number" id="fps" value="1" min="0.5" max="10" step="0.1">
                     </div>
                     <div class="form-group">
                         <label>Training Steps</label>
@@ -266,6 +289,15 @@
                 <button type="button" class="suggest-btn" id="videoSuggestBtn" onclick="analyzeVideo()">🔍 Analyze & Suggest Settings</button>
                 <div class="suggest-info" id="videoSuggestInfo"><div id="videoAnalysisText"></div></div>
                 <button type="submit" class="btn" id="uploadBtn">🎬 Start Video Workflow</button>
+                <div class="upload-progress" id="videoUploadProgress">
+                    <div class="upload-progress-bar"><div class="upload-progress-fill" id="videoProgressFill"></div></div>
+                    <div class="upload-stats">
+                        <span id="videoUploadPct">0%</span>
+                        <span id="videoUploadSize">0 / 0 MB</span>
+                        <span id="videoUploadSpeed">-- MB/s</span>
+                        <span id="videoUploadEta">ETA: --</span>
+                    </div>
+                </div>
             </form>
         </div>
 
@@ -305,6 +337,15 @@
                 <button type="button" class="suggest-btn" id="photosSuggestBtn" onclick="analyzePhotos()">🔍 Analyze & Suggest Settings</button>
                 <div class="suggest-info" id="photosSuggestInfo"><div id="photosAnalysisText"></div></div>
                 <button type="submit" class="btn" id="photosBtn">📷 Start Photos Workflow</button>
+                <div class="upload-progress" id="photosUploadProgress">
+                    <div class="upload-progress-bar"><div class="upload-progress-fill" id="photosProgressFill"></div></div>
+                    <div class="upload-stats">
+                        <span id="photosUploadPct">0%</span>
+                        <span id="photosUploadSize">0 / 0 MB</span>
+                        <span id="photosUploadSpeed">-- MB/s</span>
+                        <span id="photosUploadEta">ETA: --</span>
+                    </div>
+                </div>
             </form>
         </div>
 
@@ -353,7 +394,7 @@
                 // Target ~120 frames for crisp reconstruction (min 100)
                 const targetFrames = 120;
                 sugFps = Math.round((targetFrames / Math.max(duration, 1)) * 10) / 10;
-                sugFps = Math.max(1, Math.min(sugFps, videoFps));
+                sugFps = Math.round(Math.max(0.5, Math.min(sugFps, videoFps)) * 10) / 10;
                 estFrames = Math.round(duration * sugFps);
             }
             
@@ -549,7 +590,67 @@
             btn.textContent = '🔍 Analyze & Suggest Settings';
         }
 
-        // Form submission
+        // Upload with progress tracking using XMLHttpRequest
+        function uploadWithProgress(url, formData, opts) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                const startTime = Date.now();
+                const progressEl = document.getElementById(opts.progressId);
+                const fillEl = document.getElementById(opts.fillId);
+                const pctEl = document.getElementById(opts.pctId);
+                const sizeEl = document.getElementById(opts.sizeId);
+                const speedEl = document.getElementById(opts.speedId);
+                const etaEl = document.getElementById(opts.etaId);
+
+                progressEl.classList.add('active');
+
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (!e.lengthComputable) return;
+                    const pct = Math.round((e.loaded / e.total) * 100);
+                    const elapsedSec = (Date.now() - startTime) / 1000;
+                    const speedMBs = (e.loaded / (1024 * 1024)) / Math.max(elapsedSec, 0.1);
+                    const remainMB = (e.total - e.loaded) / (1024 * 1024);
+                    const etaSec = speedMBs > 0 ? remainMB / speedMBs : 0;
+
+                    fillEl.style.width = pct + '%';
+                    pctEl.textContent = pct + '%';
+                    sizeEl.textContent = (e.loaded / (1024*1024)).toFixed(1) + ' / ' + (e.total / (1024*1024)).toFixed(1) + ' MB';
+                    speedEl.textContent = speedMBs.toFixed(1) + ' MB/s';
+                    if (etaSec < 60) {
+                        etaEl.textContent = 'ETA: ' + Math.ceil(etaSec) + 's';
+                    } else {
+                        etaEl.textContent = 'ETA: ' + Math.ceil(etaSec / 60) + 'm ' + Math.ceil(etaSec % 60) + 's';
+                    }
+                });
+
+                xhr.addEventListener('load', () => {
+                    fillEl.style.width = '100%';
+                    pctEl.textContent = '100%';
+                    etaEl.textContent = 'Done';
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try { resolve(JSON.parse(xhr.responseText)); }
+                        catch { resolve(xhr.responseText); }
+                    } else {
+                        reject(new Error('Server returned ' + xhr.status + ': ' + xhr.responseText));
+                    }
+                });
+
+                xhr.addEventListener('error', () => {
+                    progressEl.classList.remove('active');
+                    reject(new Error('Network error during upload'));
+                });
+
+                xhr.addEventListener('abort', () => {
+                    progressEl.classList.remove('active');
+                    reject(new Error('Upload aborted'));
+                });
+
+                xhr.open('POST', url);
+                xhr.send(formData);
+            });
+        }
+
+        // Form submission - Video
         document.getElementById('uploadForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const btn = document.getElementById('uploadBtn');
@@ -567,24 +668,25 @@
             formData.append('filter_blur', document.getElementById('filterBlur').checked ? 'true' : 'false');
 
             try {
-                const response = await fetch(`${COLMAP_UPLOAD_API}/workflow/video-to-model`, {
-                    method: 'POST',
-                    body: formData
-                });
-                const data = await response.json();
-                
+                await uploadWithProgress(
+                    `${COLMAP_UPLOAD_API}/workflow/video-to-model`,
+                    formData,
+                    { progressId: 'videoUploadProgress', fillId: 'videoProgressFill',
+                      pctId: 'videoUploadPct', sizeId: 'videoUploadSize',
+                      speedId: 'videoUploadSpeed', etaId: 'videoUploadEta' }
+                );
                 btn.textContent = '✅ Upload Started!';
                 setTimeout(() => {
                     btn.disabled = false;
                     btn.textContent = '🎬 Start Video Workflow';
-                }, 2000);
-                
-                // Start monitoring
+                    document.getElementById('videoUploadProgress').classList.remove('active');
+                }, 3000);
                 setTimeout(checkWorkflows, 3000);
             } catch (error) {
                 alert('Upload failed: ' + error.message);
                 btn.disabled = false;
                 btn.textContent = '🎬 Start Video Workflow';
+                document.getElementById('videoUploadProgress').classList.remove('active');
             }
         });
 
@@ -608,23 +710,25 @@
             formData.append('filter_blur', document.getElementById('photosFilterBlur').checked ? 'true' : 'false');
 
             try {
-                const response = await fetch(`${COLMAP_UPLOAD_API}/workflow/photos-to-model`, {
-                    method: 'POST',
-                    body: formData
-                });
-                const data = await response.json();
-                
+                await uploadWithProgress(
+                    `${COLMAP_UPLOAD_API}/workflow/photos-to-model`,
+                    formData,
+                    { progressId: 'photosUploadProgress', fillId: 'photosProgressFill',
+                      pctId: 'photosUploadPct', sizeId: 'photosUploadSize',
+                      speedId: 'photosUploadSpeed', etaId: 'photosUploadEta' }
+                );
                 btn.textContent = '✅ Photos Uploaded!';
                 setTimeout(() => {
                     btn.disabled = false;
                     btn.textContent = '📷 Start Photos Workflow';
-                }, 2000);
-                
+                    document.getElementById('photosUploadProgress').classList.remove('active');
+                }, 3000);
                 setTimeout(checkWorkflows, 3000);
             } catch (error) {
                 alert('Upload failed: ' + error.message);
                 btn.disabled = false;
                 btn.textContent = '📷 Start Photos Workflow';
+                document.getElementById('photosUploadProgress').classList.remove('active');
             }
         });
 

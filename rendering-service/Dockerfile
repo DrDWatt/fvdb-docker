@@ -41,7 +41,8 @@ RUN python -m pip install --break-system-packages \
     aiofiles \
     pydantic \
     pillow \
-    numpy
+    numpy \
+    PyMuPDF==1.24.0
 
 WORKDIR /app
 

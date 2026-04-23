@@ -27,7 +27,8 @@ RUN python3 -m pip install --break-system-packages \
     aiofiles \
     pydantic \
     pillow \
-    opencv-python-headless
+    opencv-python-headless \
+    httpx
 
 WORKDIR /app
 

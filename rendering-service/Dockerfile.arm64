@@ -56,7 +56,8 @@ RUN python -m pip install --break-system-packages \
     pydantic \
     pillow \
     numpy \
-    opencv-python-headless
+    opencv-python-headless \
+    PyMuPDF==1.24.0
 
 # Install WebRTC and streaming dependencies
 RUN python -m pip install --break-system-packages \

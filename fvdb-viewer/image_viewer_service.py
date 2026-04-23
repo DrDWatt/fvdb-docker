@@ -3015,23 +3015,17 @@ def _extract_file_text(file_info: dict, max_chars: int = 2000) -> str:
         except Exception:
             return ""
     
-    # PDF extraction
+    # PDF extraction using PyMuPDF
     if ct == "application/pdf" or name.lower().endswith(".pdf"):
         try:
             import io
-            import PyPDF2
-            reader = PyPDF2.PdfReader(io.BytesIO(data))
+            import fitz  # PyMuPDF
+            doc = fitz.open(stream=data, filetype="pdf")
             text_parts = []
-            for page in reader.pages[:10]:
-                text_parts.append(page.extract_text() or "")
+            for page in doc[:10]:
+                text_parts.append(page.get_text())
+            doc.close()
             return "\n".join(text_parts)[:max_chars]
-        except Exception:
-            pass
-        # Fallback: try pdfminer
-        try:
-            from pdfminer.high_level import extract_text as pdf_extract
-            import io
-            return pdf_extract(io.BytesIO(data))[:max_chars]
         except Exception:
             return f"[PDF file: {name}, {file_info.get('size', 'unknown size')}]"
     

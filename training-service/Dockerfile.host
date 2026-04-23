@@ -37,7 +37,8 @@ RUN python -m pip install --break-system-packages \
     pillow \
     opencv-python-headless \
     matplotlib \
-    numpy
+    numpy \
+    PyMuPDF==1.24.0
 
 # Pre-download PyTorch models to avoid SSL errors during training
 # This downloads AlexNet model used for perceptual loss

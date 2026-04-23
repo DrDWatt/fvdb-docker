@@ -51,7 +51,8 @@ RUN python -m pip install --break-system-packages \
     requests \
     pillow \
     opencv-python-headless \
-    matplotlib
+    matplotlib \
+    PyMuPDF==1.24.0
 
 # Create app directory
 WORKDIR /app
