@@ -24,6 +24,7 @@
 #   8011 - ISAAC Lab
 #   8012 - ISAAC Viewer
 #   8090 - Streaming Server
+#   8013 - TRELLIS.2 3D Reconstruction
 # =============================================================================
 
 services:
@@ -72,6 +73,7 @@ services:
       - ./colmap-data/outputs:/app/outputs
       - ./colmap-data/temp:/app/temp
       - ./colmap-service/colmap_service.py:/app/colmap_service.py:ro
+      - ./colmap-service/splatking_parser.py:/app/splatking_parser.py:ro
     deploy:
       resources:
         reservations:
@@ -544,6 +546,53 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  # ===========================================================================
+  # TRELLIS.2 - Image-to-3D Reconstruction (Segmented Gaussians → GLB Mesh)
+  # Viewer: http://localhost:8013/viewer/{job_id}
+  # Swagger: http://localhost:8013/api
+  # ===========================================================================
+  trellis-service:
+    build:
+      context: ./trellis-service
+      dockerfile: Dockerfile
+      args:
+        - HF_TOKEN=${HF_TOKEN}
+    image: trellis-service:latest
+    container_name: trellis-reconstructor
+    ports:
+      - "8013:8013"
+    volumes:
+      - ./trellis-service/trellis_service.py:/app/trellis_service.py:ro
+      - ./trellis-service/static:/app/static:ro
+      - ./trellis-data/outputs:/app/outputs
+      - ./trellis-data/cache:/app/cache
+      # model_cache not mounted - models baked into image at build time
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - TRELLIS_PORT=8013
+      - HF_HOME=/app/model_cache
+      - HF_TOKEN=${HF_TOKEN}
+      - ATTN_BACKEND=xformers
+    runtime: nvidia
+    shm_size: '8gb'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8013/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - workflow-net
 
 # =============================================================================
 # NETWORKS
