@@ -56,6 +56,9 @@ sam2_predictor = None
 sam2_loaded = False
 current_segments: Dict[str, Any] = {}
 segment_labels: Dict[int, str] = {}
+# Per-Gaussian segment IDs for 3D-consistent overlay (assigned after segmentation)
+gaussian_segment_ids = None   # torch.Tensor shape [N], -1 = unassigned
+seg_cam_params = None         # camera params used during segmentation
 
 # Per-object summaries storage: {segment_idx: {"summary": str, "files": [], "training_data": {}}}
 object_summaries: Dict[int, Dict[str, Any]] = {}
@@ -415,6 +418,210 @@ def create_overlay_with_labels(image: np.ndarray, segments: Dict, labels: Dict[i
     
     return np.array(pil_img)
 
+
+def assign_gaussians_to_segments(width, height, azimuth, elevation, zoom, cam_idx,
+                                  pan_x=0.0, pan_y=0.0, pan_z=0.0):
+    """Back-project 2D segmentation masks onto 3D Gaussians.
+    
+    Projects all Gaussian means to the 2D plane of the segmentation camera,
+    then assigns each Gaussian a segment ID based on which mask it falls in.
+    Must be called after segment_image() populates current_segments.
+    """
+    global gaussian_segment_ids, seg_cam_params
+    import torch
+
+    if gsplat is None or not current_segments or "masks" not in current_segments:
+        return
+
+    masks = current_segments["masks"]  # list of [H, W] boolean arrays
+    if len(masks) == 0:
+        return
+
+    seg_cam_params = {
+        "width": width, "height": height,
+        "azimuth": azimuth, "elevation": elevation,
+        "zoom": zoom, "cam_idx": cam_idx,
+        "pan_x": pan_x, "pan_y": pan_y, "pan_z": pan_z
+    }
+
+    # Get camera matrices for the segmentation view
+    w2c, K = get_camera_matrices(width, height, azimuth, elevation, zoom, cam_idx)
+    if w2c is None:
+        return
+
+    means = gsplat.means  # [N, 3]
+    N = means.shape[0]
+
+    # Project Gaussian means to camera space: p_cam = w2c @ [x,y,z,1]
+    ones = torch.ones(N, 1, device=means.device, dtype=means.dtype)
+    means_h = torch.cat([means, ones], dim=1)  # [N, 4]
+    p_cam = (w2c[0] @ means_h.T).T  # [N, 4]
+
+    # Apply pan offset to camera-space points (same transform as render_view)
+    if pan_x != 0 or pan_y != 0 or pan_z != 0:
+        # Pan shifts the camera, so objects shift the opposite way in cam space
+        scene_scale = (means - means.mean(dim=0)).norm(dim=1).quantile(0.95).item()
+        ps = scene_scale * 0.5
+        p_cam[:, 0] -= pan_x * ps
+        p_cam[:, 1] -= pan_y * ps
+        p_cam[:, 2] -= pan_z * ps
+
+    # Camera to 2D pixel coordinates via K
+    p_cam3 = p_cam[:, :3]  # [N, 3]
+    p2d = (K[0] @ p_cam3.T).T  # [N, 3]
+
+    z = p2d[:, 2]
+    # Avoid divide by zero
+    valid_z = z > 0.01
+    u = torch.zeros(N, device=means.device, dtype=torch.long)
+    v = torch.zeros(N, device=means.device, dtype=torch.long)
+    u[valid_z] = (p2d[valid_z, 0] / z[valid_z]).long()
+    v[valid_z] = (p2d[valid_z, 1] / z[valid_z]).long()
+
+    H = masks[0].shape[0]
+    W = masks[0].shape[1]
+    visible = valid_z & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+
+    # Initialize all as unassigned
+    seg_ids = torch.full((N,), -1, dtype=torch.long, device=means.device)
+
+    vis_u = u[visible].cpu().numpy()
+    vis_v = v[visible].cpu().numpy()
+    vis_idx = torch.where(visible)[0]
+
+    # Assign highest-scoring (first) matching mask wins per Gaussian
+    for seg_i, mask in enumerate(masks):
+        in_mask = mask[vis_v, vis_u]  # boolean array
+        # Only assign if not already assigned (priority to earlier/larger segments)
+        unassigned = seg_ids[vis_idx] == -1
+        assign = torch.from_numpy(in_mask).to(means.device) & unassigned
+        seg_ids[vis_idx[assign]] = seg_i
+
+    gaussian_segment_ids = seg_ids
+    assigned = (seg_ids >= 0).sum().item()
+    logger.info(f"Assigned {assigned}/{N} Gaussians to {len(masks)} segments")
+
+
+def create_3d_segment_overlay(image: np.ndarray, w2c, K, width, height,
+                               pan_x=0.0, pan_y=0.0, pan_z=0.0):
+    """Create a view-consistent segment overlay by projecting assigned Gaussians
+    to the given camera view. Works for any camera pose, not just the original."""
+    import torch
+    import cv2
+    from PIL import Image, ImageDraw
+
+    if gaussian_segment_ids is None or gsplat is None:
+        return image
+
+    colors = [
+        (255, 0, 0), (0, 255, 0), (0, 0, 255),
+        (255, 255, 0), (255, 0, 255), (0, 255, 255),
+        (255, 128, 0), (128, 0, 255), (0, 255, 128)
+    ]
+
+    means = gsplat.means  # [N, 3]
+    N = means.shape[0]
+
+    # Only process assigned Gaussians
+    assigned_mask = gaussian_segment_ids >= 0
+    if assigned_mask.sum() == 0:
+        return image
+
+    assigned_means = means[assigned_mask]
+    assigned_ids = gaussian_segment_ids[assigned_mask]
+    M = assigned_means.shape[0]
+
+    # Project to camera space
+    ones = torch.ones(M, 1, device=assigned_means.device, dtype=assigned_means.dtype)
+    means_h = torch.cat([assigned_means, ones], dim=1)
+    p_cam = (w2c[0] @ means_h.T).T
+
+    # Apply pan offset
+    if pan_x != 0 or pan_y != 0 or pan_z != 0:
+        scene_scale = (means - means.mean(dim=0)).norm(dim=1).quantile(0.95).item()
+        ps = scene_scale * 0.5
+        p_cam[:, 0] -= pan_x * ps
+        p_cam[:, 1] -= pan_y * ps
+        p_cam[:, 2] -= pan_z * ps
+
+    # Project to 2D
+    p_cam3 = p_cam[:, :3]
+    p2d = (K[0] @ p_cam3.T).T
+
+    z = p2d[:, 2]
+    valid_z = z > 0.01
+    u = torch.zeros(M, device=means.device, dtype=torch.long)
+    v = torch.zeros(M, device=means.device, dtype=torch.long)
+    u[valid_z] = (p2d[valid_z, 0] / z[valid_z]).long()
+    v[valid_z] = (p2d[valid_z, 1] / z[valid_z]).long()
+
+    visible = valid_z & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+
+    vis_u = u[visible].cpu().numpy()
+    vis_v = v[visible].cpu().numpy()
+    vis_ids = assigned_ids[visible].cpu().numpy()
+
+    # Build segment overlay using a segment ID buffer
+    seg_map = np.full((height, width), -1, dtype=np.int32)
+    # Paint Gaussians as small dots; later Gaussians (closer to camera) overwrite
+    # Sort by depth so closer Gaussians paint last (on top)
+    vis_z = z[visible].cpu().numpy()
+    depth_order = np.argsort(-vis_z)  # farthest first
+    vis_u = vis_u[depth_order]
+    vis_v = vis_v[depth_order]
+    vis_ids = vis_ids[depth_order]
+
+    # Vectorized scatter: paint each Gaussian as a single pixel (fast)
+    # Depth-sorted so closer Gaussians overwrite farther ones
+    seg_map[vis_v, vis_u] = vis_ids
+
+    # Dilate seg_map to fill gaps between sparse Gaussian projections
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    # Dilate per-segment to avoid bleeding between segments
+    dilated = seg_map.copy()
+    for seg_i in range(int(vis_ids.max()) + 1):
+        mask_bin = (seg_map == seg_i).astype(np.uint8)
+        mask_dil = cv2.dilate(mask_bin, kernel, iterations=1)
+        # Only fill where seg_map is unassigned
+        fill = (mask_dil > 0) & (dilated == -1)
+        dilated[fill] = seg_i
+    seg_map = dilated
+
+    # Create colored overlay from seg_map
+    overlay = image.copy()
+    for seg_i in range(int(vis_ids.max()) + 1):
+        mask_2d = seg_map == seg_i
+        if not mask_2d.any():
+            continue
+        color = colors[seg_i % len(colors)]
+        colored = np.zeros_like(overlay)
+        colored[mask_2d] = color
+        overlay = cv2.addWeighted(overlay, 1.0, colored, 0.35, 0)
+        # Draw contour
+        mask_u8 = (mask_2d.astype(np.uint8) * 255)
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, contours, -1, color, 1)
+
+    # Draw labels at segment centroids
+    pil_img = Image.fromarray(overlay)
+    draw = ImageDraw.Draw(pil_img)
+    for seg_i in range(int(vis_ids.max()) + 1):
+        mask_2d = seg_map == seg_i
+        if not mask_2d.any():
+            continue
+        ys, xs = np.where(mask_2d)
+        cx, cy = int(xs.mean()), int(ys.mean())
+        color = colors[seg_i % len(colors)]
+        label = segment_labels.get(seg_i, f"Object {seg_i}")
+        bbox = draw.textbbox((cx, cy), label)
+        pad = 3
+        draw.rectangle([bbox[0]-pad, bbox[1]-pad, bbox[2]+pad, bbox[3]+pad],
+                        fill=(0, 0, 0, 160))
+        draw.text((cx, cy), label, fill=color)
+
+    return np.array(pil_img)
+
+
 def load_model(model_file=None):
     global gsplat, device, model_name, model_metadata, available_models
     import torch
@@ -449,8 +656,8 @@ def load_model(model_file=None):
     return True
 
 
-def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx=0):
-    """Render using cameras from PLY metadata with orbit and zoom"""
+def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx=0, pan_x=0.0, pan_y=0.0, pan_z=0.0):
+    """Render using cameras from PLY metadata with orbit, zoom, and pan"""
     import torch
     
     if gsplat is None or model_metadata is None:
@@ -539,6 +746,18 @@ def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx
             
             R_orbit = T_back @ Ry @ Rx @ T_to
             c2w = R_orbit @ c2w
+        
+        # Apply pan as camera-space translation (after orbit/zoom)
+        # Moves the camera along its own right/up/forward axes
+        if pan_x != 0 or pan_y != 0 or pan_z != 0:
+            cam_right = c2w[:3, 0]   # camera X axis in world space
+            cam_up = c2w[:3, 1]      # camera Y axis in world space
+            cam_fwd = -c2w[:3, 2]    # camera -Z axis (forward) in world space
+            # Scale pan by scene size for meaningful movement
+            scene_scale = (means - center).norm(dim=1).quantile(0.95).item()
+            pan_scale = scene_scale * 0.5
+            shift = (pan_x * cam_right + pan_y * cam_up + pan_z * cam_fwd) * pan_scale
+            c2w[:3, 3] = c2w[:3, 3] + shift
         
         c2w = c2w.unsqueeze(0).contiguous()
         w2c = torch.inverse(c2w).contiguous()
@@ -959,6 +1178,133 @@ async def root():
                 font-size: 24px;
             }}
             .click-mode {{ cursor: crosshair !important; }}
+            
+            /* ===== Virtual Joystick Navigation Panel ===== */
+            #nav-panel {{
+                position: fixed;
+                right: 340px;
+                top: 50%;
+                transform: translateY(-50%);
+                background: rgba(0,0,0,0.85);
+                border: 1px solid #76b900;
+                border-radius: 12px;
+                padding: 12px;
+                z-index: 200;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 8px;
+                user-select: none;
+                -webkit-user-select: none;
+            }}
+            #nav-panel .nav-title {{
+                color: #76b900;
+                font-size: 11px;
+                font-weight: bold;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+                margin-bottom: 2px;
+            }}
+            #nav-panel .nav-section-label {{
+                color: #888;
+                font-size: 10px;
+                text-transform: uppercase;
+                margin: 4px 0 2px 0;
+            }}
+            .joystick-container {{
+                position: relative;
+                width: 120px;
+                height: 120px;
+                border-radius: 50%;
+                background: radial-gradient(circle, #2a2a3e 0%, #1a1a2e 100%);
+                border: 2px solid #444;
+                touch-action: none;
+                overscroll-behavior: none;
+                -webkit-user-drag: none;
+            }}
+            .joystick-knob {{
+                position: absolute;
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                background: radial-gradient(circle at 35% 35%, #76b900, #4a7a00);
+                border: 2px solid #9adf00;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                cursor: grab;
+                box-shadow: 0 2px 8px rgba(118,185,0,0.4);
+                transition: box-shadow 0.15s;
+                -webkit-user-drag: none;
+                user-select: none;
+            }}
+            .joystick-knob:active {{ cursor: grabbing; box-shadow: 0 0 16px rgba(118,185,0,0.7); }}
+            .joystick-crosshair {{
+                position: absolute;
+                top: 50%; left: 50%;
+                transform: translate(-50%, -50%);
+                width: 80%; height: 80%;
+                pointer-events: none;
+            }}
+            .joystick-crosshair::before, .joystick-crosshair::after {{
+                content: '';
+                position: absolute;
+                background: rgba(255,255,255,0.08);
+            }}
+            .joystick-crosshair::before {{ top: 50%; left: 0; right: 0; height: 1px; }}
+            .joystick-crosshair::after {{ left: 50%; top: 0; bottom: 0; width: 1px; }}
+            .joystick-label {{
+                position: absolute;
+                font-size: 9px;
+                color: #666;
+                pointer-events: none;
+            }}
+            .joystick-label.top {{ top: 4px; left: 50%; transform: translateX(-50%); }}
+            .joystick-label.bottom {{ bottom: 4px; left: 50%; transform: translateX(-50%); }}
+            .joystick-label.left {{ left: 6px; top: 50%; transform: translateY(-50%); }}
+            .joystick-label.right {{ right: 6px; top: 50%; transform: translateY(-50%); }}
+            .nav-btn-row {{
+                display: flex;
+                gap: 4px;
+                justify-content: center;
+            }}
+            .nav-btn {{
+                width: 36px;
+                height: 36px;
+                border: 1px solid #555;
+                border-radius: 6px;
+                background: #2a2a3e;
+                color: #ccc;
+                font-size: 16px;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                transition: background 0.15s, border-color 0.15s;
+            }}
+            .nav-btn:hover {{ background: #3a3a5e; border-color: #76b900; }}
+            .nav-btn:active {{ background: #76b900; color: #000; }}
+            .nav-btn.zoom-btn {{
+                width: 52px;
+                height: 32px;
+                font-size: 18px;
+                font-weight: bold;
+            }}
+            .nav-btn.reset-btn {{
+                width: 100%;
+                height: 28px;
+                font-size: 11px;
+                font-weight: bold;
+                color: #ff6b6b;
+                border-color: #ff6b6b33;
+            }}
+            .nav-btn.reset-btn:hover {{ background: #ff6b6b22; border-color: #ff6b6b; }}
+            .nav-divider {{
+                width: 80%;
+                height: 1px;
+                background: #333;
+                margin: 2px 0;
+            }}
         </style>
     </head>
     <body>
@@ -985,11 +1331,11 @@ async def root():
             </div>
             <div class="slider-group">
                 <label>Elevation: <span id="el-val">0</span>°</label>
-                <input type="range" id="elevation" min="-45" max="45" value="0">
+                <input type="range" id="elevation" min="-89" max="89" value="0">
             </div>
             <div class="slider-group">
                 <label>Zoom: <span id="zoom-val">1</span>x</label>
-                <input type="range" id="zoom" min="0.1" max="2" value="1" step="0.1">
+                <input type="range" id="zoom" min="0.1" max="10" value="1" step="0.1">
             </div>
             <div class="slider-group">
                 <label>Camera: <span id="cam-val">0</span></label>
@@ -1017,7 +1363,53 @@ async def root():
         <div id="info">
             <p><strong>Models:</strong> {model_list}</p>
             <p><strong>Gaussians:</strong> <span id="num-gs">Loading...</span></p>
-            <p>Drag sliders to rotate view</p>
+            <p>⌨️ WASD: pan &nbsp;|&nbsp; Arrows: orbit &nbsp;|&nbsp; +/-: zoom &nbsp;|&nbsp; R: reset</p>
+        </div>
+        
+        <!-- Virtual Joystick Navigation Panel -->
+        <div id="nav-panel">
+            <div class="nav-title">🕹️ Navigate</div>
+            
+            <!-- Move Joystick: pan camera target -->
+            <div class="nav-section-label">Move</div>
+            <div class="joystick-container" id="move-joystick">
+                <div class="joystick-crosshair"></div>
+                <span class="joystick-label top">Fwd</span>
+                <span class="joystick-label bottom">Back</span>
+                <span class="joystick-label left">Left</span>
+                <span class="joystick-label right">Right</span>
+                <div class="joystick-knob" id="move-knob"></div>
+            </div>
+            
+            <div class="nav-divider"></div>
+            
+            <!-- Rotate: orbit camera around target -->
+            <div class="nav-section-label">Rotate</div>
+            <div class="nav-btn-row">
+                <button class="nav-btn" id="rot-left" title="Rotate Left">⟲</button>
+                <button class="nav-btn" id="rot-up" title="Tilt Up">▲</button>
+                <button class="nav-btn" id="rot-down" title="Tilt Down">▼</button>
+                <button class="nav-btn" id="rot-right" title="Rotate Right">⟳</button>
+            </div>
+            
+            <div class="nav-divider"></div>
+            
+            <!-- Zoom -->
+            <div class="nav-section-label">Zoom</div>
+            <div class="nav-btn-row">
+                <button class="nav-btn zoom-btn" id="zoom-in" title="Zoom In">+</button>
+                <button class="nav-btn zoom-btn" id="zoom-out" title="Zoom Out">−</button>
+            </div>
+            
+            <!-- Up / Down (elevation pan) -->
+            <div class="nav-section-label">Height</div>
+            <div class="nav-btn-row">
+                <button class="nav-btn" id="move-up" title="Move Up">⬆</button>
+                <button class="nav-btn" id="move-down" title="Move Down">⬇</button>
+            </div>
+            
+            <div class="nav-divider"></div>
+            <button class="nav-btn reset-btn" id="reset-view-btn" title="Reset View">⟲ Reset</button>
         </div>
         
         <div id="segmentation">
@@ -1147,23 +1539,36 @@ async def root():
             const zoomSlider = document.getElementById('zoom');
             const camSlider = document.getElementById('camera');
             
+            // Pan state (camera target offset)
+            let panX = 0, panY = 0, panZ = 0;
+            
+            // Mouse navigation state
+            let isDraggingOrbit = false;
+            let isDraggingPan = false;
+            let lastDragX = 0, lastDragY = 0;
+            let renderPendingMain = false;
+            let lastRenderTimeMain = 0;
+            const MAIN_THROTTLE_MS = 80;
+            
             let debounceTimer;
             
+            function syncSliderLabels() {{
+                document.getElementById('az-val').textContent = azSlider.value;
+                document.getElementById('el-val').textContent = elSlider.value;
+                document.getElementById('zoom-val').textContent = parseFloat(zoomSlider.value).toFixed(1);
+                document.getElementById('cam-val').textContent = camSlider.value;
+            }}
+            
             async function updateRender() {{
-                const az = azSlider.value;
-                const el = elSlider.value;
-                const zoom = zoomSlider.value;
-                const cam = camSlider.value;
-                
-                document.getElementById('az-val').textContent = az;
-                document.getElementById('el-val').textContent = el;
-                document.getElementById('zoom-val').textContent = zoom;
-                document.getElementById('cam-val').textContent = cam;
-                
+                syncSliderLabels();
                 loading.style.display = 'block';
                 
                 try {{
-                    const response = await fetch(`/render?azimuth=${{az}}&elevation=${{el}}&zoom=${{zoom}}&cam_idx=${{cam}}&width=1024&height=768`);
+                    const az = azSlider.value;
+                    const el = elSlider.value;
+                    const zoom = zoomSlider.value;
+                    const cam = camSlider.value;
+                    const response = await fetch(`/render?azimuth=${{az}}&elevation=${{el}}&zoom=${{zoom}}&cam_idx=${{cam}}&pan_x=${{panX.toFixed(3)}}&pan_y=${{panY.toFixed(3)}}&pan_z=${{panZ.toFixed(3)}}&width=1024&height=768`);
                     if (response.ok) {{
                         const blob = await response.blob();
                         img.src = URL.createObjectURL(blob);
@@ -1177,13 +1582,275 @@ async def root():
             
             function debouncedUpdate() {{
                 clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(updateRender, 150);
+                debounceTimer = setTimeout(updateRender, 100);
+            }}
+            
+            // Throttled render for drag/scroll interactions
+            function throttledUpdate() {{
+                const now = Date.now();
+                if (!renderPendingMain && (now - lastRenderTimeMain) >= MAIN_THROTTLE_MS) {{
+                    renderPendingMain = true;
+                    lastRenderTimeMain = now;
+                    updateRender().finally(() => {{ renderPendingMain = false; }});
+                }}
+            }}
+            
+            function resetView() {{
+                azSlider.value = 0;
+                elSlider.value = 0;
+                zoomSlider.value = 1;
+                panX = 0; panY = 0; panZ = 0;
+                syncSliderLabels();
+                debouncedUpdate();
             }}
             
             azSlider.addEventListener('input', debouncedUpdate);
             elSlider.addEventListener('input', debouncedUpdate);
             zoomSlider.addEventListener('input', debouncedUpdate);
             camSlider.addEventListener('input', debouncedUpdate);
+            
+            // ==================== Mouse Navigation ====================
+            // Left-click drag: orbit (azimuth/elevation)
+            // Right-click drag: pan (translate camera target)
+            // Scroll wheel: zoom in/out
+            
+            img.addEventListener('mousedown', (e) => {{
+                // Skip if in extraction view (handled separately) or click-to-segment mode
+                if (typeof viewingExtraction !== 'undefined' && viewingExtraction) return;
+                if (typeof clickMode !== 'undefined' && clickMode) return;
+                if (typeof extractMode !== 'undefined' && extractMode) return;
+                
+                if (e.button === 0) {{
+                    // Left click: orbit
+                    isDraggingOrbit = true;
+                    lastDragX = e.clientX;
+                    lastDragY = e.clientY;
+                    img.style.cursor = 'grabbing';
+                    e.preventDefault();
+                }} else if (e.button === 2) {{
+                    // Right click: pan
+                    isDraggingPan = true;
+                    lastDragX = e.clientX;
+                    lastDragY = e.clientY;
+                    img.style.cursor = 'move';
+                    e.preventDefault();
+                }}
+            }});
+            
+            document.addEventListener('mousemove', (e) => {{
+                if (typeof viewingExtraction !== 'undefined' && viewingExtraction) return;
+                
+                if (isDraggingOrbit) {{
+                    const deltaX = e.clientX - lastDragX;
+                    const deltaY = e.clientY - lastDragY;
+                    lastDragX = e.clientX;
+                    lastDragY = e.clientY;
+                    
+                    // Update azimuth and elevation
+                    let newAz = parseFloat(azSlider.value) + deltaX * 0.5;
+                    let newEl = parseFloat(elSlider.value) - deltaY * 0.5;
+                    newEl = Math.max(-89, Math.min(89, newEl));
+                    // Wrap azimuth
+                    if (newAz > 180) newAz -= 360;
+                    if (newAz < -180) newAz += 360;
+                    
+                    azSlider.value = newAz;
+                    elSlider.value = newEl;
+                    syncSliderLabels();
+                    throttledUpdate();
+                }} else if (isDraggingPan) {{
+                    const deltaX = e.clientX - lastDragX;
+                    const deltaY = e.clientY - lastDragY;
+                    lastDragX = e.clientX;
+                    lastDragY = e.clientY;
+                    
+                    // Scale pan by zoom level (closer = finer pan)
+                    const zoomVal = parseFloat(zoomSlider.value);
+                    const panScale = 0.005 / Math.max(zoomVal, 0.1);
+                    panX += deltaX * panScale;
+                    panY -= deltaY * panScale;
+                    throttledUpdate();
+                }}
+            }});
+            
+            document.addEventListener('mouseup', (e) => {{
+                if (isDraggingOrbit) {{
+                    isDraggingOrbit = false;
+                    img.style.cursor = 'grab';
+                    if (!renderPendingMain) updateRender();
+                }}
+                if (isDraggingPan) {{
+                    isDraggingPan = false;
+                    img.style.cursor = 'grab';
+                    if (!renderPendingMain) updateRender();
+                }}
+            }});
+            
+            // Scroll wheel: zoom
+            img.addEventListener('wheel', (e) => {{
+                if (typeof viewingExtraction !== 'undefined' && viewingExtraction) return;
+                e.preventDefault();
+                
+                let zoomVal = parseFloat(zoomSlider.value);
+                // Logarithmic zoom for smooth feel
+                const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+                zoomVal = Math.max(0.1, Math.min(10, zoomVal * zoomFactor));
+                zoomSlider.value = zoomVal.toFixed(1);
+                syncSliderLabels();
+                throttledUpdate();
+            }}, {{ passive: false }});
+            
+            // Prevent context menu on right-click over the image
+            img.addEventListener('contextmenu', (e) => e.preventDefault());
+            
+            // Set default cursor
+            img.style.cursor = 'grab';
+            
+            // ==================== Virtual Joystick ====================
+            (function() {{
+                const container = document.getElementById('move-joystick');
+                const knob = document.getElementById('move-knob');
+                if (!container || !knob) return;
+                
+                const radius = 40; // max displacement in px
+                let joyActive = false;
+                let joyX = 0, joyY = 0; // normalized -1..1
+                let joyInterval = null;
+                
+                function startJoy(e) {{
+                    joyActive = true;
+                    knob.style.cursor = 'grabbing';
+                    moveJoy(e);
+                    // Continuous movement while held
+                    if (joyInterval) clearInterval(joyInterval);
+                    joyInterval = setInterval(() => {{
+                        if (!joyActive) return;
+                        const zoomVal = parseFloat(zoomSlider.value) || 1;
+                        const step = 0.06 / Math.max(zoomVal, 0.1);
+                        panX += joyX * step;
+                        panY -= joyY * step;
+                        throttledUpdate();
+                    }}, 100);
+                    e.preventDefault();
+                }}
+                
+                function moveJoy(e) {{
+                    if (!joyActive) return;
+                    const rect = container.getBoundingClientRect();
+                    const cx = rect.left + rect.width / 2;
+                    const cy = rect.top + rect.height / 2;
+                    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                    let dx = clientX - cx;
+                    let dy = clientY - cy;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist > radius) {{
+                        dx = dx / dist * radius;
+                        dy = dy / dist * radius;
+                    }}
+                    knob.style.transform = `translate(calc(-50% + ${{dx}}px), calc(-50% + ${{dy}}px))`;
+                    joyX = dx / radius;
+                    joyY = dy / radius;
+                    e.preventDefault();
+                }}
+                
+                function endJoy() {{
+                    joyActive = false;
+                    joyX = 0; joyY = 0;
+                    knob.style.transform = 'translate(-50%, -50%)';
+                    knob.style.cursor = 'grab';
+                    if (joyInterval) {{ clearInterval(joyInterval); joyInterval = null; }}
+                    if (!renderPendingMain) updateRender();
+                }}
+                
+                // Prevent native drag on knob and container
+                knob.addEventListener('dragstart', (e) => e.preventDefault());
+                container.addEventListener('dragstart', (e) => e.preventDefault());
+                knob.setAttribute('draggable', 'false');
+                
+                // Mouse events
+                knob.addEventListener('mousedown', (e) => {{ e.stopPropagation(); startJoy(e); }});
+                container.addEventListener('mousedown', (e) => {{
+                    if (e.target !== knob) {{ e.stopPropagation(); startJoy(e); }}
+                }});
+                document.addEventListener('mousemove', (e) => {{
+                    if (joyActive) {{ e.preventDefault(); moveJoy(e); }}
+                }});
+                document.addEventListener('mouseup', (e) => {{
+                    if (joyActive) endJoy();
+                }});
+                // Touch events
+                knob.addEventListener('touchstart', (e) => {{ e.stopPropagation(); startJoy(e); }}, {{ passive: false }});
+                container.addEventListener('touchstart', (e) => {{
+                    if (e.target !== knob) {{ e.stopPropagation(); startJoy(e); }}
+                }}, {{ passive: false }});
+                document.addEventListener('touchmove', (e) => {{
+                    if (joyActive) moveJoy(e);
+                }}, {{ passive: false }});
+                document.addEventListener('touchend', (e) => {{
+                    if (joyActive) endJoy();
+                }});
+            }})();
+            
+            // ===== Rotate / Zoom / Height Buttons (hold to repeat) =====
+            function holdButton(id, action, intervalMs) {{
+                const btn = document.getElementById(id);
+                if (!btn) return;
+                let timer = null;
+                function start(e) {{
+                    e.preventDefault();
+                    action();
+                    timer = setInterval(action, intervalMs || 150);
+                }}
+                function stop() {{
+                    if (timer) {{ clearInterval(timer); timer = null; }}
+                }}
+                btn.addEventListener('mousedown', start);
+                btn.addEventListener('touchstart', start, {{ passive: false }});
+                btn.addEventListener('mouseup', stop);
+                btn.addEventListener('mouseleave', stop);
+                btn.addEventListener('touchend', stop);
+                btn.addEventListener('touchcancel', stop);
+            }}
+            
+            const ROT_STEP = 8;
+            holdButton('rot-left', () => {{
+                azSlider.value = parseFloat(azSlider.value) - ROT_STEP;
+                if (parseFloat(azSlider.value) < -180) azSlider.value = parseFloat(azSlider.value) + 360;
+                syncSliderLabels(); throttledUpdate();
+            }});
+            holdButton('rot-right', () => {{
+                azSlider.value = parseFloat(azSlider.value) + ROT_STEP;
+                if (parseFloat(azSlider.value) > 180) azSlider.value = parseFloat(azSlider.value) - 360;
+                syncSliderLabels(); throttledUpdate();
+            }});
+            holdButton('rot-up', () => {{
+                elSlider.value = Math.min(89, parseFloat(elSlider.value) + ROT_STEP);
+                syncSliderLabels(); throttledUpdate();
+            }});
+            holdButton('rot-down', () => {{
+                elSlider.value = Math.max(-89, parseFloat(elSlider.value) - ROT_STEP);
+                syncSliderLabels(); throttledUpdate();
+            }});
+            holdButton('zoom-in', () => {{
+                zoomSlider.value = Math.min(10, parseFloat(zoomSlider.value) * 1.15).toFixed(1);
+                syncSliderLabels(); throttledUpdate();
+            }}, 120);
+            holdButton('zoom-out', () => {{
+                zoomSlider.value = Math.max(0.1, parseFloat(zoomSlider.value) / 1.15).toFixed(1);
+                syncSliderLabels(); throttledUpdate();
+            }}, 120);
+            holdButton('move-up', () => {{
+                const zoomVal = parseFloat(zoomSlider.value) || 1;
+                panY += 0.06 / Math.max(zoomVal, 0.1);
+                throttledUpdate();
+            }});
+            holdButton('move-down', () => {{
+                const zoomVal = parseFloat(zoomSlider.value) || 1;
+                panY -= 0.06 / Math.max(zoomVal, 0.1);
+                throttledUpdate();
+            }});
+            document.getElementById('reset-view-btn').addEventListener('click', resetView);
             
             // Model selection
             const modelSelect = document.getElementById('model-select');
@@ -1199,10 +1866,8 @@ async def root():
                     elSlider.value = 0;
                     zoomSlider.value = 1;
                     camSlider.value = 0;
-                    document.getElementById('az-val').textContent = '0';
-                    document.getElementById('el-val').textContent = '0';
-                    document.getElementById('zoom-val').textContent = '1';
-                    document.getElementById('cam-val').textContent = '0';
+                    panX = 0; panY = 0; panZ = 0;
+                    syncSliderLabels();
                     
                     // Clear segmentation state
                     showSegments = false;
@@ -1364,8 +2029,9 @@ async def root():
                 document.getElementById('flyProgress').value = flyFrame;
                 document.getElementById('flyFrameLabel').textContent = `Frame ${{flyFrame}} / ${{numFrames}}`;
                 
-                // Fetch and display frame
-                const url = `/flythrough/frame/${{flyFrame}}?num_frames=${{numFrames}}&width=1024&height=768&cam_idx=${{camIdx}}`;
+                // Fetch and display frame (with segments overlay if active)
+                const segParam = (typeof showSegments !== 'undefined' && showSegments) ? '&segments=true' : '';
+                const url = `/flythrough/frame/${{flyFrame}}?num_frames=${{numFrames}}&width=1024&height=768&cam_idx=${{camIdx}}${{segParam}}`;
                 try {{
                     const response = await fetch(url);
                     if (response.ok) {{
@@ -1397,7 +2063,8 @@ async def root():
                 const camIdx = parseInt(document.getElementById('camera').value) || 0;
                 document.getElementById('flyFrameLabel').textContent = `Frame ${{flyFrame}} / ${{numFrames}}`;
                 
-                const url = `/flythrough/frame/${{flyFrame}}?num_frames=${{numFrames}}&width=1024&height=768&cam_idx=${{camIdx}}`;
+                const segParam = (typeof showSegments !== 'undefined' && showSegments) ? '&segments=true' : '';
+                const url = `/flythrough/frame/${{flyFrame}}?num_frames=${{numFrames}}&width=1024&height=768&cam_idx=${{camIdx}}${{segParam}}`;
                 try {{
                     const response = await fetch(url);
                     if (response.ok) {{
@@ -1421,8 +2088,9 @@ async def root():
                 document.getElementById('flyStatus').textContent = `Exporting ${{numFrames}} frames...`;
                 
                 try {{
+                    const segParam = (typeof showSegments !== 'undefined' && showSegments) ? '&segments=true' : '';
                     const response = await fetch(
-                        `/flythrough/export?num_frames=${{numFrames}}&fps=${{fps}}&width=1024&height=768&cam_idx=${{camIdx}}`,
+                        `/flythrough/export?num_frames=${{numFrames}}&fps=${{fps}}&width=1024&height=768&cam_idx=${{camIdx}}${{segParam}}`,
                         {{ method: 'POST' }}
                     );
                     if (response.ok) {{
@@ -1545,7 +2213,7 @@ async def root():
                 
                 loading.style.display = 'block';
                 try {{
-                    const response = await fetch(`/render_with_segments?azimuth=${{az}}&elevation=${{el}}&zoom=${{zoom}}&cam_idx=${{cam}}&width=1024&height=768`);
+                    const response = await fetch(`/render_with_segments?azimuth=${{az}}&elevation=${{el}}&zoom=${{zoom}}&cam_idx=${{cam}}&pan_x=${{panX.toFixed(3)}}&pan_y=${{panY.toFixed(3)}}&pan_z=${{panZ.toFixed(3)}}&width=1024&height=768`);
                     if (response.ok) {{
                         const blob = await response.blob();
                         img.src = URL.createObjectURL(blob);
@@ -1553,7 +2221,7 @@ async def root():
                         // Segment render failed, fall back to normal render
                         console.warn('Segment render failed, falling back to normal render');
                         showSegments = false;
-                        const fallback = await fetch(`/render?azimuth=${{az}}&elevation=${{el}}&zoom=${{zoom}}&cam_idx=${{cam}}&width=1024&height=768`);
+                        const fallback = await fetch(`/render?azimuth=${{az}}&elevation=${{el}}&zoom=${{zoom}}&cam_idx=${{cam}}&pan_x=${{panX.toFixed(3)}}&pan_y=${{panY.toFixed(3)}}&pan_z=${{panZ.toFixed(3)}}&width=1024&height=768`);
                         if (fallback.ok) {{
                             const blob = await fallback.blob();
                             img.src = URL.createObjectURL(blob);
@@ -1626,9 +2294,9 @@ async def root():
             const originalUpdate = updateRender;
             updateRender = function() {{
                 if (showSegments) {{
-                    renderWithSegments();
+                    return renderWithSegments();
                 }} else {{
-                    originalUpdate();
+                    return originalUpdate();
                 }}
             }};
             
@@ -2254,9 +2922,55 @@ async def root():
                         <span>Asset ${{idx + 1}}: ${{ext.num_gaussians}} pts</span>
                         <button onclick="viewExtraction(${{idx}})" style="background:#ffc107;color:#000;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px;">👁️ View</button>
                         <button onclick="showExtractionRag('${{ext.job_id}}')" style="background:#17a2b8;color:#fff;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px;">📄 Info</button>
+                        <button onclick="reconstructTrellis(${{idx}})" style="background:#8b5cf6;color:#fff;border:none;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px;">🔮 3D Mesh</button>
                     `;
                     list.appendChild(item);
                 }});
+            }}
+            
+            // TRELLIS.2 reconstruction: render extraction view, send to trellis service
+            async function reconstructTrellis(idx) {{
+                const ext = extractions[idx];
+                if (!ext) return;
+                
+                document.getElementById('extractStatus').textContent = '🔮 Rendering extraction for TRELLIS.2...';
+                
+                try {{
+                    // Render a clean view of the extraction
+                    const renderResp = await fetch(`/garfield/render_extraction?job_id=${{ext.job_id}}&azimuth=0&elevation=10&zoom=1.0&width=1024&height=1024`);
+                    if (!renderResp.ok) throw new Error('Failed to render extraction');
+                    const blob = await renderResp.blob();
+                    
+                    // Send to TRELLIS.2 service
+                    document.getElementById('extractStatus').textContent = '🔮 Sending to TRELLIS.2 for 3D reconstruction...';
+                    
+                    const formData = new FormData();
+                    formData.append('image', blob, 'extraction.png');
+                    formData.append('source_job_id', ext.job_id);
+                    formData.append('label', `GARField Asset ${{idx + 1}} (${{ext.num_gaussians}} gaussians)`);
+                    
+                    const trellisUrl = `http://${{window.location.hostname}}:8013`;
+                    const resp = await fetch(`${{trellisUrl}}/reconstruct`, {{
+                        method: 'POST',
+                        body: formData
+                    }});
+                    const data = await resp.json();
+                    
+                    if (data.job_id) {{
+                        document.getElementById('extractStatus').innerHTML = 
+                            `🔮 TRELLIS.2 reconstruction started! ` +
+                            `<a href="${{trellisUrl}}/viewer/${{data.job_id}}" target="_blank" ` +
+                            `style="color:#8b5cf6;font-weight:bold;">Open 3D Viewer ↗</a>`;
+                        // Open viewer in new window
+                        window.open(`${{trellisUrl}}/viewer/${{data.job_id}}`, '_blank',
+                            'width=1280,height=800,menubar=no,toolbar=no');
+                    }} else {{
+                        throw new Error(data.error || 'Unknown error');
+                    }}
+                }} catch(e) {{
+                    document.getElementById('extractStatus').textContent = 
+                        '❌ TRELLIS.2 error: ' + e.message + ' (is trellis-service running on :8013?)';
+                }}
             }}
             
             // View extracted asset in viewer
@@ -2381,8 +3095,9 @@ async def root():
                         }}
                     }}
                 }} else {{
-                    // Normal/segmentation view: adjust main sliders
+                    // Normal/segmentation view: arrows orbit, WASD pan, +/- zoom, R reset
                     let changed = false;
+                    const panStep = 0.05 / Math.max(parseFloat(zoomSlider.value), 0.1);
                     switch(e.key) {{
                         case 'ArrowLeft':
                             azSlider.value = Math.max(-180, parseInt(azSlider.value) - rotateStep);
@@ -2391,23 +3106,35 @@ async def root():
                             azSlider.value = Math.min(180, parseInt(azSlider.value) + rotateStep);
                             changed = true; break;
                         case 'ArrowUp':
-                            elSlider.value = Math.min(45, parseInt(elSlider.value) + rotateStep);
+                            elSlider.value = Math.min(89, parseInt(elSlider.value) + rotateStep);
                             changed = true; break;
                         case 'ArrowDown':
-                            elSlider.value = Math.max(-45, parseInt(elSlider.value) - rotateStep);
+                            elSlider.value = Math.max(-89, parseInt(elSlider.value) - rotateStep);
                             changed = true; break;
                         case '+': case '=':
-                            zoomSlider.value = Math.min(2, parseFloat(zoomSlider.value) + zoomStep).toFixed(1);
+                            zoomSlider.value = Math.min(10, parseFloat(zoomSlider.value) * 1.15).toFixed(1);
                             changed = true; break;
                         case '-': case '_':
-                            zoomSlider.value = Math.max(0.1, parseFloat(zoomSlider.value) - zoomStep).toFixed(1);
+                            zoomSlider.value = Math.max(0.1, parseFloat(zoomSlider.value) / 1.15).toFixed(1);
                             changed = true; break;
+                        case 'w': case 'W':
+                            panY += panStep; changed = true; break;
+                        case 's': case 'S':
+                            panY -= panStep; changed = true; break;
+                        case 'a': case 'A':
+                            panX -= panStep; changed = true; break;
+                        case 'd': case 'D':
+                            panX += panStep; changed = true; break;
+                        case 'q': case 'Q':
+                            panZ += panStep; changed = true; break;
+                        case 'e': case 'E':
+                            panZ -= panStep; changed = true; break;
+                        case 'r': case 'R':
+                            resetView(); return;
                     }}
                     if (changed) {{
                         e.preventDefault();
-                        document.getElementById('az-val').textContent = azSlider.value;
-                        document.getElementById('el-val').textContent = elSlider.value;
-                        document.getElementById('zoom-val').textContent = zoomSlider.value;
+                        syncSliderLabels();
                         debouncedUpdate();
                     }}
                 }}
@@ -2432,9 +3159,9 @@ async def root():
             const origUpdateRender = updateRender;
             updateRender = function() {{
                 if (viewingExtraction) {{
-                    renderExtractionOverlay();
+                    return renderExtractionOverlay();
                 }} else {{
-                    origUpdateRender();
+                    return origUpdateRender();
                 }}
             }};
             
@@ -2457,13 +3184,16 @@ async def root():
 async def render(
     width: int = Query(800, ge=100, le=1920),
     height: int = Query(600, ge=100, le=1080),
-    azimuth: float = Query(0, ge=-180, le=180),
-    elevation: float = Query(0, ge=-45, le=45),
-    zoom: float = Query(0.5, ge=0.1, le=2.0),
-    cam_idx: int = Query(0, ge=0, le=100)
+    azimuth: float = Query(0, ge=-360, le=360),
+    elevation: float = Query(0, ge=-89, le=89),
+    zoom: float = Query(0.5, ge=0.01, le=20.0),
+    cam_idx: int = Query(0, ge=0, le=100),
+    pan_x: float = Query(0.0),
+    pan_y: float = Query(0.0),
+    pan_z: float = Query(0.0)
 ):
     """Render the gaussian splat and return as PNG"""
-    img = render_view(width, height, azimuth, elevation, zoom, cam_idx)
+    img = render_view(width, height, azimuth, elevation, zoom, cam_idx, pan_x, pan_y, pan_z)
     
     if img is None:
         return Response(content=b"Render failed", status_code=500)
@@ -2594,6 +3324,9 @@ async def segment_current_view(
     # Use auto-generated labels from segmentation
     segment_labels = segments.get("labels", {i: f"Object {i}" for i in range(segments["num_segments"])})
     
+    # Back-project 2D masks onto 3D Gaussians for view-consistent overlay
+    assign_gaussians_to_segments(1024, 768, azimuth, elevation, zoom, cam_idx)
+    
     return {
         "status": "ok",
         "num_segments": segments["num_segments"],
@@ -2609,15 +3342,23 @@ async def render_with_segments(
     azimuth: float = Query(0),
     elevation: float = Query(0),
     zoom: float = Query(0.5),
-    cam_idx: int = Query(0)
+    cam_idx: int = Query(0),
+    pan_x: float = Query(0.0),
+    pan_y: float = Query(0.0),
+    pan_z: float = Query(0.0)
 ):
     """Render view with segmentation overlay and labels"""
-    img = render_view(width, height, azimuth, elevation, zoom, cam_idx)
+    img = render_view(width, height, azimuth, elevation, zoom, cam_idx, pan_x, pan_y, pan_z)
     if img is None:
         return Response(content=b"Render failed", status_code=500)
     
-    # Apply segmentation overlay if segments exist
-    if current_segments and "masks" in current_segments:
+    # Apply 3D-consistent segmentation overlay (projects assigned Gaussians to this view)
+    if gaussian_segment_ids is not None:
+        w2c, K_mat = get_camera_matrices(width, height, azimuth, elevation, zoom, cam_idx)
+        if w2c is not None:
+            img = create_3d_segment_overlay(img, w2c, K_mat, width, height, pan_x, pan_y, pan_z)
+    elif current_segments and "masks" in current_segments:
+        # Fallback to 2D overlay if Gaussians not yet assigned
         img = create_overlay_with_labels(img, current_segments, segment_labels)
     
     from PIL import Image
@@ -2664,6 +3405,9 @@ async def segment_at_point(
         current_segments["num_segments"] += 1
         # Use auto-generated label from segment_image
         segment_labels[new_idx] = segments.get("labels", {}).get(i, f"Object {new_idx}")
+    
+    # Re-assign Gaussians after adding new segment masks
+    assign_gaussians_to_segments(1024, 768, azimuth, elevation, zoom, cam_idx)
     
     return {
         "status": "ok",
@@ -3775,32 +4519,37 @@ def _has_camera_path():
     return c2w is not None and K is not None and c2w.shape[0] >= 2
 
 
-def render_flythrough_frame(frame_num, num_frames, width, height, cam_idx=0):
+def render_flythrough_frame(frame_num, num_frames, width, height, cam_idx=0, return_matrices=False):
     """Render a flythrough frame. Uses camera path interpolation if trained cameras
-    are available, otherwise falls back to orbit around model center."""
+    are available, otherwise falls back to orbit around model center.
+    If return_matrices=True, returns (img, w2c, K) tuple."""
     if _has_camera_path():
-        return _render_camera_path_frame(frame_num, num_frames, width, height)
+        return _render_camera_path_frame(frame_num, num_frames, width, height, return_matrices=return_matrices)
     else:
-        return _render_orbit_frame(frame_num, num_frames, width, height, cam_idx)
+        return _render_orbit_frame(frame_num, num_frames, width, height, cam_idx, return_matrices=return_matrices)
 
 
-def _render_orbit_frame(frame_num, num_frames, width, height, cam_idx=0):
+def _render_orbit_frame(frame_num, num_frames, width, height, cam_idx=0, return_matrices=False):
     """Fallback: orbit around model center (works for all models including non-ZED)."""
     t = frame_num / num_frames
     azimuth = -180 + t * 360
     elevation = 15 * math.sin(t * 2 * math.pi)
     zoom = 1.0 + 0.4 * math.sin(t * 3 * math.pi)
-    return render_view(width, height, azimuth, elevation, zoom, cam_idx)
+    img = render_view(width, height, azimuth, elevation, zoom, cam_idx)
+    if return_matrices:
+        w2c, K = get_camera_matrices(width, height, azimuth, elevation, zoom, cam_idx)
+        return img, w2c, K
+    return img
 
 
-def _render_camera_path_frame(frame_num, num_frames, width, height):
+def _render_camera_path_frame(frame_num, num_frames, width, height, return_matrices=False):
     """Interpolate between trained camera positions using Catmull-Rom + SLERP.
     All interpolation done on CPU (numpy) to avoid nvrtc JIT issues on aarch64.
     Only the final matrices are sent to GPU for rendering."""
     import torch
     
     if gsplat is None or model_metadata is None:
-        return None
+        return (None, None, None) if return_matrices else None
     
     try:
         c2w_all = model_metadata.get('camera_to_world_matrices')
@@ -3861,12 +4610,16 @@ def _render_camera_path_frame(frame_num, num_frames, width, height):
             img = img[..., :3]
         img = (img * 255).astype(np.uint8)
         
+        if return_matrices:
+            return img, w2c, K
         return img
         
     except Exception as e:
         logger.error(f"Flythrough render error: {e}")
         import traceback
         traceback.print_exc()
+        if return_matrices:
+            return None, None, None
         return None
 
 
@@ -3894,16 +4647,27 @@ async def flythrough_frame(
     num_frames: int = Query(120, ge=10, le=600),
     width: int = Query(1024, ge=100, le=1920),
     height: int = Query(768, ge=100, le=1080),
-    cam_idx: int = Query(0, ge=0)
+    cam_idx: int = Query(0, ge=0),
+    segments: bool = Query(False)
 ):
-    """Render a single flythrough frame using camera path interpolation"""
+    """Render a single flythrough frame using camera path interpolation.
+    If segments=true, applies segmentation overlay on the frame."""
     if frame_num < 0 or frame_num >= num_frames:
         return Response(content="Frame out of range", status_code=400)
     
-    img = render_flythrough_frame(frame_num, num_frames, width, height)
-    
-    if img is None:
-        return Response(content="Render failed", status_code=500)
+    # If segments requested, get camera matrices for 3D overlay
+    need_matrices = segments and gaussian_segment_ids is not None
+    if need_matrices:
+        result = render_flythrough_frame(frame_num, num_frames, width, height, return_matrices=True)
+        if result is None or result[0] is None:
+            return Response(content="Render failed", status_code=500)
+        img, w2c, K_mat = result
+        if w2c is not None:
+            img = create_3d_segment_overlay(img, w2c, K_mat, width, height)
+    else:
+        img = render_flythrough_frame(frame_num, num_frames, width, height)
+        if img is None:
+            return Response(content="Render failed", status_code=500)
     
     from PIL import Image as PILImage
     pil_img = PILImage.fromarray(img)
@@ -3920,12 +4684,15 @@ async def flythrough_export(
     width: int = Query(1024, ge=100, le=1920),
     height: int = Query(768, ge=100, le=1080),
     fps: int = Query(30, ge=1, le=60),
-    cam_idx: int = Query(0, ge=0)
+    cam_idx: int = Query(0, ge=0),
+    segments: bool = Query(False)
 ):
-    """Export flythrough as MP4 video using OpenCV"""
+    """Export flythrough as MP4 video using OpenCV.
+    If segments=true, applies segmentation overlay on each frame."""
     import cv2
     
-    output_path = MODEL_DIR / f"{model_name}_flythrough.mp4"
+    suffix = '_segmented' if segments else ''
+    output_path = MODEL_DIR / f"{model_name}_flythrough{suffix}.mp4"
     
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
@@ -3935,10 +4702,19 @@ async def flythrough_export(
     
     try:
         rendered = 0
+        use_3d_seg = segments and gaussian_segment_ids is not None
         for i in range(num_frames):
-            img = render_flythrough_frame(i, num_frames, width, height)
-            if img is None:
-                continue
+            if use_3d_seg:
+                result = render_flythrough_frame(i, num_frames, width, height, return_matrices=True)
+                if result is None or result[0] is None:
+                    continue
+                img, w2c, K_mat = result
+                if w2c is not None:
+                    img = create_3d_segment_overlay(img, w2c, K_mat, width, height)
+            else:
+                img = render_flythrough_frame(i, num_frames, width, height)
+                if img is None:
+                    continue
             bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             writer.write(bgr)
             rendered += 1
