@@ -491,7 +491,7 @@ def assign_gaussians_to_segments(width, height, azimuth, elevation, zoom, cam_id
 
     # Assign highest-scoring (first) matching mask wins per Gaussian
     for seg_i, mask in enumerate(masks):
-        in_mask = mask[vis_v, vis_u]  # boolean array
+        in_mask = mask[vis_v, vis_u].astype(bool)  # ensure boolean
         # Only assign if not already assigned (priority to earlier/larger segments)
         unassigned = seg_ids[vis_idx] == -1
         assign = torch.from_numpy(in_mask).to(means.device) & unassigned
@@ -2198,6 +2198,11 @@ async def root():
                 
                 try {{
                     const response = await fetch('/segment/point', {{ method: 'POST', body: formData }});
+                    if (!response.ok) {{
+                        const errText = await response.text();
+                        status.textContent = 'Segment failed: ' + errText.substring(0, 80);
+                        return;
+                    }}
                     const data = await response.json();
                     
                     if (data.status === 'ok') {{
