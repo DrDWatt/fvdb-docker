@@ -561,6 +561,10 @@ def create_3d_segment_overlay(image: np.ndarray, w2c, K, width, height,
     vis_v = v[visible].cpu().numpy()
     vis_ids = assigned_ids[visible].cpu().numpy()
 
+    # No assigned Gaussians visible in this view — return image unchanged
+    if len(vis_ids) == 0:
+        return image
+
     # Build segment overlay using a segment ID buffer
     seg_map = np.full((height, width), -1, dtype=np.int32)
     # Paint Gaussians as small dots; later Gaussians (closer to camera) overwrite
@@ -2103,8 +2107,10 @@ async def root():
                         URL.revokeObjectURL(url);
                         document.getElementById('flyStatus').textContent = 'Export complete!';
                     }} else {{
-                        const err = await response.json();
-                        alert('Export failed: ' + (err.message || 'Unknown error'));
+                        const errText = await response.text();
+                        let msg = 'Unknown error';
+                        try {{ msg = JSON.parse(errText).message || errText; }} catch {{ msg = errText; }}
+                        alert('Export failed: ' + msg);
                         document.getElementById('flyStatus').textContent = 'Export failed';
                     }}
                 }} catch(e) {{
