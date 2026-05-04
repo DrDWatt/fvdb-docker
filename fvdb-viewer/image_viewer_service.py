@@ -1334,10 +1334,14 @@ async def root():
         
         <div id="controls">
             <div style="margin-bottom:8px;">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 40" style="height:32px;width:auto;">
-                <g transform="translate(4,2)"><polygon points="16,0 32,9 32,27 16,36 0,27 0,9" fill="none" stroke="#2F6BFF" stroke-width="1.2" opacity="0.35"/><polygon points="16,5 28,11 28,25 16,31 4,25 4,11" fill="#2F6BFF" opacity="0.25"/><polygon points="16,10 24,14 24,22 16,26 8,22 8,14" fill="#2F6BFF" opacity="0.55"/><polygon points="16,14 20,16 20,20 16,22 12,20 12,16" fill="#7DB5FF"/></g>
-                <text x="42" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="14" fill="#FFFFFF" letter-spacing="2.5">REALITY ENGINE</text>
-                <text x="42" y="32" font-family="Inter,sans-serif" font-weight="500" font-size="7.5" fill="#7DB5FF" letter-spacing="3.5">SPATIAL INTELLIGENCE</text>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40" style="height:32px;width:auto;">
+                <g transform="translate(1,0) scale(0.83)">
+                  <polygon points="20,3 36,8 20,13 4,8" fill="#7DB5FF"/><polygon points="4,8 20,13 20,15 4,10" fill="#2F6BFF"/><polygon points="20,13 36,8 36,10 20,15" fill="#2566E0"/>
+                  <polygon points="20,17 36,22 20,27 4,22" fill="#2F6BFF"/><polygon points="4,22 20,27 20,29 4,24" fill="#1E54CC"/><polygon points="20,27 36,22 36,24 20,29" fill="#1A47B0"/>
+                  <polygon points="20,31 36,36 20,41 4,36" fill="#586070"/><polygon points="4,36 20,41 20,43 4,38" fill="#404650"/><polygon points="20,41 36,36 36,38 20,43" fill="#353B44"/>
+                </g>
+                <text x="36" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="14" fill="#FFFFFF" letter-spacing="2.5">REALITY ENGINE</text>
+                <text x="36" y="32" font-family="Inter,sans-serif" font-weight="500" font-size="7.5" fill="#7DB5FF" letter-spacing="3.5">SPATIAL INTELLIGENCE</text>
               </svg>
             </div>
             <div class="slider-group">
@@ -3217,9 +3221,13 @@ async def root():
               <svg viewBox="0 0 80 24" style="height:20px;width:auto;"><text x="0" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="15" fill="#76b900" letter-spacing="1">NVIDIA</text></svg>
               <span style="color:#484F56;font-size:18px;">|</span>
               <svg viewBox="0 0 160 24" style="height:20px;width:130px;">
-                <g transform="translate(0,1)"><polygon points="10,0 20,5 20,17 10,22 0,17 0,5" fill="#2F6BFF" opacity="0.6"/><polygon points="10,4 16,7 16,15 10,18 4,15 4,7" fill="#7DB5FF"/></g>
-                <text x="26" y="11" font-family="Inter,sans-serif" font-weight="700" font-size="10" fill="#FFF" letter-spacing="1.5">REALITY ENGINE</text>
-                <text x="26" y="21" font-family="Inter,sans-serif" font-weight="400" font-size="6" fill="#7DB5FF" letter-spacing="2.5">SPATIAL INTELLIGENCE</text>
+                <g transform="translate(0,0) scale(0.48)">
+                  <polygon points="20,3 36,8 20,13 4,8" fill="#7DB5FF"/><polygon points="4,8 20,13 20,15 4,10" fill="#2F6BFF"/><polygon points="20,13 36,8 36,10 20,15" fill="#2566E0"/>
+                  <polygon points="20,17 36,22 20,27 4,22" fill="#2F6BFF"/><polygon points="4,22 20,27 20,29 4,24" fill="#1E54CC"/><polygon points="20,27 36,22 36,24 20,29" fill="#1A47B0"/>
+                  <polygon points="20,31 36,36 20,41 4,36" fill="#586070"/><polygon points="4,36 20,41 20,43 4,38" fill="#404650"/><polygon points="20,41 36,36 36,38 20,43" fill="#353B44"/>
+                </g>
+                <text x="22" y="11" font-family="Inter,sans-serif" font-weight="700" font-size="10" fill="#FFF" letter-spacing="1.5">REALITY ENGINE</text>
+                <text x="22" y="21" font-family="Inter,sans-serif" font-weight="400" font-size="6" fill="#7DB5FF" letter-spacing="2.5">SPATIAL INTELLIGENCE</text>
               </svg>
             </div>
             <div style="font-family:Inter,sans-serif;font-size:10px;font-weight:300;color:#484F56;letter-spacing:1px;text-transform:uppercase;">Optimized on Dell infrastructure. Accelerated by NVIDIA.</div>
