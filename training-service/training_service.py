@@ -45,10 +45,10 @@ except ImportError as e:
 
 # Initialize FastAPI
 app = FastAPI(
-    title="fVDB Reality Capture Training Service",
-    description="REST API for training Gaussian Splat models from images",
-    version="1.0.0",
-    docs_url="/api",  # Swagger UI at /api
+    title="Reality Engine - Training Service",
+    description="REST API for training Gaussian Splat models from video and images",
+    version="2.0.0",
+    docs_url="/api",
     redoc_url="/api/redoc"
 )
 
@@ -353,9 +353,11 @@ async def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>🎓 fVDB Training Service</title>
+        <title>Reality Engine - Training Service</title>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
         <style>
             * {{
                 margin: 0;
@@ -363,8 +365,9 @@ async def index():
                 box-sizing: border-box;
             }}
             body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                font-family: 'Inter','Segoe UI',Arial,Helvetica,sans-serif;
+                background: linear-gradient(135deg, #0B0D12 0%, #141929 100%);
+                color: #C7CBD1;
                 min-height: 100vh;
                 padding: 20px;
             }}
@@ -373,20 +376,21 @@ async def index():
                 margin: 0 auto;
             }}
             .header {{
-                background: white;
+                background: rgba(17,20,32,0.95);
                 border-radius: 20px;
                 padding: 40px;
                 box-shadow: 0 20px 60px rgba(0,0,0,0.3);
                 margin-bottom: 30px;
                 text-align: center;
+                border: 1px solid rgba(47,107,255,0.15);
             }}
             .header h1 {{
-                color: #667eea;
+                color: #FFFFFF;
                 font-size: 2.5em;
                 margin-bottom: 10px;
             }}
             .header p {{
-                color: #666;
+                color: #C7CBD1;
                 font-size: 1.2em;
             }}
             .status-box {{
@@ -417,23 +421,25 @@ async def index():
                 margin: 30px 0;
             }}
             .workflow-card {{
-                background: white;
+                background: rgba(17,20,32,0.95);
                 border-radius: 15px;
                 padding: 30px;
                 box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                border: 1px solid rgba(47,107,255,0.15);
                 transition: transform 0.3s ease, box-shadow 0.3s ease;
             }}
             .workflow-card:hover {{
                 transform: translateY(-5px);
-                box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+                box-shadow: 0 15px 40px rgba(47,107,255,0.15);
+                border-color: rgba(47,107,255,0.3);
             }}
             .workflow-card h2 {{
-                color: #667eea;
+                color: #7DB5FF;
                 margin-bottom: 15px;
                 font-size: 1.5em;
             }}
             .workflow-card p {{
-                color: #666;
+                color: #C7CBD1;
                 margin-bottom: 20px;
                 line-height: 1.6;
             }}
@@ -444,7 +450,7 @@ async def index():
             .step-list li {{
                 padding: 12px 0 12px 40px;
                 position: relative;
-                color: #555;
+                color: #C7CBD1;
                 line-height: 1.5;
             }}
             .step-list li:before {{
@@ -454,7 +460,7 @@ async def index():
                 top: 10px;
                 width: 28px;
                 height: 28px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: linear-gradient(135deg, #2F6BFF 0%, #1E54CC 100%);
                 color: white;
                 border-radius: 50%;
                 display: flex;
@@ -466,7 +472,7 @@ async def index():
             .btn {{
                 display: inline-block;
                 padding: 12px 30px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: linear-gradient(135deg, #2F6BFF 0%, #1E54CC 100%);
                 color: white;
                 text-decoration: none;
                 border-radius: 25px;
@@ -478,7 +484,7 @@ async def index():
             }}
             .btn:hover {{
                 transform: scale(1.05);
-                box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+                box-shadow: 0 5px 20px rgba(47, 107, 255, 0.4);
             }}
             .btn-secondary {{
                 background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
@@ -500,20 +506,21 @@ async def index():
                 margin: 15px 0;
             }}
             .jobs-section {{
-                background: white;
+                background: rgba(17,20,32,0.95);
                 border-radius: 15px;
                 padding: 30px;
                 box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                border: 1px solid rgba(47,107,255,0.15);
                 margin-top: 30px;
             }}
             .jobs-section h2 {{
-                color: #667eea;
+                color: #7DB5FF;
                 margin-bottom: 20px;
             }}
             .job-item {{
                 padding: 15px;
-                border-left: 4px solid #667eea;
-                background: #f7fafc;
+                border-left: 4px solid #2F6BFF;
+                background: rgba(24,28,40,0.6);
                 margin: 10px 0;
                 border-radius: 5px;
             }}
@@ -530,14 +537,14 @@ async def index():
             .status-completed {{ background: #10b981; color: white; }}
             .status-failed {{ background: #ef4444; color: white; }}
             .dataset-list {{
-                background: #f7fafc;
+                background: rgba(24,28,40,0.6);
                 padding: 15px;
                 border-radius: 10px;
                 margin: 15px 0;
             }}
             .dataset-item {{
                 padding: 10px;
-                background: white;
+                background: rgba(17,20,32,0.8);
                 margin: 5px 0;
                 border-radius: 5px;
                 display: flex;
@@ -564,7 +571,14 @@ async def index():
     <body>
         <div class="container">
             <div class="header">
-                <h1>🎓 fVDB Training Service</h1>
+                <div style="display:inline-block;margin-bottom:12px;">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 60" style="height:52px;width:auto;">
+                    <g transform="translate(8,4)"><polygon points="22,0 44,12 44,36 22,48 0,36 0,12" fill="none" stroke="#2F6BFF" stroke-width="1.5" opacity="0.35"/><polygon points="22,6 38,15 38,33 22,42 6,33 6,15" fill="#2F6BFF" opacity="0.25"/><polygon points="22,12 32,18 32,30 22,36 12,30 12,18" fill="#2F6BFF" opacity="0.55"/><polygon points="22,18 27,21 27,27 22,30 17,27 17,21" fill="#7DB5FF"/></g>
+                    <text x="60" y="26" font-family="Inter,sans-serif" font-weight="700" font-size="20" fill="#FFFFFF" letter-spacing="3">REALITY ENGINE</text>
+                    <text x="60" y="45" font-family="Inter,sans-serif" font-weight="500" font-size="10" fill="#7DB5FF" letter-spacing="4.5">SPATIAL INTELLIGENCE</text>
+                  </svg>
+                </div>
+                <h1>Training Service</h1>
                 <p>Train custom Gaussian Splat models from videos or photos</p>
                 
                 <div class="status-box">
@@ -686,7 +700,7 @@ curl -X POST http://localhost:8000/datasets/upload \\
             <div class="jobs-section">
                 <h2>🚀 Quick Start Guide</h2>
                 
-                <h3 style="color: #667eea; margin-top: 20px;">Option 1: Upload & Train in One Step</h3>
+                <h3 style="color: #7DB5FF; margin-top: 20px;">Option 1: Upload & Train in One Step</h3>
                 <div class="code-block">
 # Complete workflow - upload dataset and start training
 curl -X POST http://localhost:8000/workflow/complete \\
@@ -696,7 +710,7 @@ curl -X POST http://localhost:8000/workflow/complete \\
   -F "output_name=my_model"
                 </div>
 
-                <h3 style="color: #667eea; margin-top: 20px;">Option 2: Step-by-Step</h3>
+                <h3 style="color: #7DB5FF; margin-top: 20px;">Option 2: Step-by-Step</h3>
                 <div class="code-block">
 # 1. Upload dataset
 curl -X POST http://localhost:8000/datasets/upload \\
@@ -722,7 +736,7 @@ curl http://localhost:8000/jobs/job_XXXXXX
 curl http://localhost:8000/outputs/job_XXXXXX/my_model.ply -o result.ply
                 </div>
 
-                <h3 style="color: #667eea; margin-top: 20px;">Training Parameters</h3>
+                <h3 style="color: #7DB5FF; margin-top: 20px;">Training Parameters</h3>
                 <ul class="step-list">
                     <li data-step="💡">num_steps: Training iterations (7000-62200, default 30000)</li>
                     <li data-step="⚡">Quick test: 7000 steps (~5 min)</li>
@@ -736,13 +750,30 @@ curl http://localhost:8000/outputs/job_XXXXXX/my_model.ply -o result.ply
                     Check back in 10-15 minutes!
                 </div>''' if not gpu_available else ''}
 
-                <h3 style="color: #667eea; margin-top: 20px;">📚 Learn More</h3>
+                <h3 style="color: #7DB5FF; margin-top: 20px;">📚 Learn More</h3>
                 <div class="api-links">
                     <a href="https://fvdb.ai/reality-capture/" class="btn" target="_blank">fVDB Documentation</a>
                     <a href="https://github.com/graphdeco-inria/gaussian-splatting" class="btn btn-secondary" target="_blank">3D Gaussian Splatting</a>
                     <a href="https://colmap.github.io/" class="btn" target="_blank">COLMAP Docs</a>
                 </div>
             </div>
+        </div>
+        <!-- Co-branding logo garden -->
+        <div style="position:fixed;bottom:0;left:0;right:0;z-index:9999;background:linear-gradient(180deg,transparent 0%,rgba(11,13,18,0.95) 40%);padding:18px 0 10px 0;pointer-events:none;">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:auto;">
+            <div style="display:flex;align-items:center;gap:14px;">
+              <svg viewBox="0 0 120 24" style="height:20px;width:auto;"><text x="0" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="15" fill="#C7CBD1" letter-spacing="1">DELL</text><text x="52" y="18" font-family="Inter,sans-serif" font-weight="300" font-size="9" fill="#7DB5FF">Technologies</text></svg>
+              <span style="color:#484F56;font-size:18px;">|</span>
+              <svg viewBox="0 0 80 24" style="height:20px;width:auto;"><text x="0" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="15" fill="#76b900" letter-spacing="1">NVIDIA</text></svg>
+              <span style="color:#484F56;font-size:18px;">|</span>
+              <svg viewBox="0 0 160 24" style="height:20px;width:130px;">
+                <g transform="translate(0,1)"><polygon points="10,0 20,5 20,17 10,22 0,17 0,5" fill="#2F6BFF" opacity="0.6"/><polygon points="10,4 16,7 16,15 10,18 4,15 4,7" fill="#7DB5FF"/></g>
+                <text x="26" y="11" font-family="Inter,sans-serif" font-weight="700" font-size="10" fill="#FFF" letter-spacing="1.5">REALITY ENGINE</text>
+                <text x="26" y="21" font-family="Inter,sans-serif" font-weight="400" font-size="6" fill="#7DB5FF" letter-spacing="2.5">SPATIAL INTELLIGENCE</text>
+              </svg>
+            </div>
+            <div style="font-family:Inter,sans-serif;font-size:10px;font-weight:300;color:#484F56;letter-spacing:1px;text-transform:uppercase;">Optimized on Dell infrastructure. Accelerated by NVIDIA.</div>
+          </div>
         </div>
     </body>
     </html>
@@ -1263,6 +1294,19 @@ async def proxy_photos_to_model(request: Request):
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)) as client:
         resp = await client.post(
             f"{CUVSLAM_URL}/workflow/photos-to-model",
+            content=request.stream(),
+            headers={"content-type": content_type}
+        )
+    return Response(content=resp.content, status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type"))
+
+@app.post("/workflow/multi-video-to-model")
+async def proxy_multi_video_to_model(request: Request):
+    """Proxy multi-video ZIP upload to colmap-service. Handles SplatKing and generic multi-video ZIPs."""
+    content_type = request.headers.get("content-type", "")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)) as client:
+        resp = await client.post(
+            f"{CUVSLAM_URL}/workflow/multi-video-to-model",
             content=request.stream(),
             headers={"content-type": content_type}
         )

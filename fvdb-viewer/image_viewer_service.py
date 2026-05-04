@@ -41,7 +41,12 @@ MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/app/models"))
 VIEWER_PORT = int(os.environ.get("VIEWER_PORT", "8085"))
 SAM2_CHECKPOINT = Path(os.environ.get("SAM2_CHECKPOINT", "/app/sam2-models/sam2_hiera_small.pt"))
 
-app = FastAPI(title="fVDB Gaussian Splat Viewer")
+app = FastAPI(
+    title="Reality Engine - Gaussian Splat Viewer",
+    description="3D Gaussian Splat viewer with SAM-2 segmentation, GARField extraction, and RAG intelligence",
+    version="2.0.0",
+    docs_url="/api"
+)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # Global state
@@ -891,13 +896,23 @@ async def root():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>fVDB Gaussian Splat Viewer</title>
+        <title>Reality Engine - Gaussian Splat Viewer</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
         <style>
+            :root {{
+              --re-blue: #2F6BFF;
+              --re-light-blue: #7DB5FF;
+              --re-silver: #C7CBD1;
+              --re-graphite: #484F56;
+              --re-navy: #0B0D12;
+              --re-font: 'Inter','Segoe UI',Arial,Helvetica,sans-serif;
+            }}
             body {{ 
                 margin: 0; 
-                background: #1a1a2e; 
+                background: var(--re-navy); 
                 color: white; 
-                font-family: Arial, sans-serif;
+                font-family: var(--re-font);
                 overflow: hidden;
             }}
             #viewer {{ 
@@ -911,7 +926,7 @@ async def root():
             #render {{ 
                 max-width: 90vw; 
                 max-height: 80vh;
-                border: 2px solid #76b900;
+                border: 2px solid var(--re-blue);
                 border-radius: 8px;
             }}
             #controls {{
@@ -932,7 +947,7 @@ async def root():
             }}
             #segmentation {{
                 position: fixed;
-                bottom: 10px;
+                bottom: 55px;
                 left: 10px;
                 background: rgba(0,0,0,0.9);
                 padding: 15px;
@@ -941,7 +956,7 @@ async def root():
             }}
             #rag-pane {{
                 position: fixed;
-                bottom: 10px;
+                bottom: 55px;
                 left: 50%;
                 transform: translateX(-50%);
                 background: rgba(0,0,0,0.9);
@@ -964,7 +979,7 @@ async def root():
             }}
             #garfield {{
                 position: fixed;
-                bottom: 10px;
+                bottom: 55px;
                 right: 10px;
                 background: rgba(0,0,0,0.9);
                 padding: 15px;
@@ -1143,7 +1158,7 @@ async def root():
             }}
             #object-summary-pane .uploaded-files li {{
                 padding: 5px 0;
-                border-bottom: 1px solid rgba(255,255,255,0.1);
+                border: 1px solid rgba(47,107,255,0.3);
             }}
             .object-clickable {{
                 cursor: pointer;
@@ -1170,7 +1185,7 @@ async def root():
                 background: #222;
                 color: white;
             }}
-            h1 {{ color: #76b900; margin: 0 0 10px 0; font-size: 18px; }}
+            h1 {{ color: var(--re-blue); margin: 0 0 10px 0; font-size: 18px; }}
             .slider-group {{ margin: 10px 0; }}
             label {{ display: block; margin-bottom: 5px; }}
             input[type="range"] {{ width: 150px; }}
@@ -1186,11 +1201,11 @@ async def root():
             /* ===== Virtual Joystick Navigation Panel ===== */
             #nav-panel {{
                 position: fixed;
-                right: 340px;
+                right: 10px;
                 top: 50%;
                 transform: translateY(-50%);
                 background: rgba(0,0,0,0.85);
-                border: 1px solid #76b900;
+                border: 1px solid #2F6BFF;
                 border-radius: 12px;
                 padding: 12px;
                 z-index: 200;
@@ -1202,7 +1217,7 @@ async def root():
                 -webkit-user-select: none;
             }}
             #nav-panel .nav-title {{
-                color: #76b900;
+                color: #2F6BFF;
                 font-size: 11px;
                 font-weight: bold;
                 text-transform: uppercase;
@@ -1220,7 +1235,7 @@ async def root():
                 width: 120px;
                 height: 120px;
                 border-radius: 50%;
-                background: radial-gradient(circle, #2a2a3e 0%, #1a1a2e 100%);
+                background: radial-gradient(circle, #181C28 0%, #0B0D12 100%);
                 border: 2px solid #444;
                 touch-action: none;
                 overscroll-behavior: none;
@@ -1231,18 +1246,18 @@ async def root():
                 width: 40px;
                 height: 40px;
                 border-radius: 50%;
-                background: radial-gradient(circle at 35% 35%, #76b900, #4a7a00);
-                border: 2px solid #9adf00;
+                background: radial-gradient(circle at 35% 35%, #2F6BFF, #1E54CC);
+                border: 2px solid #7DB5FF;
                 top: 50%;
                 left: 50%;
                 transform: translate(-50%, -50%);
                 cursor: grab;
-                box-shadow: 0 2px 8px rgba(118,185,0,0.4);
+                box-shadow: 0 2px 8px rgba(47,107,255,0.4);
                 transition: box-shadow 0.15s;
                 -webkit-user-drag: none;
                 user-select: none;
             }}
-            .joystick-knob:active {{ cursor: grabbing; box-shadow: 0 0 16px rgba(118,185,0,0.7); }}
+            .joystick-knob:active {{ cursor: grabbing; box-shadow: 0 0 16px rgba(47,107,255,0.7); }}
             .joystick-crosshair {{
                 position: absolute;
                 top: 50%; left: 50%;
@@ -1277,7 +1292,7 @@ async def root():
                 height: 36px;
                 border: 1px solid #555;
                 border-radius: 6px;
-                background: #2a2a3e;
+                background: #181C28;
                 color: #ccc;
                 font-size: 16px;
                 cursor: pointer;
@@ -1286,8 +1301,8 @@ async def root():
                 justify-content: center;
                 transition: background 0.15s, border-color 0.15s;
             }}
-            .nav-btn:hover {{ background: #3a3a5e; border-color: #76b900; }}
-            .nav-btn:active {{ background: #76b900; color: #000; }}
+            .nav-btn:hover {{ background: #3a3a5e; border-color: #2F6BFF; }}
+            .nav-btn:active {{ background: #2F6BFF; color: #000; }}
             .nav-btn.zoom-btn {{
                 width: 52px;
                 height: 32px;
@@ -1318,7 +1333,13 @@ async def root():
         </div>
         
         <div id="controls">
-            <h1>🎬 fVDB Viewer</h1>
+            <div style="margin-bottom:8px;">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 40" style="height:32px;width:auto;">
+                <g transform="translate(4,2)"><polygon points="16,0 32,9 32,27 16,36 0,27 0,9" fill="none" stroke="#2F6BFF" stroke-width="1.2" opacity="0.35"/><polygon points="16,5 28,11 28,25 16,31 4,25 4,11" fill="#2F6BFF" opacity="0.25"/><polygon points="16,10 24,14 24,22 16,26 8,22 8,14" fill="#2F6BFF" opacity="0.55"/><polygon points="16,14 20,16 20,20 16,22 12,20 12,16" fill="#7DB5FF"/></g>
+                <text x="42" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="14" fill="#FFFFFF" letter-spacing="2.5">REALITY ENGINE</text>
+                <text x="42" y="32" font-family="Inter,sans-serif" font-weight="500" font-size="7.5" fill="#7DB5FF" letter-spacing="3.5">SPATIAL INTELLIGENCE</text>
+              </svg>
+            </div>
             <div class="slider-group">
                 <label>Model:</label>
                 <select id="model-select" style="width:150px;padding:5px;">
@@ -1346,9 +1367,9 @@ async def root():
                 <input type="range" id="camera" min="0" max="14" value="0" step="1">
             </div>
             <hr style="border-color:#444;margin:10px 0;">
-            <div style="margin-bottom:6px;"><strong style="color:#76b900;">🎥 Flythrough</strong></div>
+            <div style="margin-bottom:6px;"><strong style="color:#2F6BFF;">🎥 Flythrough</strong></div>
             <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
-                <button id="flyBtn" onclick="toggleFlythrough()" style="padding:5px 12px;background:#76b900;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">▶ Play</button>
+                <button id="flyBtn" onclick="toggleFlythrough()" style="padding:5px 12px;background:#2F6BFF;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">▶ Play</button>
                 <button onclick="exportFlythrough()" id="exportBtn" style="padding:5px 10px;background:#17a2b8;color:white;border:none;border-radius:4px;cursor:pointer;">📥 Export MP4</button>
                 <label style="font-size:11px;">Frames:</label>
                 <input type="number" id="flyFrames" value="120" min="10" max="600" style="width:50px;padding:3px;">
@@ -1359,7 +1380,7 @@ async def root():
                 <input type="range" id="flyProgress" min="0" max="119" value="0" style="width:100%;" oninput="seekFlythrough(this.value)">
                 <div style="display:flex;justify-content:space-between;font-size:11px;color:#888;">
                     <span id="flyFrameLabel">Frame 0 / 120</span>
-                    <span id="flyStatus" style="color:#76b900;"></span>
+                    <span id="flyStatus" style="color:#2F6BFF;"></span>
                 </div>
             </div>
         </div>
@@ -2018,7 +2039,7 @@ async def root():
                 flyTimer = null;
                 const btn = document.getElementById('flyBtn');
                 btn.textContent = '▶ Play';
-                btn.style.background = '#76b900';
+                btn.style.background = '#2F6BFF';
                 document.getElementById('flyStatus').textContent = 'Paused';
             }}
             
@@ -3187,6 +3208,23 @@ async def root():
                 updateRender();
             }}
         </script>
+        <!-- Co-branding logo garden -->
+        <div style="position:fixed;bottom:0;left:0;right:0;z-index:50;background:linear-gradient(180deg,transparent 0%,rgba(11,13,18,0.95) 40%);padding:14px 0 8px 0;pointer-events:none;">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:auto;">
+            <div style="display:flex;align-items:center;gap:14px;">
+              <svg viewBox="0 0 120 24" style="height:20px;width:auto;"><text x="0" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="15" fill="#C7CBD1" letter-spacing="1">DELL</text><text x="52" y="18" font-family="Inter,sans-serif" font-weight="300" font-size="9" fill="#7DB5FF">Technologies</text></svg>
+              <span style="color:#484F56;font-size:18px;">|</span>
+              <svg viewBox="0 0 80 24" style="height:20px;width:auto;"><text x="0" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="15" fill="#76b900" letter-spacing="1">NVIDIA</text></svg>
+              <span style="color:#484F56;font-size:18px;">|</span>
+              <svg viewBox="0 0 160 24" style="height:20px;width:130px;">
+                <g transform="translate(0,1)"><polygon points="10,0 20,5 20,17 10,22 0,17 0,5" fill="#2F6BFF" opacity="0.6"/><polygon points="10,4 16,7 16,15 10,18 4,15 4,7" fill="#7DB5FF"/></g>
+                <text x="26" y="11" font-family="Inter,sans-serif" font-weight="700" font-size="10" fill="#FFF" letter-spacing="1.5">REALITY ENGINE</text>
+                <text x="26" y="21" font-family="Inter,sans-serif" font-weight="400" font-size="6" fill="#7DB5FF" letter-spacing="2.5">SPATIAL INTELLIGENCE</text>
+              </svg>
+            </div>
+            <div style="font-family:Inter,sans-serif;font-size:10px;font-weight:300;color:#484F56;letter-spacing:1px;text-transform:uppercase;">Optimized on Dell infrastructure. Accelerated by NVIDIA.</div>
+          </div>
+        </div>
     </body>
     </html>
     """

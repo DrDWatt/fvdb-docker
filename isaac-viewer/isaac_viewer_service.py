@@ -24,8 +24,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="ISAAC Viewer",
-    description="SVO/ROSBAG Viewer with SVO to Gaussian Splat workflow",
+    title="Reality Engine - ISAAC Viewer",
+    description="SVO/ROSBAG Viewer with SVO to Gaussian Splat workflow pipeline",
     version="2.0.0",
     docs_url="/api",
     redoc_url="/api/redoc"
@@ -322,12 +322,14 @@ def get_ui_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ISAAC Viewer - SVO to Gaussian Splat</title>
+    <title>Reality Engine - ISAAC Viewer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            font-family: 'Inter','Segoe UI',Arial,Helvetica,sans-serif;
+            background: linear-gradient(135deg, #0B0D12 0%, #0F1219 50%, #141929 100%);
             min-height: 100vh;
             color: #e0e0e0;
         }
@@ -340,21 +342,21 @@ def get_ui_html():
             background: rgba(0, 0, 0, 0.3);
             border-radius: 10px;
             margin-bottom: 15px;
-            border: 1px solid rgba(118, 185, 0, 0.3);
+            border: 1px solid rgba(47, 107, 255, 0.3);
         }
-        .logo { color: #76b900; font-size: 1.5em; font-weight: bold; }
+        .logo { color: #FFFFFF; font-size: 1.5em; font-weight: bold; }
         .nav-links { display: flex; gap: 10px; }
         .nav-btn {
-            background: rgba(118, 185, 0, 0.2);
-            border: 1px solid #76b900;
-            color: #76b900;
+            background: rgba(47, 107, 255, 0.2);
+            border: 1px solid #2F6BFF;
+            color: #7DB5FF;
             padding: 8px 15px;
             border-radius: 5px;
             cursor: pointer;
             text-decoration: none;
             font-size: 0.85em;
         }
-        .nav-btn:hover { background: rgba(118, 185, 0, 0.4); }
+        .nav-btn:hover { background: rgba(47, 107, 255, 0.4); }
         .main-layout {
             display: grid;
             grid-template-columns: 280px 1fr 300px;
@@ -369,7 +371,7 @@ def get_ui_html():
             overflow-y: auto;
         }
         .panel h2 {
-            color: #76b900;
+            color: #7DB5FF;
             font-size: 1em;
             margin-bottom: 15px;
             display: flex;
@@ -377,7 +379,7 @@ def get_ui_html():
             gap: 8px;
         }
         .btn {
-            background: linear-gradient(135deg, #76b900, #5a8f00);
+            background: linear-gradient(135deg, #2F6BFF, #1E54CC);
             color: white;
             border: none;
             padding: 10px 20px;
@@ -388,7 +390,7 @@ def get_ui_html():
             margin-bottom: 10px;
             transition: all 0.3s;
         }
-        .btn:hover { transform: scale(1.02); box-shadow: 0 4px 15px rgba(118, 185, 0, 0.3); }
+        .btn:hover { transform: scale(1.02); box-shadow: 0 4px 15px rgba(47, 107, 255, 0.3); }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
         .btn-secondary { background: linear-gradient(135deg, #4a4a4a, #3a3a3a); }
         .btn-warning { background: linear-gradient(135deg, #ffc107, #e0a800); color: #000; }
@@ -405,15 +407,15 @@ def get_ui_html():
             cursor: pointer;
             transition: all 0.2s;
         }
-        .file-item:hover { background: rgba(118, 185, 0, 0.2); }
-        .file-item.active { background: rgba(118, 185, 0, 0.3); border-left: 3px solid #76b900; }
+        .file-item:hover { background: rgba(47, 107, 255, 0.15); }
+        .file-item.active { background: rgba(47, 107, 255, 0.2); border-left: 3px solid #2F6BFF; }
         .file-item .name { font-size: 0.85em; word-break: break-all; }
         .file-item .meta { font-size: 0.75em; color: #888; }
         .file-item .type-badge {
             font-size: 0.7em;
             padding: 2px 6px;
             border-radius: 3px;
-            background: #76b900;
+            background: #2F6BFF;
             color: #000;
         }
         .file-item .type-badge.rosbag { background: #17a2b8; color: #fff; }
@@ -473,7 +475,7 @@ def get_ui_html():
             border-left: 3px solid rgba(255, 255, 255, 0.2);
             font-size: 0.85em;
         }
-        .workflow-step.active { border-left-color: #76b900; background: rgba(118, 185, 0, 0.1); }
+        .workflow-step.active { border-left-color: #2F6BFF; background: rgba(47, 107, 255, 0.1); }
         .workflow-step.completed { border-left-color: #28a745; }
         .workflow-step.failed { border-left-color: #dc3545; }
         .workflow-step .step-title { font-weight: bold; margin-bottom: 4px; }
@@ -488,7 +490,7 @@ def get_ui_html():
         }
         .workflow-progress .fill {
             height: 100%;
-            background: linear-gradient(90deg, #76b900, #5a8f00);
+            background: linear-gradient(90deg, #2F6BFF, #1E54CC);
             border-radius: 3px;
             transition: width 0.5s ease;
         }
@@ -520,7 +522,7 @@ def get_ui_html():
             width: 120px;
             font-size: 0.9em;
         }
-        .workflow-param input:focus, .workflow-param select:focus { outline: none; border-color: #76b900; }
+        .workflow-param input:focus, .workflow-param select:focus { outline: none; border-color: #2F6BFF; }
         .status-bar {
             display: flex;
             justify-content: space-between;
@@ -544,7 +546,7 @@ def get_ui_html():
         .status-dot.warning { background: #ffc107; }
         .status-dot.error { background: #dc3545; }
         .upload-zone {
-            border: 2px dashed rgba(118, 185, 0, 0.5);
+            border: 2px dashed rgba(47, 107, 255, 0.5);
             border-radius: 8px;
             padding: 20px;
             text-align: center;
@@ -552,7 +554,7 @@ def get_ui_html():
             margin-bottom: 15px;
             transition: all 0.3s;
         }
-        .upload-zone:hover { border-color: #76b900; background: rgba(118, 185, 0, 0.1); }
+        .upload-zone:hover { border-color: #2F6BFF; background: rgba(47, 107, 255, 0.1); }
         .upload-zone input { display: none; }
         .mode-toggle {
             display: flex;
@@ -569,7 +571,7 @@ def get_ui_html():
             cursor: pointer;
             font-size: 0.8em;
         }
-        .mode-btn.active { background: #76b900; color: #000; border-color: #76b900; }
+        .mode-btn.active { background: #2F6BFF; color: #000; border-color: #2F6BFF; }
         .loading-overlay {
             position: absolute;
             inset: 0;
@@ -578,7 +580,7 @@ def get_ui_html():
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            color: #76b900;
+            color: #2F6BFF;
             font-size: 1.2em;
             gap: 15px;
         }
@@ -592,7 +594,7 @@ def get_ui_html():
         }
         .loading-overlay .progress-bar {
             height: 100%;
-            background: linear-gradient(90deg, #76b900, #5a8f00);
+            background: linear-gradient(90deg, #2F6BFF, #1E54CC);
             border-radius: 10px;
             transition: width 0.3s ease;
             animation: pulse 1.5s infinite;
@@ -631,7 +633,7 @@ def get_ui_html():
             padding: 3px 8px;
             border-radius: 3px;
             font-size: 0.75em;
-            color: #76b900;
+            color: #2F6BFF;
         }
         .zoom-controls {
             display: flex;
@@ -650,7 +652,7 @@ def get_ui_html():
             border-radius: 4px;
             cursor: pointer;
         }
-        .zoom-controls button:hover { background: #76b900; }
+        .zoom-controls button:hover { background: #2F6BFF; }
         .zoom-display {
             font-size: 0.85em;
             min-width: 120px;
@@ -671,13 +673,21 @@ def get_ui_html():
             cursor: pointer;
             font-size: 0.75em;
         }
-        .view-mode-btns button.active { background: #76b900; color: #000; border-color: #76b900; }
+        .view-mode-btns button.active { background: #2F6BFF; color: #000; border-color: #2F6BFF; }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <div class="logo">🎥 ISAAC Viewer</div>
+            <div class="logo" style="display:flex;align-items:center;gap:12px;">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 40" style="height:32px;width:auto;">
+                <g transform="translate(4,2)"><polygon points="16,0 32,9 32,27 16,36 0,27 0,9" fill="none" stroke="#2F6BFF" stroke-width="1.2" opacity="0.35"/><polygon points="16,5 28,11 28,25 16,31 4,25 4,11" fill="#2F6BFF" opacity="0.25"/><polygon points="16,10 24,14 24,22 16,26 8,22 8,14" fill="#2F6BFF" opacity="0.55"/><polygon points="16,14 20,16 20,20 16,22 12,20 12,16" fill="#7DB5FF"/></g>
+                <text x="42" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="14" fill="#FFFFFF" letter-spacing="2.5">REALITY ENGINE</text>
+                <text x="42" y="32" font-family="Inter,sans-serif" font-weight="500" font-size="7.5" fill="#7DB5FF" letter-spacing="3.5">SPATIAL INTELLIGENCE</text>
+              </svg>
+              <span style="color:#484F56;font-size:14px;">|</span>
+              <span style="color:#7DB5FF;font-size:1em;font-weight:600;">ISAAC Viewer</span>
+            </div>
             <div class="nav-links">
                 <a href="" class="nav-btn" target="_blank" id="navConverter">📤 SVO Converter</a>
                 <a href="" class="nav-btn" target="_blank" id="navViewer">🔮 fVDB Viewer</a>
@@ -697,7 +707,7 @@ def get_ui_html():
                 </div>
                 
                 <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; margin-bottom: 10px; font-size: 0.75em;">
-                    <p style="color: #76b900; margin-bottom: 5px;"><strong>📌 File Types:</strong></p>
+                    <p style="color: #2F6BFF; margin-bottom: 5px;"><strong>📌 File Types:</strong></p>
                     <p style="color: #aaa; margin-bottom: 3px;"><strong>SVO/SVO2:</strong> ZED camera recordings (stereo video)</p>
                     <p style="color: #aaa;"><strong>BAG/DB3/MCAP:</strong> ROS bag files (robot sensor data)</p>
                     <p style="color: #888; margin-top: 5px; font-style: italic;">Either format works - just select any file to view</p>
@@ -705,7 +715,7 @@ def get_ui_html():
                 
                 <div id="uploadProgress" class="hidden" style="margin-bottom: 10px;">
                     <div style="background: rgba(0,0,0,0.3); border-radius: 4px; height: 8px;">
-                        <div id="uploadBar" style="background: #76b900; height: 100%; border-radius: 4px; width: 0%;"></div>
+                        <div id="uploadBar" style="background: #2F6BFF; height: 100%; border-radius: 4px; width: 0%;"></div>
                     </div>
                     <p id="uploadStatus" style="font-size: 0.8em; margin-top: 5px;"></p>
                 </div>
@@ -1572,6 +1582,23 @@ def get_ui_html():
             }
         }
     </script>
+    <!-- Co-branding logo garden -->
+    <div style="position:fixed;bottom:0;left:0;right:0;z-index:9999;background:linear-gradient(180deg,transparent 0%,rgba(11,13,18,0.95) 40%);padding:18px 0 10px 0;pointer-events:none;">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:auto;">
+        <div style="display:flex;align-items:center;gap:14px;">
+          <svg viewBox="0 0 120 24" style="height:20px;width:auto;"><text x="0" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="15" fill="#C7CBD1" letter-spacing="1">DELL</text><text x="52" y="18" font-family="Inter,sans-serif" font-weight="300" font-size="9" fill="#7DB5FF">Technologies</text></svg>
+          <span style="color:#484F56;font-size:18px;">|</span>
+          <svg viewBox="0 0 80 24" style="height:20px;width:auto;"><text x="0" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="15" fill="#76b900" letter-spacing="1">NVIDIA</text></svg>
+          <span style="color:#484F56;font-size:18px;">|</span>
+          <svg viewBox="0 0 160 24" style="height:20px;width:130px;">
+            <g transform="translate(0,1)"><polygon points="10,0 20,5 20,17 10,22 0,17 0,5" fill="#2F6BFF" opacity="0.6"/><polygon points="10,4 16,7 16,15 10,18 4,15 4,7" fill="#7DB5FF"/></g>
+            <text x="26" y="11" font-family="Inter,sans-serif" font-weight="700" font-size="10" fill="#FFF" letter-spacing="1.5">REALITY ENGINE</text>
+            <text x="26" y="21" font-family="Inter,sans-serif" font-weight="400" font-size="6" fill="#7DB5FF" letter-spacing="2.5">SPATIAL INTELLIGENCE</text>
+          </svg>
+        </div>
+        <div style="font-family:Inter,sans-serif;font-size:10px;font-weight:300;color:#484F56;letter-spacing:1px;text-transform:uppercase;">Optimized on Dell infrastructure. Accelerated by NVIDIA.</div>
+      </div>
+    </div>
 </body>
 </html>
 """

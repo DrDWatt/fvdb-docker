@@ -3,41 +3,47 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D Model Training Workflow</title>
+    <title>Reality Engine - Training Workflow</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Inter','Segoe UI',Arial,Helvetica,sans-serif;
+            background: linear-gradient(135deg, #0B0D12 0%, #141929 100%);
             min-height: 100vh;
             padding: 20px;
         }
         .container { max-width: 1000px; margin: 0 auto; }
         .card {
-            background: white;
+            background: rgba(17,20,32,0.95);
             border-radius: 12px;
             padding: 25px;
             margin-bottom: 20px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            border: 1px solid rgba(47,107,255,0.15);
+            color: #C7CBD1;
         }
-        h1 { color: #667eea; margin-bottom: 10px; }
-        h2 { color: #333; margin-bottom: 15px; font-size: 1.3rem; }
+        h1 { color: #FFFFFF; margin-bottom: 10px; }
+        h2 { color: #7DB5FF; margin-bottom: 15px; font-size: 1.3rem; }
         .upload-form { display: flex; flex-direction: column; gap: 15px; }
         .form-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
         .form-group { display: flex; flex-direction: column; gap: 5px; }
-        label { font-weight: 600; color: #555; font-size: 0.9rem; }
+        label { font-weight: 600; color: #C7CBD1; font-size: 0.9rem; }
         input, select {
             padding: 10px;
-            border: 2px solid #e0e0e0;
+            border: 2px solid #484F56;
             border-radius: 6px;
             font-size: 1rem;
+            background: #181C28;
+            color: #C7CBD1;
         }
         input:focus, select:focus {
             outline: none;
-            border-color: #667eea;
+            border-color: #2F6BFF;
         }
         .btn {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #2F6BFF 0%, #1E54CC 100%);
             color: white;
             padding: 15px;
             border: none;
@@ -52,36 +58,36 @@
         .workflow-list { display: flex; flex-direction: column; gap: 10px; }
         .workflow-item {
             padding: 15px;
-            background: #f8f9fa;
+            background: rgba(24,28,40,0.8);
             border-radius: 8px;
-            border-left: 4px solid #667eea;
+            border-left: 4px solid #2F6BFF;
             cursor: pointer;
             transition: all 0.2s;
         }
-        .workflow-item:hover { background: #e9ecef; transform: translateX(5px); }
-        .workflow-item.selected { background: #e7f0ff; border-left-color: #4c6ef5; }
+        .workflow-item:hover { background: rgba(47,107,255,0.1); transform: translateX(5px); }
+        .workflow-item.selected { background: rgba(47,107,255,0.15); border-left-color: #7DB5FF; }
         .workflow-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-        .workflow-title { font-weight: 600; font-size: 1.1rem; color: #333; }
+        .workflow-title { font-weight: 600; font-size: 1.1rem; color: #FFFFFF; }
         .badge {
             padding: 4px 12px;
             border-radius: 20px;
             font-size: 0.8rem;
             font-weight: 600;
         }
-        .badge.active { background: #667eea; color: white; }
+        .badge.active { background: #2F6BFF; color: white; }
         .badge.completed { background: #10b981; color: white; }
         .badge.failed { background: #ef4444; color: white; }
-        .workflow-details { font-size: 0.9rem; color: #666; }
+        .workflow-details { font-size: 0.9rem; color: #C7CBD1; }
         .stage-list { margin-top: 15px; }
         .stage {
             padding: 15px;
-            background: #f8f9fa;
+            background: rgba(24,28,40,0.6);
             border-radius: 8px;
             margin-bottom: 10px;
-            border-left: 4px solid #e0e0e0;
+            border-left: 4px solid #484F56;
         }
-        .stage.active { border-left-color: #667eea; background: #f0f4ff; }
-        .stage.completed { border-left-color: #10b981; background: #f0fdf4; }
+        .stage.active { border-left-color: #2F6BFF; background: rgba(47,107,255,0.08); }
+        .stage.completed { border-left-color: #10b981; background: rgba(16,185,129,0.08); }
         .stage-header { display: flex; justify-content: between; align-items: center; margin-bottom: 8px; }
         .stage-title { font-weight: 600; font-size: 1rem; }
         .progress-bar {
@@ -93,10 +99,10 @@
         }
         .progress-fill {
             height: 100%;
-            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(90deg, #2F6BFF 0%, #1E54CC 100%);
             transition: width 0.3s;
         }
-        .stage-details { font-size: 0.9rem; color: #666; margin-top: 5px; }
+        .stage-details { font-size: 0.9rem; color: #C7CBD1; margin-top: 5px; }
         .logs {
             background: #1e1e1e;
             color: #d4d4d4;
@@ -111,7 +117,7 @@
         .log-line { margin-bottom: 4px; }
         .spinner {
             border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
+            border-top: 3px solid #2F6BFF;
             border-radius: 50%;
             width: 16px;
             height: 16px;
@@ -130,7 +136,7 @@
             margin-bottom: 20px;
         }
         .stat-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #2F6BFF 0%, #1E54CC 100%);
             color: white;
             padding: 15px;
             border-radius: 8px;
@@ -138,35 +144,6 @@
         }
         .stat-value { font-size: 2rem; font-weight: 700; }
         .stat-label { font-size: 0.85rem; opacity: 0.9; margin-top: 5px; }
-        .spectacular-banner {
-            background: linear-gradient(135deg, #00d4ff 0%, #7b2cbf 100%);
-            color: white;
-            padding: 20px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            display: flex;
-            align-items: center;
-            gap: 20px;
-            flex-wrap: wrap;
-        }
-        .spectacular-banner h3 { margin: 0; font-size: 1.3em; }
-        .spectacular-banner p { margin: 5px 0 0 0; opacity: 0.9; }
-        .spectacular-banner .btn {
-            background: white;
-            color: #7b2cbf;
-            padding: 10px 20px;
-            font-size: 0.95rem;
-        }
-        .spectacular-info {
-            background: linear-gradient(135deg, #e0f7ff 0%, #f3e8ff 100%);
-            border: 2px solid #00d4ff;
-            padding: 15px;
-            border-radius: 10px;
-            margin-bottom: 15px;
-        }
-        .spectacular-info h4 { color: #7b2cbf; margin: 0 0 10px 0; }
-        .spectacular-info ul { margin: 0; padding-left: 20px; color: #555; }
-        .device-badges { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
         .device-badge {
             background: #f0f0f0;
             padding: 6px 12px;
@@ -211,7 +188,7 @@
         }
         .upload-progress-fill {
             height: 100%;
-            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(90deg, #2F6BFF 0%, #1E54CC 100%);
             border-radius: 5px;
             transition: width 0.3s;
             width: 0%;
@@ -228,36 +205,19 @@
 <body>
     <div class="container">
         <div class="card">
-            <h1>🚀 3D Model Training Workflow</h1>
-            <p style="color: #666;">Upload video → Extract frames → COLMAP → Train Gaussian Splat → Download model</p>
-        </div>
-
-        <!-- Spectacular Rec Banner -->
-        <div class="spectacular-banner">
-            <div style="flex: 1;">
-                <h3>📱 Using Spectacular Rec App?</h3>
-                <p>Export video from the app and upload below - works seamlessly with this workflow!</p>
-                <div class="device-badges" style="margin-top: 10px;">
-                    <span class="device-badge" style="background: rgba(255,255,255,0.2); color: white;">📱 iPhone</span>
-                    <span class="device-badge" style="background: rgba(255,255,255,0.2); color: white;">🤖 Android</span>
-                    <span class="device-badge" style="background: rgba(255,255,255,0.2); color: white;">📷 OAK-D</span>
-                    <span class="device-badge" style="background: rgba(255,255,255,0.2); color: white;">🎥 RealSense</span>
-                </div>
+            <div style="display:flex;align-items:center;gap:15px;margin-bottom:8px;">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 40" style="height:36px;width:auto;">
+                <g transform="translate(4,2)"><polygon points="16,0 32,9 32,27 16,36 0,27 0,9" fill="none" stroke="#2F6BFF" stroke-width="1.2" opacity="0.35"/><polygon points="16,5 28,11 28,25 16,31 4,25 4,11" fill="#2F6BFF" opacity="0.25"/><polygon points="16,10 24,14 24,22 16,26 8,22 8,14" fill="#2F6BFF" opacity="0.55"/><polygon points="16,14 20,16 20,20 16,22 12,20 12,16" fill="#7DB5FF"/></g>
+                <text x="42" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="14" fill="#FFFFFF" letter-spacing="2.5">REALITY ENGINE</text>
+                <text x="42" y="32" font-family="Inter,sans-serif" font-weight="500" font-size="7.5" fill="#7DB5FF" letter-spacing="3.5">SPATIAL INTELLIGENCE</text>
+              </svg>
+              <h1 style="margin:0;">Training Workflow</h1>
             </div>
-            <a href="https://apps.apple.com/us/app/spectacular-rec/id6473188128" target="_blank" class="btn">📱 iOS App</a>
-            <a href="https://play.google.com/store/apps/details?id=com.spectacularai.rec" target="_blank" class="btn">🤖 Android</a>
+            <p style="color: #C7CBD1;">Upload video → Extract frames → COLMAP → Train Gaussian Splat → Download model</p>
         </div>
 
         <div class="card">
             <h2>🎬 Video Workflow</h2>
-            <div class="spectacular-info">
-                <h4>💡 Tip: Using Spectacular Rec?</h4>
-                <ul>
-                    <li><strong>Record</strong> your scene in the app</li>
-                    <li><strong>Export</strong> as MP4/MOV video</li>
-                    <li><strong>Upload</strong> below - same workflow!</li>
-                </ul>
-            </div>
             <p style="color: #666; margin-bottom: 15px;">Upload a video - frames will be extracted automatically</p>
             <form class="upload-form" id="uploadForm">
                 <div class="form-group">
@@ -344,6 +304,88 @@
                         <span id="photosUploadSize">0 / 0 MB</span>
                         <span id="photosUploadSpeed">-- MB/s</span>
                         <span id="photosUploadEta">ETA: --</span>
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>📦 Multi-Video ZIP Workflow</h2>
+            <p style="color: #666; margin-bottom: 15px;">Upload a ZIP containing multiple video files or a SplatKing capture export</p>
+
+            <div style="display: flex; gap: 12px; margin-bottom: 15px;">
+                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 10px 16px; border: 2px solid #e0e0e0; border-radius: 8px; flex: 1; transition: all 0.2s;" id="modeAutoLabel">
+                    <input type="radio" name="multiVideoMode" value="auto" checked onchange="updateModeUI()" style="width: auto; margin: 0;">
+                    <div>
+                        <div style="font-weight: 600;">Auto-Detect</div>
+                        <div style="font-size: 0.8rem; color: #888;">Detects SplatKing or generic multi-video</div>
+                    </div>
+                </label>
+                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 10px 16px; border: 2px solid #e0e0e0; border-radius: 8px; flex: 1; transition: all 0.2s;" id="modeSplatkingLabel">
+                    <input type="radio" name="multiVideoMode" value="splatking" onchange="updateModeUI()" style="width: auto; margin: 0;">
+                    <div>
+                        <div style="font-weight: 600;">SplatKing Capture</div>
+                        <div style="font-size: 0.8rem; color: #888;">Dual-camera (ultra + wide) with intrinsics</div>
+                    </div>
+                </label>
+                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 10px 16px; border: 2px solid #e0e0e0; border-radius: 8px; flex: 1; transition: all 0.2s;" id="modeMultiLabel">
+                    <input type="radio" name="multiVideoMode" value="multi_video" onchange="updateModeUI()" style="width: auto; margin: 0;">
+                    <div>
+                        <div style="font-weight: 600;">Multi-Video</div>
+                        <div style="font-size: 0.8rem; color: #888;">Multiple .mov/.mp4/.avi in a ZIP</div>
+                    </div>
+                </label>
+            </div>
+
+            <div id="splatkingInfo" style="background: linear-gradient(135deg, #e8f5e9 0%, #e3f2fd 100%); border: 2px solid #4caf50; padding: 12px 15px; border-radius: 10px; margin-bottom: 15px; display: none;">
+                <h4 style="color: #2e7d32; margin: 0 0 6px 0;">SplatKing Dual-Camera Mode</h4>
+                <ul style="margin: 0; padding-left: 20px; color: #555; font-size: 0.9rem;">
+                    <li>Extracts frames from both <strong>ultra.mov</strong> and <strong>wide.mov</strong></li>
+                    <li>Uses camera intrinsics from <strong>splatpack.json</strong> (FoV, resolution)</li>
+                    <li>Per-camera COLMAP reconstruction for crisper multi-view results</li>
+                    <li>Includes <strong>frame_timecodes.csv</strong> for temporal alignment</li>
+                </ul>
+            </div>
+            <div id="multiVideoInfo" style="background: linear-gradient(135deg, #fff3e0 0%, #fce4ec 100%); border: 2px solid #ff9800; padding: 12px 15px; border-radius: 10px; margin-bottom: 15px; display: none;">
+                <h4 style="color: #e65100; margin: 0 0 6px 0;">Multi-Video Mode</h4>
+                <ul style="margin: 0; padding-left: 20px; color: #555; font-size: 0.9rem;">
+                    <li>Extracts frames from all video files in the ZIP</li>
+                    <li>Each video treated as a separate camera source</li>
+                    <li>COLMAP assigns one camera model per video for best reconstruction</li>
+                </ul>
+            </div>
+
+            <form class="upload-form" id="multiVideoForm">
+                <div class="form-group">
+                    <label>ZIP File</label>
+                    <input type="file" id="multiVideoFile" accept=".zip" required>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Dataset Name</label>
+                        <input type="text" id="multiVideoDatasetId" placeholder="e.g., building_scan" required>
+                    </div>
+                    <div class="form-group">
+                        <label>FPS</label>
+                        <input type="number" id="multiVideoFps" value="1" min="0.5" max="10" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label>Training Steps</label>
+                        <input type="number" id="multiVideoSteps" value="30000" min="1000" max="65000" step="100">
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="multiVideoMcmc" style="width: auto; margin: 0;">
+                        <label for="multiVideoMcmc" style="margin: 0; cursor: pointer;" title="MCMC optimizer">MCMC Training</label>
+                    </div>
+                </div>
+                <button type="submit" class="btn" id="multiVideoBtn">📦 Start Multi-Video Workflow</button>
+                <div class="upload-progress" id="multiVideoUploadProgress">
+                    <div class="upload-progress-bar"><div class="upload-progress-fill" id="multiVideoProgressFill"></div></div>
+                    <div class="upload-stats">
+                        <span id="multiVideoUploadPct">0%</span>
+                        <span id="multiVideoUploadSize">0 / 0 MB</span>
+                        <span id="multiVideoUploadSpeed">-- MB/s</span>
+                        <span id="multiVideoUploadEta">ETA: --</span>
                     </div>
                 </div>
             </form>
@@ -732,6 +774,70 @@
             }
         });
 
+        // Mode toggle UI for multi-video section
+        function updateModeUI() {
+            const mode = document.querySelector('input[name="multiVideoMode"]:checked').value;
+            document.getElementById('splatkingInfo').style.display = (mode === 'splatking') ? 'block' : 'none';
+            document.getElementById('multiVideoInfo').style.display = (mode === 'multi_video') ? 'block' : 'none';
+
+            // Highlight selected radio label
+            ['modeAutoLabel', 'modeSplatkingLabel', 'modeMultiLabel'].forEach(id => {
+                document.getElementById(id).style.borderColor = '#e0e0e0';
+                document.getElementById(id).style.background = 'transparent';
+            });
+            const selectedLabel = {
+                'auto': 'modeAutoLabel',
+                'splatking': 'modeSplatkingLabel',
+                'multi_video': 'modeMultiLabel'
+            }[mode];
+            if (selectedLabel) {
+                document.getElementById(selectedLabel).style.borderColor = '#2F6BFF';
+                document.getElementById(selectedLabel).style.background = '#f0f0ff';
+            }
+        }
+        updateModeUI();
+
+        // Multi-video form submission
+        document.getElementById('multiVideoForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('multiVideoBtn');
+            btn.disabled = true;
+            btn.textContent = '🔄 Uploading ZIP...';
+
+            const mode = document.querySelector('input[name="multiVideoMode"]:checked').value;
+            const formData = new FormData();
+            formData.append('file', document.getElementById('multiVideoFile').files[0]);
+            formData.append('dataset_id', document.getElementById('multiVideoDatasetId').value);
+            formData.append('fps', document.getElementById('multiVideoFps').value);
+            formData.append('camera_model', 'SIMPLE_RADIAL');
+            formData.append('matcher', 'exhaustive');
+            formData.append('num_training_steps', document.getElementById('multiVideoSteps').value);
+            formData.append('use_mcmc', document.getElementById('multiVideoMcmc').checked ? 'true' : 'false');
+            formData.append('mode', mode);
+
+            try {
+                await uploadWithProgress(
+                    `${COLMAP_UPLOAD_API}/workflow/multi-video-to-model`,
+                    formData,
+                    { progressId: 'multiVideoUploadProgress', fillId: 'multiVideoProgressFill',
+                      pctId: 'multiVideoUploadPct', sizeId: 'multiVideoUploadSize',
+                      speedId: 'multiVideoUploadSpeed', etaId: 'multiVideoUploadEta' }
+                );
+                btn.textContent = '✅ Upload Started!';
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = '📦 Start Multi-Video Workflow';
+                    document.getElementById('multiVideoUploadProgress').classList.remove('active');
+                }, 3000);
+                setTimeout(checkWorkflows, 3000);
+            } catch (error) {
+                alert('Upload failed: ' + error.message);
+                btn.disabled = false;
+                btn.textContent = '📦 Start Multi-Video Workflow';
+                document.getElementById('multiVideoUploadProgress').classList.remove('active');
+            }
+        });
+
         // Check workflows every 3 seconds
         async function checkWorkflows() {
             try {
@@ -786,6 +892,8 @@
             updateWorkflowDetails(workflowId);
         }
 
+        const TERMINAL_STATES = ['completed', 'failed', 'training_failed', 'completed_colmap_only'];
+
         async function updateWorkflowDetails(workflowId) {
             try {
                 const response = await fetch(`${COLMAP_API}/workflow/status/${workflowId}`);
@@ -821,6 +929,14 @@
                 const logLine = `[${new Date().toLocaleTimeString()}] ${status.current_step || 'Processing...'}\n`;
                 logs.innerHTML += `<div class="log-line">${logLine}</div>`;
                 logs.scrollTop = logs.scrollHeight;
+                
+                // Stop polling once workflow reaches a terminal state
+                if (TERMINAL_STATES.includes(status.status)) {
+                    if (updateInterval) {
+                        clearInterval(updateInterval);
+                        updateInterval = null;
+                    }
+                }
                 
             } catch (error) {
                 console.error('Error updating details:', error);
@@ -903,5 +1019,22 @@
         checkWorkflows();
         setInterval(checkWorkflows, 3000);
     </script>
+    <!-- Co-branding logo garden -->
+    <div style="position:fixed;bottom:0;left:0;right:0;z-index:9999;background:linear-gradient(180deg,transparent 0%,rgba(11,13,18,0.95) 40%);padding:18px 0 10px 0;pointer-events:none;">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px;pointer-events:auto;">
+        <div style="display:flex;align-items:center;gap:14px;">
+          <svg viewBox="0 0 120 24" style="height:20px;width:auto;"><text x="0" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="15" fill="#C7CBD1" letter-spacing="1">DELL</text><text x="52" y="18" font-family="Inter,sans-serif" font-weight="300" font-size="9" fill="#7DB5FF">Technologies</text></svg>
+          <span style="color:#484F56;font-size:18px;">|</span>
+          <svg viewBox="0 0 80 24" style="height:20px;width:auto;"><text x="0" y="18" font-family="Inter,sans-serif" font-weight="700" font-size="15" fill="#76b900" letter-spacing="1">NVIDIA</text></svg>
+          <span style="color:#484F56;font-size:18px;">|</span>
+          <svg viewBox="0 0 160 24" style="height:20px;width:130px;">
+            <g transform="translate(0,1)"><polygon points="10,0 20,5 20,17 10,22 0,17 0,5" fill="#2F6BFF" opacity="0.6"/><polygon points="10,4 16,7 16,15 10,18 4,15 4,7" fill="#7DB5FF"/></g>
+            <text x="26" y="11" font-family="Inter,sans-serif" font-weight="700" font-size="10" fill="#FFF" letter-spacing="1.5">REALITY ENGINE</text>
+            <text x="26" y="21" font-family="Inter,sans-serif" font-weight="400" font-size="6" fill="#7DB5FF" letter-spacing="2.5">SPATIAL INTELLIGENCE</text>
+          </svg>
+        </div>
+        <div style="font-family:Inter,sans-serif;font-size:10px;font-weight:300;color:#484F56;letter-spacing:1px;text-transform:uppercase;">Optimized on Dell infrastructure. Accelerated by NVIDIA.</div>
+      </div>
+    </div>
 </body>
 </html>
