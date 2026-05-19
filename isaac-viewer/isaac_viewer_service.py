@@ -36,8 +36,9 @@ SVO_DIR = Path(os.getenv("SVO_DIR", "/app/svo"))
 ROSBAG_DIR = Path(os.getenv("ROSBAG_DIR", "/app/rosbags"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/app/outputs"))
 FRAME_DIR = Path(os.getenv("FRAME_DIR", "/app/frames"))
+ZED_ZIP_DIR = Path(os.getenv("ZED_ZIP_DIR", "/app/zed-zips"))
 
-for d in [SVO_DIR, ROSBAG_DIR, OUTPUT_DIR, FRAME_DIR]:
+for d in [SVO_DIR, ROSBAG_DIR, OUTPUT_DIR, FRAME_DIR, ZED_ZIP_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Service URLs
@@ -49,6 +50,7 @@ DEPTH_SERVICE_URL = os.getenv("DEPTH_SERVICE_URL", "http://host.docker.internal:
 
 # State
 current_file: Optional[str] = None
+current_file_type: Optional[str] = None  # "svo", "rosbag", "zed_zip"
 current_frame_idx: int = 0
 total_frames: int = 0
 current_image: Optional[np.ndarray] = None
@@ -58,6 +60,10 @@ video_capture: Any = None  # Store video capture object
 video_capture_file: Optional[str] = None  # Track which file is open
 raw_frame_cache: Dict[int, np.ndarray] = {}  # Cache raw frames by index
 raw_frame_cache_file: Optional[str] = None  # Track which file cache is for
+
+# ZED ZIP state: maps filename -> extracted frame info
+zed_zip_frames: Dict[str, List[Dict]] = {}  # {filename: [{png_path, pfm_path, idx}, ...]}
+zed_zip_loaded: Optional[str] = None  # Currently loaded ZED ZIP name
 
 # Workflow state
 active_workflows: Dict[str, Dict] = {}
@@ -102,6 +108,15 @@ def get_available_files() -> List[Dict]:
                 "size": path.stat().st_size,
                 "path": str(path)
             })
+    
+    # ZED still image ZIP files
+    for path in ZED_ZIP_DIR.glob("*.zip"):
+        files.append({
+            "name": path.name,
+            "type": "zed_zip",
+            "size": path.stat().st_size,
+            "path": str(path)
+        })
     
     return sorted(files, key=lambda x: x["name"])
 
@@ -313,6 +328,113 @@ def filter_sharp_frames(images_dir: Path, images_right_dir: Path = None,
         logger.warning(f"[{workflow_id}] sharp-frames timed out, skipping blur filter")
         shutil.rmtree(filtered_dir, ignore_errors=True)
         return len(list(images_dir.glob("*.jpg"))) + len(list(images_dir.glob("*.png")))
+
+
+def read_pfm(pfm_path: str) -> np.ndarray:
+    """Read a PFM (Portable Float Map) depth file. Returns float32 numpy array."""
+    with open(pfm_path, 'rb') as f:
+        header = f.readline().decode().strip()
+        is_color = header == 'PF'
+        dims = f.readline().decode().strip().split()
+        w, h = int(dims[0]), int(dims[1])
+        scale = float(f.readline().decode().strip())
+        endian = '<' if scale < 0 else '>'
+        channels = 3 if is_color else 1
+        data = np.frombuffer(f.read(), dtype=f'{endian}f4')
+        data = data.reshape(h, w, channels) if is_color else data.reshape(h, w)
+        # PFM stores bottom-to-top
+        data = np.flipud(data)
+    return data
+
+
+def load_zed_zip_frames(zip_name: str) -> List[Dict]:
+    """Index frames inside a ZED still image ZIP (side-by-side PNGs + PFM depth maps).
+    Returns sorted list of frame dicts with paths to extracted files."""
+    global zed_zip_frames
+
+    zip_path = ZED_ZIP_DIR / zip_name
+    if not zip_path.exists():
+        return []
+
+    # Extract to a directory named after the ZIP
+    extract_dir = ZED_ZIP_DIR / zip_name.replace('.zip', '')
+    if not extract_dir.exists():
+        import zipfile as zf_mod
+        with zf_mod.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(extract_dir)
+        logger.info(f"Extracted ZED ZIP to {extract_dir}")
+
+    # Find all PNG + PFM pairs (may be in a subdirectory)
+    png_files = sorted(extract_dir.rglob("*.png"))
+    pfm_files = sorted(extract_dir.rglob("*.pfm"))
+
+    # Build frame list by matching base names
+    pfm_map = {p.stem: p for p in pfm_files}
+    frames = []
+    for idx, png in enumerate(png_files):
+        frames.append({
+            "idx": idx,
+            "png_path": str(png),
+            "pfm_path": str(pfm_map.get(png.stem, "")),
+            "name": png.stem
+        })
+
+    zed_zip_frames[zip_name] = frames
+    logger.info(f"ZED ZIP '{zip_name}': {len(frames)} frames indexed")
+    return frames
+
+
+def get_zed_zip_frame(zip_name: str, frame_idx: int, view: str = "left") -> Optional[np.ndarray]:
+    """Get a specific view from a ZED still image ZIP frame.
+    PNG is side-by-side stereo (left|right), PFM is the depth map."""
+    frames = zed_zip_frames.get(zip_name, [])
+    if frame_idx < 0 or frame_idx >= len(frames):
+        return None
+
+    frame_info = frames[frame_idx]
+    png_path = frame_info["png_path"]
+    pfm_path = frame_info["pfm_path"]
+
+    if view == "depth" and pfm_path and os.path.exists(pfm_path):
+        depth = read_pfm(pfm_path)
+        # Normalize depth to colormap for visualization
+        valid = depth[(depth > 0) & ~np.isinf(depth) & ~np.isnan(depth)]
+        if len(valid) == 0:
+            return np.zeros((100, 100, 3), dtype=np.uint8)
+        vmin, vmax = np.percentile(valid, [2, 98])
+        depth_norm = np.clip((depth - vmin) / (vmax - vmin + 1e-6), 0, 1)
+        # Apply colormap (turbo-like: blue=near, red=far)
+        depth_colored = (plt_turbo_colormap(depth_norm) * 255).astype(np.uint8)
+        # Mark invalid pixels as black
+        invalid_mask = (depth <= 0) | np.isinf(depth) | np.isnan(depth)
+        depth_colored[invalid_mask] = 0
+        return depth_colored
+
+    # Read PNG (side-by-side stereo)
+    if not os.path.exists(png_path):
+        return None
+    img = cv2.imread(png_path)
+    if img is None:
+        return None
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    h, w = img.shape[:2]
+
+    if view == "left":
+        return img[:, :w // 2, :]
+    elif view == "right":
+        return img[:, w // 2:, :]
+    elif view == "combined":
+        return img
+    return img[:, :w // 2, :]
+
+
+def plt_turbo_colormap(x: np.ndarray) -> np.ndarray:
+    """Simple turbo-like colormap: maps 0..1 float array to RGB (0..1).
+    Blue (near) -> Cyan -> Green -> Yellow -> Red (far)."""
+    r = np.clip(1.5 - np.abs(x * 4 - 3), 0, 1)
+    g = np.clip(1.5 - np.abs(x * 4 - 2), 0, 1)
+    b = np.clip(1.5 - np.abs(x * 4 - 1), 0, 1)
+    return np.stack([r, g, b], axis=-1)
 
 
 def get_ui_html():
@@ -705,16 +827,17 @@ def get_ui_html():
                 <h2>📁 Files</h2>
                 
                 <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
-                    <input type="file" id="fileInput" accept=".svo,.svo2,.bag,.db3,.mcap" onchange="uploadFile(this)">
+                    <input type="file" id="fileInput" accept=".svo,.svo2,.bag,.db3,.mcap,.zip" onchange="uploadFile(this)">
                     <p style="font-size: 1.5em;">📤</p>
-                    <p style="font-size: 0.85em;">Upload SVO or ROSBAG</p>
+                    <p style="font-size: 0.85em;">Upload SVO, ROSBAG, or ZED ZIP</p>
                 </div>
                 
                 <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; margin-bottom: 10px; font-size: 0.75em;">
                     <p style="color: #2F6BFF; margin-bottom: 5px;"><strong>📌 File Types:</strong></p>
                     <p style="color: #aaa; margin-bottom: 3px;"><strong>SVO/SVO2:</strong> ZED camera recordings (stereo video)</p>
-                    <p style="color: #aaa;"><strong>BAG/DB3/MCAP:</strong> ROS bag files (robot sensor data)</p>
-                    <p style="color: #888; margin-top: 5px; font-style: italic;">Either format works - just select any file to view</p>
+                    <p style="color: #aaa; margin-bottom: 3px;"><strong>BAG/DB3/MCAP:</strong> ROS bag files (robot sensor data)</p>
+                    <p style="color: #aaa;"><strong>ZIP:</strong> ZED still image captures (stereo PNG + PFM depth)</p>
+                    <p style="color: #888; margin-top: 5px; font-style: italic;">Select any file to view left/right/depth</p>
                 </div>
                 
                 <div id="uploadProgress" class="hidden" style="margin-bottom: 10px;">
@@ -963,17 +1086,18 @@ def get_ui_html():
                     item.className = 'file-item';
                     item.dataset.name = file.name;
                     
-                    const typeClass = file.type === 'svo' ? '' : 'rosbag';
+                    const typeClass = file.type === 'svo' ? '' : (file.type === 'zed_zip' ? 'zed-zip' : 'rosbag');
+                    const icon = file.type === 'zed_zip' ? '📷' : '📦';
                     
                     const info = document.createElement('div');
                     info.style.flex = '1';
                     info.style.cursor = 'pointer';
-                    info.innerHTML = `<div class="name">📦 ${file.name}</div><div class="meta">${formatBytes(file.size)}</div>`;
+                    info.innerHTML = `<div class="name">${icon} ${file.name}</div><div class="meta">${formatBytes(file.size)}</div>`;
                     info.onclick = () => loadFile(file.name, item);
                     
                     const badge = document.createElement('span');
                     badge.className = 'type-badge ' + typeClass;
-                    badge.textContent = file.type.toUpperCase();
+                    badge.textContent = file.type === 'zed_zip' ? 'ZED ZIP' : file.type.toUpperCase();
                     
                     const deleteBtn = document.createElement('button');
                     deleteBtn.className = 'delete-btn';
@@ -1062,10 +1186,15 @@ def get_ui_html():
                     document.getElementById('frameSlider').value = 0;
                     document.getElementById('currentFrame').textContent = 0;
                     
+                    const typeLabel = data.type === 'zed_zip' ? 'ZED Still Image ZIP' : (data.type || 'Unknown');
+                    const extraInfo = data.type === 'zed_zip' ? 
+                        `<p><strong>Stereo:</strong> ${data.has_stereo ? 'Yes (side-by-side)' : 'No'}</p>
+                         <p><strong>Depth:</strong> ${data.has_depth ? 'Yes (PFM)' : 'No'}</p>` : '';
                     document.getElementById('fileInfo').innerHTML = `
                         <p><strong>File:</strong> ${name}</p>
-                        <p><strong>Type:</strong> ${data.type || 'Unknown'}</p>
+                        <p><strong>Type:</strong> ${typeLabel}</p>
                         <p><strong>Frames:</strong> ${totalFrames}</p>
+                        ${extraInfo}
                     `;
                     
                     showLoading('Loading Video...', 'Loading first frame...', 60);
@@ -1474,7 +1603,7 @@ def get_ui_html():
         
         async function startWorkflow() {
             if (!currentFile) {
-                document.getElementById('wfStatus').textContent = 'Load an SVO file first';
+                document.getElementById('wfStatus').textContent = 'Load a file first';
                 return;
             }
             
@@ -1489,20 +1618,31 @@ def get_ui_html():
             document.getElementById('wfStartBtn').disabled = true;
             document.getElementById('wfExtractBtn').disabled = true;
             document.getElementById('wfStatus').textContent = 'Pipeline running...';
-            wfLog('Starting full pipeline: ' + datasetName + (useMcmc ? ' (MCMC)' : ''));
+            
+            // Choose endpoint based on loaded file type
+            const isZedZip = currentFile.endsWith('.zip');
+            const endpoint = isZedZip ? '/workflow/zed-zip-to-model' : '/workflow/start';
+            const pipelineLabel = isZedZip ? 'ZED ZIP stereo' : 'SVO';
+            wfLog('Starting ' + pipelineLabel + ' pipeline: ' + datasetName + (useMcmc ? ' (MCMC)' : ''));
             
             try {
-                const response = await fetch('/workflow/start', {
+                const body = isZedZip ? {
+                    dataset_name: datasetName,
+                    num_training_steps: parseInt(steps),
+                    use_mcmc: useMcmc,
+                    filter_blur: filterBlur
+                } : {
+                    dataset_name: datasetName,
+                    fps: parseFloat(fps),
+                    num_training_steps: parseInt(steps),
+                    include_depth: includeDepth,
+                    use_mcmc: useMcmc,
+                    filter_blur: filterBlur
+                };
+                const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        dataset_name: datasetName,
-                        fps: parseFloat(fps),
-                        num_training_steps: parseInt(steps),
-                        include_depth: includeDepth,
-                        use_mcmc: useMcmc,
-                        filter_blur: filterBlur
-                    })
+                    body: JSON.stringify(body)
                 });
                 const data = await response.json();
                 
@@ -1639,7 +1779,7 @@ async def list_files():
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    """Upload SVO or ROSBAG file"""
+    """Upload SVO, ROSBAG, or ZED still image ZIP file"""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename")
     
@@ -1648,29 +1788,41 @@ async def upload_file(file: UploadFile = File(...)):
         dest_dir = SVO_DIR
     elif ext in ['.bag', '.db3', '.mcap']:
         dest_dir = ROSBAG_DIR
+    elif ext == '.zip':
+        dest_dir = ZED_ZIP_DIR
     else:
         raise HTTPException(status_code=400, detail="Unsupported file type")
     
     dest_path = dest_dir / file.filename
     
+    # Stream to disk in 1MB chunks to handle large files
+    file_size = 0
     with open(dest_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+        while chunk := await file.read(1024 * 1024):
+            f.write(chunk)
+            file_size += len(chunk)
     
-    logger.info(f"Uploaded file: {file.filename} ({len(content)} bytes)")
-    return {"status": "ok", "filename": file.filename, "size": len(content)}
+    logger.info(f"Uploaded file: {file.filename} ({file_size / (1024*1024):.1f} MB)")
+    
+    # Auto-extract ZED ZIP to index frames
+    if ext == '.zip':
+        frames = load_zed_zip_frames(file.filename)
+        return {"status": "ok", "filename": file.filename, "size": file_size,
+                "type": "zed_zip", "num_frames": len(frames)}
+    
+    return {"status": "ok", "filename": file.filename, "size": file_size}
 
 
 @app.get("/load/{filename}")
 async def load_file_endpoint(filename: str):
     """Load a file for viewing"""
-    global current_file, current_frame_idx, total_frames, current_image
+    global current_file, current_file_type, current_frame_idx, total_frames, current_image, zed_zip_loaded
     
     # Find file
     file_path = None
     file_type = None
     
-    for d, t in [(SVO_DIR, "svo"), (ROSBAG_DIR, "rosbag")]:
+    for d, t in [(SVO_DIR, "svo"), (ROSBAG_DIR, "rosbag"), (ZED_ZIP_DIR, "zed_zip")]:
         p = d / filename
         if p.exists():
             file_path = str(p)
@@ -1681,10 +1833,25 @@ async def load_file_endpoint(filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     
     current_file = filename
+    current_file_type = file_type
     current_frame_idx = 0
     current_image = None
     
-    # Get frame count
+    # Handle ZED ZIP files
+    if file_type == "zed_zip":
+        frames = load_zed_zip_frames(filename)
+        total_frames = len(frames)
+        zed_zip_loaded = filename
+        return {
+            "status": "ok",
+            "filename": filename,
+            "type": "zed_zip",
+            "total_frames": total_frames,
+            "has_depth": any(f["pfm_path"] for f in frames),
+            "has_stereo": True
+        }
+    
+    # Get frame count for video files
     total_frames = 100  # Default
     if CV2_AVAILABLE:
         try:
@@ -1938,18 +2105,22 @@ async def get_frame(frame_idx: int, view: str = Query("left")):
     # Get the frame from file
     frame = None
     if current_file:
-        file_path = None
-        for d in [SVO_DIR, ROSBAG_DIR]:
-            p = d / current_file
-            if p.exists():
-                file_path = str(p)
-                break
-        
-        if file_path and CV2_AVAILABLE:
-            if file_path.endswith(('.svo', '.svo2', '.mp4', '.avi', '.mov')):
-                raw = read_raw_frame(file_path, frame_idx)
-                if raw is not None:
-                    frame = extract_view_from_frame(raw, view)
+        # Handle ZED ZIP files directly from extracted frames
+        if current_file_type == "zed_zip" and zed_zip_loaded:
+            frame = get_zed_zip_frame(zed_zip_loaded, frame_idx, view)
+        else:
+            file_path = None
+            for d in [SVO_DIR, ROSBAG_DIR]:
+                p = d / current_file
+                if p.exists():
+                    file_path = str(p)
+                    break
+            
+            if file_path and CV2_AVAILABLE:
+                if file_path.endswith(('.svo', '.svo2', '.mp4', '.avi', '.mov')):
+                    raw = read_raw_frame(file_path, frame_idx)
+                    if raw is not None:
+                        frame = extract_view_from_frame(raw, view)
     
     # Fall back to simulated frame if needed
     if frame is None:
@@ -2287,6 +2458,273 @@ async def workflow_status(workflow_id: str):
 async def workflow_list():
     """List all workflows"""
     return {"workflows": list(active_workflows.values())}
+
+
+@app.post("/workflow/zed-zip-to-model")
+async def workflow_zed_zip_to_model(request: dict, background_tasks: BackgroundTasks = None):
+    """Start full ZED ZIP -> cuVSLAM stereo -> Train pipeline.
+    Extracts stereo pairs from ZED still image ZIP and sends to cuVSLAM."""
+    if not current_file or current_file_type != "zed_zip":
+        return JSONResponse({"error": "No ZED ZIP loaded. Load a ZED ZIP first."}, status_code=400)
+
+    dataset_name = request.get("dataset_name", current_file.replace('.zip', ''))
+    num_training_steps = request.get("num_training_steps", 30000)
+    use_mcmc = request.get("use_mcmc", False)
+    filter_blur = request.get("filter_blur", False)
+
+    workflow_id = f"wf_zed_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+
+    active_workflows[workflow_id] = {
+        "workflow_id": workflow_id,
+        "status": "running",
+        "progress": 0.0,
+        "current_step": "Extracting stereo frames from ZED ZIP",
+        "dataset_name": dataset_name,
+        "num_frames": 0,
+        "use_mcmc": use_mcmc,
+        "error": None,
+        "started_at": datetime.now().isoformat()
+    }
+
+    if background_tasks:
+        background_tasks.add_task(
+            run_zed_zip_pipeline,
+            workflow_id=workflow_id,
+            zip_name=current_file,
+            dataset_name=dataset_name,
+            num_training_steps=num_training_steps,
+            use_mcmc=use_mcmc,
+            filter_blur=filter_blur
+        )
+
+    return {
+        "workflow_id": workflow_id,
+        "status": "started",
+        "message": f"ZED ZIP pipeline started. Monitor at /workflow/status/{workflow_id}"
+    }
+
+
+async def run_zed_zip_pipeline(workflow_id: str, zip_name: str, dataset_name: str,
+                                num_training_steps: int, use_mcmc: bool = False,
+                                filter_blur: bool = False):
+    """Background task: ZED ZIP -> extract stereo -> cuVSLAM -> Train pipeline"""
+    wf = active_workflows[workflow_id]
+
+    try:
+        # === Step 1: Extract stereo frames from ZED ZIP ===
+        wf["current_step"] = "Extracting stereo frames from ZED ZIP"
+        wf["progress"] = 0.05
+
+        frames = zed_zip_frames.get(zip_name, [])
+        if not frames:
+            frames = load_zed_zip_frames(zip_name)
+        if not frames:
+            raise Exception("No frames found in ZED ZIP")
+
+        # Create output directories for stereo pairs
+        output_dir = FRAME_DIR / dataset_name
+        images_dir = output_dir / "images"
+        images_right_dir = output_dir / "images_right"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        images_right_dir.mkdir(parents=True, exist_ok=True)
+
+        num_extracted = 0
+        for frame_info in frames:
+            png_path = frame_info["png_path"]
+            if not os.path.exists(png_path):
+                continue
+
+            img = cv2.imread(png_path)
+            if img is None:
+                continue
+
+            h, w = img.shape[:2]
+            # Split side-by-side stereo into left and right
+            left = img[:, :w // 2, :]
+            right = img[:, w // 2:, :]
+
+            cv2.imwrite(str(images_dir / f"frame_{num_extracted:04d}.jpg"), left,
+                        [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cv2.imwrite(str(images_right_dir / f"frame_{num_extracted:04d}.jpg"), right,
+                        [cv2.IMWRITE_JPEG_QUALITY, 95])
+            num_extracted += 1
+            wf["progress"] = min(0.18, 0.05 + (num_extracted / len(frames)) * 0.13)
+
+        wf["num_frames"] = num_extracted
+        wf["progress"] = 0.18
+        wf["current_step"] = f"Extracted {num_extracted} stereo pairs"
+        logger.info(f"[{workflow_id}] Extracted {num_extracted} stereo pairs from ZED ZIP")
+
+        if num_extracted < 3:
+            raise Exception(f"Only {num_extracted} frames extracted, need at least 3")
+
+        # Filter blurry frames if enabled
+        if filter_blur and num_extracted > 3:
+            wf["current_step"] = "Filtering blurry frames..."
+            wf["progress"] = 0.19
+            num_extracted = filter_sharp_frames(images_dir, images_right_dir, workflow_id)
+            wf["num_frames"] = num_extracted
+            wf["progress"] = 0.2
+            wf["current_step"] = f"Sharp filter: kept {num_extracted} frames"
+            logger.info(f"[{workflow_id}] After blur filter: {num_extracted} frames")
+
+        # === Step 2: Send stereo pairs to cuVSLAM service ===
+        wf["current_step"] = "Sending stereo frames to cuVSLAM"
+        wf["progress"] = 0.22
+
+        # Create a ZIP of the stereo images for upload
+        zip_path = output_dir / "stereo_images.zip"
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for img_file in sorted(images_dir.glob("*.jpg")):
+                zf.write(img_file, f"images/{img_file.name}")
+            for img_file in sorted(images_right_dir.glob("*.jpg")):
+                zf.write(img_file, f"images_right/{img_file.name}")
+
+        # ZED X camera intrinsics (HD1200 mode: 1104x1242 per eye)
+        camera_params = json.dumps({
+            "fx": 527.6, "fy": 527.6,
+            "cx": 552.0, "cy": 621.0,
+            "baseline": 0.12
+        })
+        with open(zip_path, 'rb') as f:
+            files = {
+                'files': ('stereo_images.zip', f, 'application/zip'),
+                'camera_params.json': ('camera_params.json', camera_params, 'application/json'),
+            }
+            data = {
+                'dataset_id': dataset_name,
+                'camera_model': 'PINHOLE',
+                'matcher': 'sequential',
+                'num_training_steps': str(num_training_steps),
+                'use_mcmc': 'true' if use_mcmc else 'false',
+            }
+
+            colmap_resp = requests.post(
+                f"{COLMAP_SERVICE_URL}/workflow/photos-to-model",
+                files=files,
+                data=data,
+                timeout=60
+            )
+
+        zip_path.unlink(missing_ok=True)
+
+        if colmap_resp.status_code != 200:
+            raise Exception(f"cuVSLAM service returned {colmap_resp.status_code}: {colmap_resp.text[:200]}")
+
+        colmap_data = colmap_resp.json()
+        colmap_workflow_id = colmap_data.get("workflow_id", "")
+        wf["colmap_workflow_id"] = colmap_workflow_id
+        wf["progress"] = 0.25
+        wf["current_step"] = "cuVSLAM processing started"
+        logger.info(f"[{workflow_id}] cuVSLAM workflow: {colmap_workflow_id}")
+
+        # Poll cuVSLAM status until complete
+        max_wait = 3600
+        elapsed = 0
+        while elapsed < max_wait:
+            await asyncio.sleep(10)
+            elapsed += 10
+
+            try:
+                status_resp = requests.get(
+                    f"{COLMAP_SERVICE_URL}/workflow/status/{colmap_workflow_id}",
+                    timeout=10
+                )
+                if status_resp.status_code == 200:
+                    colmap_status = status_resp.json()
+                    colmap_progress = colmap_status.get("progress", 0)
+                    colmap_step = colmap_status.get("current_step", "")
+
+                    wf["progress"] = 0.25 + colmap_progress * 0.45
+                    wf["current_step"] = f"cuVSLAM: {colmap_step}"
+
+                    if colmap_status.get("status") in ("completed", "training", "completed_colmap_only"):
+                        wf["progress"] = 0.7
+                        wf["current_step"] = "cuVSLAM complete - sparse output ready"
+                        logger.info(f"[{workflow_id}] cuVSLAM complete")
+                        break
+                    elif colmap_status.get("status") == "failed":
+                        raise Exception(f"cuVSLAM failed: {colmap_status.get('error', 'Unknown')}")
+            except requests.exceptions.ConnectionError:
+                logger.warning(f"[{workflow_id}] cuVSLAM status check failed, retrying...")
+
+        # === Step 3: Training (may already be triggered by cuVSLAM) ===
+        training_job_id = None
+        try:
+            status_resp = requests.get(
+                f"{COLMAP_SERVICE_URL}/workflow/status/{colmap_workflow_id}",
+                timeout=10
+            )
+            if status_resp.status_code == 200:
+                training_job_id = status_resp.json().get("training_job_id")
+        except Exception:
+            pass
+
+        if not training_job_id:
+            wf["current_step"] = "Starting Gaussian Splat training"
+            wf["progress"] = 0.72
+
+            train_resp = requests.post(
+                f"{TRAINING_SERVICE_URL}/train",
+                json={
+                    "dataset_id": dataset_name,
+                    "num_training_steps": num_training_steps,
+                    "output_name": f"{dataset_name}_model",
+                    "use_mcmc": use_mcmc
+                },
+                timeout=30
+            )
+
+            if train_resp.status_code == 200:
+                training_job_id = train_resp.json().get("job_id")
+            else:
+                raise Exception(f"Training service returned {train_resp.status_code}")
+
+        wf["training_job_id"] = training_job_id
+        wf["current_step"] = "Training Gaussian Splat"
+        logger.info(f"[{workflow_id}] Training job: {training_job_id}")
+
+        # Poll training status
+        elapsed = 0
+        while elapsed < max_wait:
+            await asyncio.sleep(15)
+            elapsed += 15
+
+            try:
+                train_status = requests.get(
+                    f"{TRAINING_SERVICE_URL}/jobs/{training_job_id}",
+                    timeout=30
+                )
+                if train_status.status_code == 200:
+                    tdata = train_status.json()
+                    train_progress = tdata.get("progress", 0)
+                    tstatus = tdata.get("status", "")
+
+                    wf["progress"] = 0.70 + train_progress * 0.25
+                    wf["current_step"] = f"Training: {tdata.get('message', '')}"
+
+                    if tstatus == "completed":
+                        wf["progress"] = 0.95
+                        wf["current_step"] = "Training complete"
+                        logger.info(f"[{workflow_id}] Training complete")
+                        break
+                    elif tstatus == "failed":
+                        raise Exception(f"Training failed: {tdata.get('message', 'Unknown')}")
+            except requests.exceptions.ConnectionError:
+                logger.warning(f"[{workflow_id}] Training status check failed, retrying...")
+
+        # === Complete ===
+        wf["status"] = "completed"
+        wf["progress"] = 1.0
+        wf["current_step"] = "Pipeline complete! View splat at :8085"
+        wf["completed_at"] = datetime.now().isoformat()
+        logger.info(f"[{workflow_id}] ZED ZIP pipeline complete!")
+
+    except Exception as e:
+        logger.error(f"[{workflow_id}] ZED ZIP pipeline failed: {e}")
+        wf["status"] = "failed"
+        wf["error"] = str(e)
+        wf["current_step"] = f"Failed: {str(e)}"
 
 
 async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,

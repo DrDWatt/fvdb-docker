@@ -267,11 +267,11 @@
 
         <div class="card">
             <h2>📷 Photos Workflow</h2>
-            <p style="color: #666; margin-bottom: 15px;">Upload multiple photos OR a ZIP file (20+ images recommended)</p>
+            <p style="color: #666; margin-bottom: 15px;">Upload multiple photos, a ZIP file, or a SplatKing capture export (20+ images recommended)</p>
             <form class="upload-form" id="photosForm">
                 <div class="form-group">
-                    <label>Photo Files (JPG, PNG) or ZIP File</label>
-                    <input type="file" id="photoFiles" accept="image/jpeg,image/png,.zip" multiple required>
+                    <label>Photo Files (JPG, PNG, HEIC) or ZIP File (incl. SplatKing exports)</label>
+                    <input type="file" id="photoFiles" accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif,.zip,application/zip" multiple required>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
@@ -575,6 +575,7 @@
             let imageFiles = [];
             let hasLidar = false;
             let hasZip = false;
+            let isSplatKing = false;
             let zipImageCount = 0;
             
             for (let i = 0; i < files.length; i++) {
@@ -582,8 +583,15 @@
                 const fname = f.name.toLowerCase();
                 if (fname.endsWith('.zip')) {
                     hasZip = true;
-                    // Estimate image count from ZIP size (~500KB per image average)
-                    zipImageCount = Math.round(f.size / (500 * 1024));
+                    // Detect SplatKing by filename pattern (PhotoSeries_*.zip)
+                    if (fname.includes('photoseries') || fname.includes('splatpack')) {
+                        isSplatKing = true;
+                        // SplatKing: ~2MB per image pair, estimate ultra count
+                        zipImageCount = Math.round(f.size / (2 * 1024 * 1024));
+                    } else {
+                        // Generic ZIP: ~500KB per image average
+                        zipImageCount = Math.round(f.size / (500 * 1024));
+                    }
                     if (fname.includes('lidar') || fname.includes('depth')) hasLidar = true;
                 } else if (fname.match(/\.(jpg|jpeg|png)$/)) {
                     imageFiles.push(f);
@@ -595,8 +603,9 @@
             
             const numImages = hasZip ? Math.max(zipImageCount, 20) : imageFiles.length;
             
-            // Read first image dimensions
-            let w = 1920, h = 1080;
+            // Read first image dimensions (SplatKing ultra: 4224x2376)
+            let w = isSplatKing ? 4224 : 1920;
+            let h = isSplatKing ? 2376 : 1080;
             if (imageFiles.length > 0) {
                 const dims = await new Promise((resolve) => {
                     const img = new Image();
@@ -610,24 +619,50 @@
             
             const s = suggestParams(numImages, w, h, 0, 0, hasLidar);
             
+            // SplatKing-specific overrides
+            if (isSplatKing) {
+                // SplatKing already filters quality in extraction, disable blur filter
+                s.sugBlur = false;
+                // SplatKing ultra is high-res, recommend higher steps
+                if (numImages >= 50) s.sugSteps = 30000;
+                if (numImages >= 80) s.sugSteps = 62200;
+            }
+            
             // Apply to form
             document.getElementById('photosSteps').value = s.sugSteps;
             document.getElementById('photosUseMcmc').checked = s.sugMcmc;
             document.getElementById('photosFilterBlur').checked = s.sugBlur;
             
+            // Auto-fill dataset name from ZIP filename if empty
+            if (hasZip && !document.getElementById('photosDatasetId').value) {
+                const zipName = Array.from(files).find(f => f.name.toLowerCase().endsWith('.zip'));
+                if (zipName) {
+                    document.getElementById('photosDatasetId').value = zipName.name.replace(/\.zip$/i, '');
+                }
+            }
+            
             // Show info
             const textDiv = document.getElementById('photosAnalysisText');
-            let html = '<div><b>📊 File Analysis</b></div>' +
-                '<div>' + s.resClass + ' ' + w + 'x' + h + ' | ' + numImages + ' images' +
-                (hasZip ? ' (estimated from ZIP)' : '') + '</div>';
+            let html = '<div><b>📊 File Analysis</b></div>';
+            if (isSplatKing) {
+                html += '<div style="color:#7c4dff;font-weight:600;">📱 SplatKing capture detected</div>' +
+                    '<div>' + w + 'x' + h + ' | ~' + numImages + ' image pairs (ultra + wide streams)</div>' +
+                    '<div style="color:#888;font-size:0.85em;">Quality filtering via quality_flags.csv | Camera intrinsics from EXIF metadata</div>';
+            } else {
+                html += '<div>' + s.resClass + ' ' + w + 'x' + h + ' | ' + numImages + ' images' +
+                    (hasZip ? ' (estimated from ZIP)' : '') + '</div>';
+            }
             if (s.hasLidar) html += '<div style="color:#00796b;font-weight:600;">📡 LiDAR/depth data detected in filenames</div>';
             html += '<div style="margin-top:8px;"><b>📋 Recommendations</b></div>' +
                 '<div class="rec-item">• <b>' + s.stepsLabel + '</b>: ' + s.reasons.steps + '</div>' +
                 '<div class="rec-item">• <b>MCMC OFF</b>: ' + s.reasons.mcmc + '</div>' +
-                '<div class="rec-item">• <b>Blur filter ' + (s.sugBlur ? 'ON' : 'OFF') + '</b>: ' + s.reasons.blur + '</div>';
+                '<div class="rec-item">• <b>Blur filter ' + (s.sugBlur ? 'ON' : 'OFF') + '</b>: ' +
+                (isSplatKing ? 'SplatKing provides quality_flags.csv - already filtered during extraction' : s.reasons.blur) + '</div>';
+            if (isSplatKing) html += '<div class="rec-item">• <b>📱 SplatKing</b>: Uses COLMAP monocular reconstruction with EXIF-derived camera intrinsics</div>';
             if (s.hasLidar) html += '<div class="rec-item">• <b>📡 LiDAR</b>: ' + s.reasons.lidar + '</div>';
-            if (numImages < 100) html += '<div style="margin-top:6px;color:#e67e22;font-weight:600;">⚠️ ' + numImages + ' images - recommend 100+ for best results</div>';
-            else html += '<div style="margin-top:6px;color:#00796b;font-weight:600;">✅ ' + numImages + ' images - good coverage</div>';
+            if (numImages < 50 && isSplatKing) html += '<div style="margin-top:6px;color:#e67e22;font-weight:600;">⚠️ ~' + numImages + ' images - recommend 50+ captures for best splat quality</div>';
+            else if (numImages < 100 && !isSplatKing) html += '<div style="margin-top:6px;color:#e67e22;font-weight:600;">⚠️ ' + numImages + ' images - recommend 100+ for best results</div>';
+            else html += '<div style="margin-top:6px;color:#00796b;font-weight:600;">✅ ~' + numImages + ' images - good coverage</div>';
             
             textDiv.innerHTML = html;
             document.getElementById('photosSuggestInfo').style.display = 'block';

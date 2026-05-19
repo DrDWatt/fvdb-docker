@@ -32,14 +32,16 @@ RUN pip3 install --no-cache-dir \
     aiofiles \
     pydantic \
     pillow \
+    pillow-heif \
     opencv-python-headless \
     numpy \
     scipy \
     httpx \
     sharp-frames
 
-# Copy the FastAPI service wrapper
+# Copy the FastAPI service wrapper and modules
 COPY cuvslam_service.py /app/
+COPY splatking_parser.py /app/
 
 # Create working directories
 RUN mkdir -p /app/uploads /app/processing /app/outputs /app/temp

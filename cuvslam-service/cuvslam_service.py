@@ -7,7 +7,7 @@ Processes stereo frame pairs to produce COLMAP-compatible sparse reconstruction.
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from pathlib import Path
 import logging
 import shutil
@@ -19,6 +19,7 @@ import subprocess
 import numpy as np
 from datetime import datetime
 import asyncio
+from splatking_parser import is_splatking_zip, extract_splatking_images
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -83,6 +84,52 @@ def update_workflow(workflow_id: str, updates: Dict):
 
 # Job tracking
 processing_jobs = {}
+
+# HEIC/HEIF support: register opener so PIL can read Apple HEIC images
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    HEIF_AVAILABLE = True
+    logger.info("HEIF/HEIC support available via pillow-heif")
+except ImportError:
+    HEIF_AVAILABLE = False
+    logger.warning("pillow-heif not installed — HEIC images will not be supported")
+
+
+def convert_heic_to_jpeg(image_data: bytes, output_path: Path) -> bool:
+    """Convert HEIC/HEIF image bytes to JPEG. Returns True if conversion was needed and succeeded."""
+    # Detect HEIC by 'ftypheic' or 'ftypheix' in header
+    if len(image_data) < 12:
+        return False
+    header = image_data[4:12]
+    if header[:4] not in (b'ftyp',):
+        return False
+    ftype = image_data[8:12]
+    if ftype not in (b'heic', b'heix', b'hevc', b'hevx', b'heim', b'heis', b'mif1'):
+        return False
+
+    if not HEIF_AVAILABLE:
+        logger.error(f"HEIC image detected but pillow-heif not installed: {output_path}")
+        return False
+
+    from PIL import Image
+    import io
+    img = Image.open(io.BytesIO(image_data))
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    img.save(str(output_path), 'JPEG', quality=95)
+    return True
+
+
+def save_image_as_jpeg(image_data: bytes, output_path: Path) -> bool:
+    """Save image data to JPEG, converting from HEIC if needed. Returns True on success."""
+    # Try HEIC conversion first
+    if convert_heic_to_jpeg(image_data, output_path):
+        return True
+    # Already a standard format — write directly
+    with open(output_path, "wb") as f:
+        f.write(image_data)
+    return True
 
 
 def filter_sharp_frames(images_dir: Path, images_right_dir: Path = None,
@@ -529,6 +576,176 @@ def run_cuvslam_on_frames(left_dir: Path, right_dir: Path,
     return valid_poses, num_pairs
 
 
+async def run_colmap_monocular(images_dir: Path, output_dir: Path, workflow_id: str,
+                               camera_params: dict = None) -> Tuple[int, int]:
+    """Run COLMAP monocular reconstruction for non-stereo captures (e.g., SplatKing).
+    
+    Uses the same CPU-based COLMAP pipeline as the video workflow:
+    feature extraction (use_gpu=0), matching, and incremental mapper.
+    
+    Returns (num_registered, total_images) tuple.
+    """
+    import cv2
+
+    image_files = sorted(images_dir.glob("*.jpg")) + sorted(images_dir.glob("*.png"))
+    if len(image_files) == 0:
+        raise Exception("No images found for COLMAP reconstruction")
+
+    total_images = len(image_files)
+    logger.info(f"[{workflow_id}] Running COLMAP monocular on {total_images} images")
+
+    # Read first image for dimensions
+    first_img = cv2.imread(str(image_files[0]))
+    if first_img is None:
+        raise Exception(f"Cannot read image: {image_files[0]}")
+    h, w = first_img.shape[:2]
+
+    # Setup COLMAP workspace
+    sparse_dir = output_dir / "sparse"
+    sparse_dir.mkdir(parents=True, exist_ok=True)
+    database_path = output_dir / "database.db"
+
+    # Headless environment for COLMAP (same as video workflow)
+    env = os.environ.copy()
+    env['QT_QPA_PLATFORM'] = 'offscreen'
+
+    # Build camera params for COLMAP PINHOLE model
+    params = camera_params or {}
+    fx = params.get("fx", w * 0.7)
+    fy = params.get("fy", fx)
+    cx = params.get("cx", w / 2.0)
+    cy = params.get("cy", h / 2.0)
+    camera_params_str = f"{fx},{fy},{cx},{cy}"
+
+    update_workflow(workflow_id, {
+        "current_step": f"COLMAP: Feature extraction ({total_images} images, CPU)",
+        "progress": 0.32
+    })
+
+    # Step 1: Feature extraction on CPU with known camera intrinsics
+    cmd_extract = [
+        "colmap", "feature_extractor",
+        "--database_path", str(database_path),
+        "--image_path", str(images_dir),
+        "--ImageReader.camera_model", "PINHOLE",
+        "--ImageReader.camera_params", camera_params_str,
+        "--ImageReader.single_camera", "1",
+        "--SiftExtraction.max_image_size", "2048",
+        "--SiftExtraction.max_num_features", "16384",
+        "--SiftExtraction.use_gpu", "0",
+    ]
+    result = await asyncio.to_thread(
+        subprocess.run, cmd_extract, capture_output=True, text=True, timeout=1800, env=env
+    )
+    if result.returncode != 0:
+        logger.error(f"[{workflow_id}] COLMAP feature extraction failed: {result.stderr[:500]}")
+        raise Exception(f"COLMAP feature extraction failed: {result.stderr[:200]}")
+
+    # Auto-switch to sequential matcher for large image counts (same as video workflow)
+    effective_matcher = "exhaustive"
+    if total_images > 200:
+        effective_matcher = "sequential"
+        logger.info(f"[{workflow_id}] Auto-switching to sequential matcher ({total_images} images)")
+
+    update_workflow(workflow_id, {
+        "current_step": f"COLMAP: Matching features ({effective_matcher}, CPU)",
+        "progress": 0.42
+    })
+
+    # Step 2: Feature matching on CPU
+    if effective_matcher == "exhaustive":
+        cmd_match = [
+            "colmap", "exhaustive_matcher",
+            "--database_path", str(database_path),
+            "--SiftMatching.use_gpu", "0",
+        ]
+    else:
+        cmd_match = [
+            "colmap", "sequential_matcher",
+            "--database_path", str(database_path),
+            "--SequentialMatching.overlap", "10",
+            "--SiftMatching.use_gpu", "0",
+        ]
+    result = await asyncio.to_thread(
+        subprocess.run, cmd_match, capture_output=True, text=True, timeout=7200, env=env
+    )
+    if result.returncode != 0:
+        logger.error(f"[{workflow_id}] COLMAP matching failed: {result.stderr[:500]}")
+        raise Exception(f"COLMAP matching failed: {result.stderr[:200]}")
+
+    update_workflow(workflow_id, {
+        "current_step": "COLMAP: Incremental mapping (3D reconstruction)",
+        "progress": 0.52
+    })
+
+    # Step 3: Incremental mapper
+    cmd_mapper = [
+        "colmap", "mapper",
+        "--database_path", str(database_path),
+        "--image_path", str(images_dir),
+        "--output_path", str(sparse_dir),
+        "--Mapper.ba_global_max_num_iterations", "50",
+        "--Mapper.ba_global_max_refinements", "3",
+    ]
+    result = await asyncio.to_thread(
+        subprocess.run, cmd_mapper, capture_output=True, text=True, timeout=3600, env=env
+    )
+    if result.returncode != 0:
+        logger.error(f"[{workflow_id}] COLMAP mapper failed: {result.stderr[:500]}")
+        raise Exception(f"COLMAP mapper failed: {result.stderr[:200]}")
+
+    # Find the best reconstruction (largest sub-model)
+    best_model = None
+    best_count = 0
+    for sub_dir in sorted(sparse_dir.iterdir()):
+        if sub_dir.is_dir():
+            images_file = sub_dir / "images.bin"
+            if images_file.exists():
+                size = images_file.stat().st_size
+                if size > best_count:
+                    best_count = size
+                    best_model = sub_dir
+
+    if best_model is None:
+        raise Exception("COLMAP mapper produced no reconstruction")
+
+    # Move best model to sparse/0
+    target_dir = output_dir / "sparse" / "0"
+    if best_model.name != "0":
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        shutil.move(str(best_model), str(target_dir))
+    
+    # Convert binary to text format for compatibility with training service
+    update_workflow(workflow_id, {
+        "current_step": "COLMAP: Converting model to text format",
+        "progress": 0.62
+    })
+    cmd_convert = [
+        "colmap", "model_converter",
+        "--input_path", str(target_dir),
+        "--output_path", str(target_dir),
+        "--output_type", "TXT",
+    ]
+    await asyncio.to_thread(
+        subprocess.run, cmd_convert, capture_output=True, text=True, timeout=120, env=env
+    )
+
+    # Count registered images from images.txt
+    num_registered = 0
+    images_txt = target_dir / "images.txt"
+    if images_txt.exists():
+        with open(images_txt, "r") as f:
+            for line in f:
+                if line.strip() and not line.startswith("#"):
+                    num_registered += 1
+        # images.txt has 2 lines per image (pose line + points line)
+        num_registered = num_registered // 2
+
+    logger.info(f"[{workflow_id}] COLMAP complete: {num_registered}/{total_images} images registered")
+    return num_registered, total_images
+
+
 @app.get("/")
 async def root():
     return {
@@ -700,11 +917,20 @@ async def workflow_video_to_model(
                 raise Exception(f"Feature extraction failed: {result.stderr}")
 
             processing_jobs[job_id]["progress"] = 0.5
-            processing_jobs[job_id]["message"] = "Matching features..."
             update_workflow(workflow_id, {"progress": 0.5})
 
-            # Feature matching
-            if matcher == "exhaustive":
+            # Auto-switch to sequential matcher for large frame counts.
+            # Exhaustive is O(n²) on CPU and will timeout for >200 images.
+            # Video frames are sequential, so sequential_matcher is correct and fast.
+            effective_matcher = matcher
+            if matcher == "exhaustive" and num_images > 200:
+                effective_matcher = "sequential"
+                logger.info(f"[{workflow_id}] Auto-switching from exhaustive to sequential matcher ({num_images} images)")
+
+            processing_jobs[job_id]["message"] = f"Matching features ({effective_matcher})..."
+            update_workflow(workflow_id, {"current_step": f"COLMAP: matching features ({effective_matcher})"})
+
+            if effective_matcher == "exhaustive":
                 cmd_match = [
                     "colmap", "exhaustive_matcher",
                     "--database_path", str(database_path),
@@ -718,7 +944,7 @@ async def workflow_video_to_model(
                     "--SiftMatching.use_gpu", "0"
                 ]
 
-            result = await asyncio.to_thread(subprocess.run, cmd_match, capture_output=True, text=True, timeout=1800, env=env)
+            result = await asyncio.to_thread(subprocess.run, cmd_match, capture_output=True, text=True, timeout=7200, env=env)
             if result.returncode != 0:
                 raise Exception(f"Feature matching failed: {result.stderr}")
 
@@ -798,7 +1024,7 @@ async def workflow_video_to_model(
 
             # Poll training status until complete
             if training_job_id:
-                max_wait = 3600
+                max_wait = 43200  # 12 hours max
                 elapsed = 0
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     while elapsed < max_wait:
@@ -911,6 +1137,8 @@ async def workflow_photos_to_model(
             num_right = 0
             camera_params = {}
 
+            is_splatking = False
+
             for file in files:
                 filename_lower = file.filename.lower()
 
@@ -921,46 +1149,58 @@ async def workflow_photos_to_model(
                         f.write(content)
 
                     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                        for zip_info in zip_ref.filelist:
-                            zname = zip_info.filename.lower()
-                            if not zname.endswith(('.jpg', '.jpeg', '.png')):
-                                continue
+                        # Detect SplatKing format
+                        if is_splatking_zip(zip_ref):
+                            is_splatking = True
+                            logger.info(f"[{workflow_id}] Detected SplatKing ZIP format")
+                            update_workflow(workflow_id, {
+                                "current_step": "Parsing SplatKing capture (quality filtering + metadata extraction)",
+                                "progress": 0.12
+                            })
+                            num_left, num_right, camera_params = extract_splatking_images(
+                                zip_ref, output_dir,
+                                quality_threshold=0.35,
+                                preferred_stream="ultra",
+                                workflow_id=workflow_id
+                            )
+                        else:
+                            # Standard ZIP: extract images by directory structure
+                            for zip_info in zip_ref.filelist:
+                                zname = zip_info.filename.lower()
+                                if not zname.endswith(('.jpg', '.jpeg', '.png', '.heic', '.heif')):
+                                    continue
 
-                            extracted = zip_ref.read(zip_info.filename)
+                                extracted = zip_ref.read(zip_info.filename)
 
-                            # Route based on directory in ZIP
-                            if 'right' in zip_info.filename.lower() or 'images_right' in zip_info.filename.lower():
-                                img_path = images_right_dir / f"frame_{num_right:04d}.jpg"
-                                with open(img_path, "wb") as img_f:
-                                    img_f.write(extracted)
-                                num_right += 1
-                            else:
-                                img_path = images_dir / f"frame_{num_left:04d}.jpg"
-                                with open(img_path, "wb") as img_f:
-                                    img_f.write(extracted)
-                                num_left += 1
+                                # Route based on directory in ZIP
+                                if 'right' in zip_info.filename.lower() or 'images_right' in zip_info.filename.lower():
+                                    img_path = images_right_dir / f"frame_{num_right:04d}.jpg"
+                                    save_image_as_jpeg(extracted, img_path)
+                                    num_right += 1
+                                else:
+                                    img_path = images_dir / f"frame_{num_left:04d}.jpg"
+                                    save_image_as_jpeg(extracted, img_path)
+                                    num_left += 1
 
-                        # Check for camera_params.json in ZIP
-                        try:
-                            params_data = zip_ref.read("camera_params.json")
-                            camera_params = json.loads(params_data)
-                            logger.info(f"[{workflow_id}] Loaded camera params from ZIP: {camera_params}")
-                        except (KeyError, json.JSONDecodeError):
-                            pass
+                            # Check for camera_params.json in ZIP
+                            try:
+                                params_data = zip_ref.read("camera_params.json")
+                                camera_params = json.loads(params_data)
+                                logger.info(f"[{workflow_id}] Loaded camera params from ZIP: {camera_params}")
+                            except (KeyError, json.JSONDecodeError):
+                                pass
 
                     zip_path.unlink()
 
-                elif filename_lower.endswith(('.jpg', '.jpeg', '.png')):
+                elif filename_lower.endswith(('.jpg', '.jpeg', '.png', '.heic', '.heif')):
                     content = await file.read()
                     if 'right' in file.filename.lower():
                         img_path = images_right_dir / f"frame_{num_right:04d}.jpg"
-                        with open(img_path, "wb") as f:
-                            f.write(content)
+                        save_image_as_jpeg(content, img_path)
                         num_right += 1
                     else:
                         img_path = images_dir / f"frame_{num_left:04d}.jpg"
-                        with open(img_path, "wb") as f:
-                            f.write(content)
+                        save_image_as_jpeg(content, img_path)
                         num_left += 1
 
                 elif filename_lower == 'camera_params.json':
@@ -977,7 +1217,8 @@ async def workflow_photos_to_model(
             })
 
             # Filter blurry frames using sharp-frames if enabled
-            if filter_blur.lower() == "true":
+            # Skip for SplatKing captures since quality_flags.csv was already applied during extraction
+            if filter_blur.lower() == "true" and not is_splatking:
                 update_workflow(workflow_id, {
                     "progress": 0.22,
                     "current_step": "Filtering blurry frames..."
@@ -991,52 +1232,64 @@ async def workflow_photos_to_model(
                     "progress": 0.25,
                     "current_step": f"Sharp filter: kept {num_left} frames"
                 })
+            elif is_splatking:
+                logger.info(f"[{workflow_id}] Skipping sharp-frames filter (SplatKing quality_flags already applied)")
 
             if num_left < 3:
                 raise Exception(f"Need at least 3 left images, got {num_left}")
 
-            if not CUVSLAM_AVAILABLE:
-                raise Exception("cuVSLAM library not available in this container")
-
-            if num_right == 0:
-                raise Exception(
-                    "No right stereo frames found. cuVSLAM requires stereo pairs. "
-                    "Include images_right/ directory in ZIP or files with 'right' in name."
-                )
-
-            # Run cuVSLAM
+            # Choose reconstruction method based on capture type
             job_id = f"cuvslam_{dataset_id}_{datetime.now().strftime('%H%M%S')}"
             processing_jobs[job_id] = {
                 "job_id": job_id,
                 "dataset_id": dataset_id,
                 "status": "processing",
                 "progress": 0.0,
-                "message": "Starting cuVSLAM processing",
+                "message": "Starting reconstruction",
                 "started_at": datetime.now().isoformat()
             }
             update_workflow(workflow_id, {
                 "colmap_job_id": job_id,
-                "current_step": "Running cuVSLAM reconstruction",
                 "progress": 0.3
             })
 
-            valid_poses, total_frames = run_cuvslam_on_frames(
-                images_dir, images_right_dir, output_dir,
-                workflow_id, camera_params
-            )
+            if is_splatking or num_right == 0:
+                # SplatKing captures use different focal lengths per stream (ultra vs wide),
+                # so they cannot be processed as stereo pairs. Use COLMAP monocular instead.
+                logger.info(f"[{workflow_id}] Using COLMAP monocular reconstruction "
+                            f"(splatking={is_splatking}, right_frames={num_right})")
+                update_workflow(workflow_id, {
+                    "current_step": "Running COLMAP monocular reconstruction",
+                    "progress": 0.3
+                })
+                valid_poses, total_frames = await run_colmap_monocular(
+                    images_dir, output_dir, workflow_id, camera_params
+                )
+            else:
+                # Standard stereo: use cuVSLAM
+                if not CUVSLAM_AVAILABLE:
+                    raise Exception("cuVSLAM library not available in this container")
+                update_workflow(workflow_id, {
+                    "current_step": "Running cuVSLAM stereo reconstruction",
+                    "progress": 0.3
+                })
+                valid_poses, total_frames = run_cuvslam_on_frames(
+                    images_dir, images_right_dir, output_dir,
+                    workflow_id, camera_params
+                )
 
             processing_jobs[job_id]["status"] = "completed"
             processing_jobs[job_id]["progress"] = 1.0
-            processing_jobs[job_id]["message"] = "cuVSLAM processing complete"
+            processing_jobs[job_id]["message"] = "Reconstruction complete"
             processing_jobs[job_id]["num_images"] = valid_poses
             processing_jobs[job_id]["completed_at"] = datetime.now().isoformat()
 
             update_workflow(workflow_id, {
-                "current_step": f"cuVSLAM complete ({valid_poses}/{total_frames} frames)",
+                "current_step": f"Reconstruction complete ({valid_poses}/{total_frames} frames)",
                 "progress": 0.7
             })
 
-            logger.info(f"[{workflow_id}] cuVSLAM processing complete")
+            logger.info(f"[{workflow_id}] Reconstruction complete")
 
             # Trigger training
             update_workflow(workflow_id, {
@@ -1087,7 +1340,7 @@ async def workflow_photos_to_model(
 
             # Poll training status until complete
             if training_job_id:
-                max_wait = 3600  # 1 hour max
+                max_wait = 43200  # 12 hours max
                 elapsed = 0
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     while elapsed < max_wait:
