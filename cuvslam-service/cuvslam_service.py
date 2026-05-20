@@ -85,6 +85,71 @@ def update_workflow(workflow_id: str, updates: Dict):
 # Job tracking
 processing_jobs = {}
 
+
+async def _poll_training_completion(workflow_id: str, training_job_id: str, training_url: str):
+    """Poll training service until job completes or fails, updating workflow state."""
+    import httpx
+    max_wait = 43200  # 12 hours
+    elapsed = 0
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while elapsed < max_wait:
+            await asyncio.sleep(15)
+            elapsed += 15
+            try:
+                resp = await client.get(f"{training_url}/jobs/{training_job_id}")
+                if resp.status_code == 200:
+                    tdata = resp.json()
+                    tstatus = tdata.get("status", "")
+                    tprogress = tdata.get("progress", 0)
+                    tmessage = tdata.get("message", "")
+
+                    update_workflow(workflow_id, {
+                        "progress": 0.75 + tprogress * 0.20,
+                        "current_step": f"Training: {tmessage}",
+                        "trainingDetails": {
+                            "progress": tprogress,
+                            "message": tmessage
+                        }
+                    })
+
+                    if tstatus == "completed":
+                        update_workflow(workflow_id, {
+                            "status": "completed",
+                            "progress": 1.0,
+                            "current_step": "Pipeline complete! View splat at :8085"
+                        })
+                        logger.info(f"[{workflow_id}] Training complete (poll)")
+                        return
+                    elif tstatus == "failed":
+                        update_workflow(workflow_id, {
+                            "status": "failed",
+                            "progress": 0.8,
+                            "current_step": f"Training failed: {tmessage}",
+                            "error": f"Training failed: {tmessage}"
+                        })
+                        logger.error(f"[{workflow_id}] Training failed (poll)")
+                        return
+            except Exception as e:
+                logger.warning(f"[{workflow_id}] Training poll error: {e}")
+
+    logger.warning(f"[{workflow_id}] Training poll timed out after {max_wait}s")
+
+
+@app.on_event("startup")
+async def startup_resume_training_polls():
+    """On startup, resume polling for any workflows stuck in 'training' status."""
+    training_url = os.environ.get("TRAINING_SERVICE_URL", "http://fvdb-training-gpu:8000")
+    workflows = load_workflows()
+    for wid, w in workflows.items():
+        if w.get("status") != "training":
+            continue
+        tjob = w.get("training_job_id")
+        if not tjob:
+            continue
+        logger.info(f"Resuming training poll for {wid} (job {tjob})")
+        asyncio.create_task(_poll_training_completion(wid, tjob, training_url))
+
+
 # HEIC/HEIF support: register opener so PIL can read Apple HEIC images
 try:
     import pillow_heif
@@ -1022,46 +1087,9 @@ async def workflow_video_to_model(
                         "error": f"Training failed: {str(e)}"
                     })
 
-            # Poll training status until complete
+            # Poll training status until complete (reuse shared poller)
             if training_job_id:
-                max_wait = 43200  # 12 hours max
-                elapsed = 0
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    while elapsed < max_wait:
-                        await asyncio.sleep(10)
-                        elapsed += 10
-
-                        try:
-                            resp = await client.get(
-                                f"{training_url}/jobs/{training_job_id}"
-                            )
-                            if resp.status_code == 200:
-                                tdata = resp.json()
-                                tstatus = tdata.get("status", "")
-                                tprogress = tdata.get("progress", 0)
-                                tmessage = tdata.get("message", "")
-
-                                update_workflow(workflow_id, {
-                                    "progress": 0.75 + tprogress * 0.20,
-                                    "current_step": f"Training: {tmessage}",
-                                    "trainingDetails": {
-                                        "progress": tprogress,
-                                        "message": tmessage
-                                    }
-                                })
-
-                                if tstatus == "completed":
-                                    update_workflow(workflow_id, {
-                                        "status": "completed",
-                                        "progress": 1.0,
-                                        "current_step": "Pipeline complete! View splat at :8085"
-                                    })
-                                    logger.info(f"[{workflow_id}] Training complete")
-                                    break
-                                elif tstatus == "failed":
-                                    raise Exception(f"Training failed: {tmessage}")
-                        except httpx.ConnectError:
-                            logger.warning(f"[{workflow_id}] Training status check failed, retrying...")
+                await _poll_training_completion(workflow_id, training_job_id, training_url)
 
         except Exception as e:
             logger.error(f"[{workflow_id}] Video workflow failed: {e}")
@@ -1338,47 +1366,9 @@ async def workflow_photos_to_model(
                         "error": f"Training failed: {str(e)}"
                     })
 
-            # Poll training status until complete
+            # Poll training status until complete (reuse shared poller)
             if training_job_id:
-                max_wait = 43200  # 12 hours max
-                elapsed = 0
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    while elapsed < max_wait:
-                        await asyncio.sleep(10)
-                        elapsed += 10
-
-                        try:
-                            resp = await client.get(
-                                f"{training_url}/jobs/{training_job_id}"
-                            )
-                            if resp.status_code == 200:
-                                tdata = resp.json()
-                                tstatus = tdata.get("status", "")
-                                tprogress = tdata.get("progress", 0)
-                                tmessage = tdata.get("message", "")
-
-                                # Map training progress (0-1) to our range (0.75-0.95)
-                                update_workflow(workflow_id, {
-                                    "progress": 0.75 + tprogress * 0.20,
-                                    "current_step": f"Training: {tmessage}",
-                                    "trainingDetails": {
-                                        "progress": tprogress,
-                                        "message": tmessage
-                                    }
-                                })
-
-                                if tstatus == "completed":
-                                    update_workflow(workflow_id, {
-                                        "status": "completed",
-                                        "progress": 1.0,
-                                        "current_step": "Pipeline complete! View splat at :8085"
-                                    })
-                                    logger.info(f"[{workflow_id}] Training complete")
-                                    break
-                                elif tstatus == "failed":
-                                    raise Exception(f"Training failed: {tmessage}")
-                        except httpx.ConnectError:
-                            logger.warning(f"[{workflow_id}] Training status check failed, retrying...")
+                await _poll_training_completion(workflow_id, training_job_id, training_url)
 
         except Exception as e:
             logger.error(f"[{workflow_id}] Workflow failed: {e}")
