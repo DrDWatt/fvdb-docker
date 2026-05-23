@@ -34,6 +34,7 @@ WORKDIR /app
 
 # Copy service code
 COPY colmap_service.py /app/
+COPY splatking_parser.py /app/
 COPY process_colmap.py /app/
 
 # Create directories

@@ -445,13 +445,13 @@
             }
             
             // Training steps based on resolution, frame count, and Gaussian cap.
-            // HD2K images (>1920px) are capped at 1.5M Gaussians to prevent CUDA
-            // rasterizer int32 overflow. With fewer Gaussians, the model converges
-            // faster — 30K-40K steps is sufficient for crisp results.
+            // 4K+ images (>3840px) are capped at 900K Gaussians to prevent CUDA
+            // rasterizer int32 overflow. HD images (>1920px) capped at 1.5M.
+            // With Gaussian cap, model converges by 25-30K steps empirically.
             const isHighRes = resClass === 'HD2K';
             if (isHighRes) {
-                // Gaussian cap (1.5M) means model converges faster
-                sugSteps = estFrames >= 80 ? 40000 : 30000;
+                // Gaussian cap means model converges faster — 30K sufficient
+                sugSteps = 30000;
             } else if (estFrames > 80 || resClass === 'HD1080') {
                 sugSteps = 30000;
             } else if (estFrames < 30) {
@@ -465,7 +465,7 @@
                 sugSteps = Math.max(sugSteps, 30000);
             }
             
-            const stepsLabel = sugSteps >= 40000 ? '40K (Best)' : sugSteps >= 30000 ? '30K (Good)' : '7K (Quick)';
+            const stepsLabel = sugSteps >= 30000 ? '30K (Best)' : '7K (Quick)';
             
             // Build reasoning
             const reasons = {};
@@ -473,7 +473,7 @@
                 reasons.fps = `At ${videoFps.toFixed(0)} FPS source over ${duration.toFixed(1)}s, extracting at ${sugFps} FPS yields ~${estFrames} frames (min ~100 recommended)`;
             }
             reasons.steps = isHighRes
-                ? `${stepsLabel} for ${resClass} ${width}x${height} — Gaussians capped at 1.5M for high-res, model converges faster`
+                ? `${stepsLabel} for ${resClass} ${width}x${height} — Gaussians capped at 900K for 4K+; converges by 25-30K steps`
                 : `${stepsLabel} for ${resClass} ${width}x${height} with ${estFrames} ${isVideo ? 'extracted' : ''} frames`;
             reasons.mcmc = 'Standard training recommended - allows Gaussians to grow freely for maximum crispness';
             reasons.blur = estFrames > 30 ? 'Filtering removes blurry frames for crisper Gaussian Splat results' : 'Few frames - keep all to ensure sufficient coverage';
@@ -623,9 +623,9 @@
             if (isSplatKing) {
                 // SplatKing already filters quality in extraction, disable blur filter
                 s.sugBlur = false;
-                // SplatKing ultra is high-res, recommend higher steps
+                // SplatKing ultra is 4K+ (4224x2376): Gaussian cap at 900K means
+                // model converges by 25-30K steps. No benefit beyond 30K.
                 if (numImages >= 50) s.sugSteps = 30000;
-                if (numImages >= 80) s.sugSteps = 62200;
             }
             
             // Apply to form

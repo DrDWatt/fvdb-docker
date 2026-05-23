@@ -18,6 +18,7 @@ services:
       - ./colmap-data/temp:/app/temp
       # Mount service code for live updates
       - ./cuvslam-service/cuvslam_service.py:/app/cuvslam_service.py:ro
+      - ./cuvslam-service/splatking_parser.py:/app/splatking_parser.py:ro
     deploy:
       resources:
         reservations:
@@ -29,6 +30,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - TRAINING_SERVICE_URL=http://fvdb-training-gpu:8000
+      - QT_QPA_PLATFORM=offscreen
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8003/health"]

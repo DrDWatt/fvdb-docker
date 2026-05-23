@@ -351,6 +351,192 @@ def pose_to_colmap_qtvec(pose):
     return quat_wxyz, t_c2w
 
 
+def read_pfm(path: Path) -> np.ndarray:
+    """Read a PFM (Portable Float Map) depth file.
+    
+    Returns depth as a 2D float32 numpy array.
+    """
+    with open(path, 'rb') as f:
+        header = f.readline().strip()
+        dims = f.readline().strip().split()
+        w, h = int(dims[0]), int(dims[1])
+        scale = float(f.readline().strip())
+        data = np.frombuffer(f.read(), dtype=np.float32).reshape(h, w)
+        if scale < 0:
+            data = np.flipud(data)
+    return data
+
+
+def generate_stereo_depth_points(left_dir: Path, right_dir: Path,
+                                 image_names: List[str], poses: List,
+                                 fx: float, fy: float, cx: float, cy: float,
+                                 baseline: float = 0.12,
+                                 depth_dir: Path = None,
+                                 max_points_per_image: int = 500,
+                                 sample_stride: int = 3):
+    """Generate dense 3D points from stereo depth.
+    
+    Uses PFM depth maps from ZED camera if available (depth_dir), otherwise
+    falls back to computing disparity from left/right image pairs via StereoSGBM.
+    
+    PFM depth maps from ZED provide far superior depth (99%+ valid pixels, real
+    metric depth) compared to computed stereo disparity.
+    
+    Args:
+        left_dir: Path to left images
+        right_dir: Path to right images  
+        image_names: List of image filenames
+        poses: List of camera poses (world_from_rig)
+        fx, fy, cx, cy: Camera intrinsics
+        baseline: Stereo baseline in meters (used for StereoSGBM fallback)
+        depth_dir: Path to PFM depth maps (if available from ZED)
+        max_points_per_image: Max 3D points to sample per frame
+        sample_stride: Only process every Nth frame to manage point count
+        
+    Returns:
+        points3d: dict of {point3d_id: (X, Y, Z, R, G, B, error, [(image_id, pt2d_idx)])}
+        image_points2d: dict of {image_id: [(x, y, point3d_id), ...]}
+    """
+    import cv2
+    from scipy.spatial.transform import Rotation
+
+    points3d = {}
+    image_points2d = {}
+    point3d_id = 1
+
+    # Check if PFM depth maps are available
+    has_pfm_depth = (depth_dir is not None and depth_dir.exists() and
+                     len(list(depth_dir.glob("*.pfm"))) > 0)
+
+    # Build list of valid frames
+    valid_frames = []
+    for i, (name, pose) in enumerate(zip(image_names, poses)):
+        if pose is None:
+            continue
+        left_path = left_dir / name
+        if not left_path.exists():
+            continue
+
+        if has_pfm_depth:
+            # Match PFM by frame number
+            pfm_name = name.rsplit('.', 1)[0] + '.pfm'
+            pfm_path = depth_dir / pfm_name
+            if pfm_path.exists():
+                valid_frames.append((i + 1, pose, left_path, pfm_path))
+        elif right_dir is not None and right_dir.exists():
+            right_path = right_dir / name
+            if right_path.exists():
+                valid_frames.append((i + 1, pose, left_path, right_path))
+
+    if len(valid_frames) == 0:
+        logger.warning("No valid frames for depth point generation")
+        return {}, {}
+
+    # Configure StereoSGBM as fallback (only if no PFM depth)
+    stereo = None
+    if not has_pfm_depth:
+        stereo = cv2.StereoSGBM_create(
+            minDisparity=0,
+            numDisparities=128,
+            blockSize=5,
+            P1=8 * 3 * 5**2,
+            P2=32 * 3 * 5**2,
+            disp12MaxDiff=1,
+            uniquenessRatio=10,
+            speckleWindowSize=100,
+            speckleRange=32
+        )
+
+    frames_to_process = valid_frames[::sample_stride]
+    logger.info(f"Generating depth points from {len(frames_to_process)} frames "
+                f"(stride={sample_stride}, {len(valid_frames)} total valid, "
+                f"source={'PFM depth maps' if has_pfm_depth else 'stereo disparity'})")
+
+    for img_id, pose, left_path, depth_or_right_path in frames_to_process:
+        left_img = cv2.imread(str(left_path))
+        if left_img is None:
+            continue
+
+        h_img, w_img = left_img.shape[:2]
+
+        if has_pfm_depth:
+            # Use ZED PFM depth directly (metric depth in meters)
+            depth_map = read_pfm(depth_or_right_path)
+            # PFM may be full side-by-side resolution — use left half
+            if depth_map.shape[1] > w_img:
+                depth_map = depth_map[:, :w_img]
+            # Resize depth to match left image if needed
+            if depth_map.shape[0] != h_img or depth_map.shape[1] != w_img:
+                depth_map = cv2.resize(depth_map, (w_img, h_img),
+                                       interpolation=cv2.INTER_NEAREST)
+            # Valid depth mask (ZED uses 0 or NaN/Inf for invalid)
+            valid_mask = (depth_map > 0.1) & (depth_map < 20.0) & np.isfinite(depth_map)
+        else:
+            # Compute disparity from left/right pair
+            right_img = cv2.imread(str(depth_or_right_path))
+            if right_img is None:
+                continue
+            left_gray = cv2.cvtColor(left_img, cv2.COLOR_BGR2GRAY)
+            right_gray = cv2.cvtColor(right_img, cv2.COLOR_BGR2GRAY)
+            disparity = stereo.compute(left_gray, right_gray).astype(np.float32) / 16.0
+            valid_mask = disparity > 0
+            # Convert disparity to depth
+            depth_map = np.where(valid_mask, fx * baseline / disparity, 0)
+            valid_mask = (depth_map > 0.1) & (depth_map < 20.0)
+
+        # Get valid pixel coordinates
+        ys, xs = np.where(valid_mask)
+        if len(xs) == 0:
+            continue
+
+        # Sub-sample to limit points
+        if len(xs) > max_points_per_image:
+            indices = np.random.choice(len(xs), max_points_per_image, replace=False)
+            xs = xs[indices]
+            ys = ys[indices]
+
+        # Get depths at sampled pixels
+        depths = depth_map[ys, xs]
+
+        # Back-project to camera frame
+        X_cam = (xs.astype(np.float64) - cx) * depths / fx
+        Y_cam = (ys.astype(np.float64) - cy) * depths / fy
+        Z_cam = depths
+
+        # Transform to world frame using pose (world_from_rig)
+        q_xyzw = np.array(pose.rotation)
+        t = np.array(pose.translation)
+        R_w = Rotation.from_quat(q_xyzw).as_matrix()
+
+        pts_cam = np.stack([X_cam, Y_cam, Z_cam], axis=1)  # Nx3
+        pts_world = (R_w @ pts_cam.T).T + t
+
+        # Initialize image_points2d for this image
+        if img_id not in image_points2d:
+            image_points2d[img_id] = []
+
+        # Add points
+        for j in range(len(pts_world)):
+            X, Y, Z = pts_world[j]
+            px, py = int(xs[j]), int(ys[j])
+
+            # Get color from left image
+            if 0 <= py < left_img.shape[0] and 0 <= px < left_img.shape[1]:
+                B, G, R = left_img[py, px]
+            else:
+                R, G, B = 128, 128, 128
+
+            pt2d_idx = len(image_points2d[img_id])
+            track = [(img_id, pt2d_idx)]
+            points3d[point3d_id] = (X, Y, Z, int(R), int(G), int(B), 0.5, track)
+            image_points2d[img_id].append((float(xs[j]), float(ys[j]), point3d_id))
+            point3d_id += 1
+
+    logger.info(f"Generated {len(points3d)} depth-based 3D points from "
+                f"{len(frames_to_process)} frames")
+    return points3d, image_points2d
+
+
 def triangulate_sparse_points(left_dir: Path, image_names: List[str],
                               poses: List, fx: float, fy: float,
                               cx: float, cy: float):
@@ -457,28 +643,394 @@ def triangulate_sparse_points(left_dir: Path, image_names: List[str],
     return points3d, image_points2d
 
 
+def augment_colmap_with_depth(sparse_dir: Path, images_dir: Path,
+                              depth_dir: Path, camera_params: dict,
+                              workflow_id: str = ""):
+    """Augment COLMAP sparse reconstruction with dense 3D points from PFM depth maps.
+    
+    Reads existing COLMAP images.txt to get poses and cameras.txt for intrinsics,
+    then generates depth-based 3D points from PFM files and rewrites points3D.txt.
+    """
+    import cv2
+    from scipy.spatial.transform import Rotation
+
+    # Read cameras.txt for intrinsics
+    cameras_file = sparse_dir / "cameras.txt"
+    fx, fy, cx, cy = 0, 0, 0, 0
+    with open(cameras_file) as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
+            parts = line.strip().split()
+            if len(parts) >= 8 and parts[1] == "PINHOLE":
+                fx, fy, cx, cy = float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])
+                break
+
+    if fx == 0:
+        raise Exception("Could not read camera intrinsics from cameras.txt")
+
+    # Read images.txt to get registered image poses
+    images_file = sparse_dir / "images.txt"
+    registered_images = []  # [(image_id, image_name, R_world, t_world)]
+    with open(images_file) as f:
+        lines = [l for l in f.readlines() if not l.startswith('#')]
+
+    for i in range(0, len(lines), 2):
+        parts = lines[i].strip().split()
+        if len(parts) < 9:
+            continue
+        image_id = int(parts[0])
+        qw, qx, qy, qz = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+        tx, ty, tz = float(parts[5]), float(parts[6]), float(parts[7])
+        image_name = parts[9] if len(parts) > 9 else parts[8]
+
+        # COLMAP stores world-to-camera (R, t): p_cam = R * p_world + t
+        # We need camera-to-world for back-projection
+        R_c2w = Rotation.from_quat([qx, qy, qz, qw])  # scipy uses xyzw
+        R_c2w_mat = R_c2w.inv().as_matrix()
+        t_c2w = -R_c2w_mat @ np.array([tx, ty, tz])
+
+        registered_images.append((image_id, image_name, R_c2w_mat, t_c2w))
+
+    if len(registered_images) < 3:
+        logger.warning(f"[{workflow_id}] Only {len(registered_images)} registered images, "
+                       "skipping depth augmentation")
+        return
+
+    # Generate depth points from PFM maps for registered images
+    points3d = {}
+    image_points2d = {}
+    point3d_id = 1
+    max_points_per_image = 500
+    sample_stride = max(1, len(registered_images) // 25)  # Process ~25 frames
+
+    pfm_files = sorted(depth_dir.glob("*.pfm"))
+    pfm_map = {p.stem: p for p in pfm_files}
+
+    frames_processed = 0
+    for img_id, img_name, R_c2w, t_c2w in registered_images[::sample_stride]:
+        # Find matching PFM
+        stem = img_name.rsplit('.', 1)[0]
+        pfm_path = pfm_map.get(stem)
+        if pfm_path is None:
+            continue
+
+        # Read depth and left image
+        depth_map = read_pfm(pfm_path)
+        img_path = images_dir / img_name
+        if not img_path.exists():
+            continue
+        left_img = cv2.imread(str(img_path))
+        if left_img is None:
+            continue
+
+        h_img, w_img = left_img.shape[:2]
+
+        # PFM may be full SBS resolution — use left half
+        if depth_map.shape[1] > w_img:
+            depth_map = depth_map[:, :w_img]
+        if depth_map.shape[0] != h_img or depth_map.shape[1] != w_img:
+            depth_map = cv2.resize(depth_map, (w_img, h_img),
+                                   interpolation=cv2.INTER_NEAREST)
+
+        # Valid depth mask
+        valid_mask = (depth_map > 0.1) & (depth_map < 20.0) & np.isfinite(depth_map)
+        ys, xs = np.where(valid_mask)
+        if len(xs) == 0:
+            continue
+
+        # Sub-sample
+        if len(xs) > max_points_per_image:
+            indices = np.random.choice(len(xs), max_points_per_image, replace=False)
+            xs = xs[indices]
+            ys = ys[indices]
+
+        depths = depth_map[ys, xs]
+
+        # Back-project to camera frame then to world
+        X_cam = (xs.astype(np.float64) - cx) * depths / fx
+        Y_cam = (ys.astype(np.float64) - cy) * depths / fy
+        Z_cam = depths
+
+        pts_cam = np.stack([X_cam, Y_cam, Z_cam], axis=1)
+        pts_world = (R_c2w @ pts_cam.T).T + t_c2w
+
+        if img_id not in image_points2d:
+            image_points2d[img_id] = []
+
+        for j in range(len(pts_world)):
+            X, Y, Z = pts_world[j]
+            px, py = int(xs[j]), int(ys[j])
+            if 0 <= py < left_img.shape[0] and 0 <= px < left_img.shape[1]:
+                B, G, R = left_img[py, px]
+            else:
+                R, G, B = 128, 128, 128
+
+            pt2d_idx = len(image_points2d[img_id])
+            track = [(img_id, pt2d_idx)]
+            points3d[point3d_id] = (X, Y, Z, int(R), int(G), int(B), 0.5, track)
+            image_points2d[img_id].append((float(xs[j]), float(ys[j]), point3d_id))
+            point3d_id += 1
+
+        frames_processed += 1
+
+    if len(points3d) == 0:
+        logger.warning(f"[{workflow_id}] No depth points generated")
+        return
+
+    # Rewrite points3D.txt with augmented points (keep existing + add new)
+    existing_points = {}
+    points3d_file = sparse_dir / "points3D.txt"
+    if points3d_file.exists():
+        with open(points3d_file) as f:
+            for line in f:
+                if line.startswith('#'):
+                    continue
+                parts = line.strip().split()
+                if len(parts) >= 8:
+                    pid = int(parts[0])
+                    existing_points[pid] = line.strip()
+
+    # Write merged points (existing + depth-augmented)
+    offset = max(existing_points.keys()) if existing_points else 0
+    with open(points3d_file, "w") as f:
+        f.write("# 3D point list with one line of data per point:\n")
+        f.write("#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n")
+        total_points = len(existing_points) + len(points3d)
+        f.write(f"# Number of points: {total_points}\n")
+        # Write existing
+        for line in existing_points.values():
+            f.write(line + "\n")
+        # Write new depth points
+        for pid, (X, Y, Z, R, G, B, err, track) in points3d.items():
+            new_pid = pid + offset
+            track_str = " ".join(f"{tid} {tidx}" for tid, tidx in track)
+            f.write(f"{new_pid} {X:.6f} {Y:.6f} {Z:.6f} {R} {G} {B} {err:.4f} {track_str}\n")
+
+    logger.info(f"[{workflow_id}] Augmented COLMAP with {len(points3d)} depth points "
+                f"from {frames_processed} frames (total: {total_points})")
+
+
+def write_depth_only_reconstruction(images_dir: Path, depth_dir: Path,
+                                     output_dir: Path, camera_params: dict,
+                                     workflow_id: str = "") -> Tuple[int, int]:
+    """Fallback reconstruction when COLMAP fails but PFM depth maps are available.
+    
+    Assigns each image a unique pose spaced along a line (simulating a forward-facing
+    capture), then generates dense 3D points from depth maps. This ensures training
+    always has multiple unique viewpoints with proper initialization.
+    
+    Returns (num_registered, total_images).
+    """
+    import cv2
+    from scipy.spatial.transform import Rotation
+
+    all_image_files = sorted(images_dir.glob("*.jpg"))
+    if not all_image_files:
+        raise Exception("No images found for depth-only reconstruction")
+
+    pfm_files = sorted(depth_dir.glob("*.pfm"))
+    pfm_map = {p.stem: p for p in pfm_files}
+
+    # Only include images that have a matching PFM depth file.
+    # The COLMAP text parser uses iter(readline, "") which stops on the first
+    # empty line — so every image MUST have 2D observations (no empty lines).
+    image_files = [f for f in all_image_files if f.stem in pfm_map]
+    if not image_files:
+        # Fallback: use all images if PFM stems don't match
+        image_files = all_image_files
+
+    total_images = len(image_files)
+    params = camera_params or {}
+
+    # Read first image for dimensions
+    first_img = cv2.imread(str(image_files[0]))
+    h, w = first_img.shape[:2]
+    fx = params.get("fx", w * 0.7)
+    fy = params.get("fy", fx)
+    cx = params.get("cx", w / 2.0)
+    cy = params.get("cy", h / 2.0)
+
+    # Generate synthetic poses: cameras spaced along an arc
+    # Each camera is offset by ~0.05m and slightly rotated
+    sparse_dir = output_dir / "sparse" / "0"
+    sparse_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write cameras.txt
+    with open(sparse_dir / "cameras.txt", "w") as f:
+        f.write("# Camera list with one line of data per camera:\n")
+        f.write("#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
+        f.write(f"1 PINHOLE {w} {h} {fx} {fy} {cx} {cy}\n")
+
+    # Generate synthetic poses for all images
+    image_poses = []  # [(image_id, name, qw, qx, qy, qz, tx, ty, tz)]
+    for idx, img_file in enumerate(image_files):
+        angle = (idx - total_images / 2) * 0.02  # Small yaw variation
+        tx = idx * 0.05  # 5cm spacing along X
+
+        rot = Rotation.from_euler('y', angle)
+        quat_xyzw = rot.as_quat()
+        qw_v, qx_v, qy_v, qz_v = quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]
+
+        image_poses.append((idx + 1, img_file.name, qw_v, qx_v, qy_v, qz_v, tx, 0.0, 0.0))
+
+    # Generate 3D points from depth maps and track 2D observations per image.
+    # Every image MUST have at least one 2D observation, otherwise the COLMAP text
+    # parser stops reading (it uses iter(readline, "") which halts on empty lines).
+    points3d = {}
+    image_points2d = {pose[0]: [] for pose in image_poses}  # {image_id: [(x, y, point3d_id)]}
+    point3d_id = 1
+    max_points_per_image = 200
+
+    for idx in range(total_images):
+        img_file = image_files[idx]
+        stem = img_file.stem
+        pfm_path = pfm_map.get(stem)
+        if pfm_path is None:
+            continue
+
+        depth_map = read_pfm(pfm_path)
+        left_img = cv2.imread(str(img_file))
+        if left_img is None:
+            continue
+
+        h_img, w_img = left_img.shape[:2]
+        if depth_map.shape[1] > w_img:
+            depth_map = depth_map[:, :w_img]
+        if depth_map.shape[0] != h_img or depth_map.shape[1] != w_img:
+            depth_map = cv2.resize(depth_map, (w_img, h_img),
+                                   interpolation=cv2.INTER_NEAREST)
+
+        valid_mask = (depth_map > 0.1) & (depth_map < 20.0) & np.isfinite(depth_map)
+        ys, xs = np.where(valid_mask)
+        if len(xs) == 0:
+            continue
+
+        if len(xs) > max_points_per_image:
+            indices = np.random.choice(len(xs), max_points_per_image, replace=False)
+            xs = xs[indices]
+            ys = ys[indices]
+
+        depths = depth_map[ys, xs]
+        image_id = idx + 1
+
+        # Synthetic pose for this frame
+        angle = (idx - total_images / 2) * 0.02
+        tx_cam = idx * 0.05
+        rot = Rotation.from_euler('y', angle)
+        R_mat = rot.as_matrix()
+        t_vec = np.array([tx_cam, 0.0, 0.0])
+
+        # Back-project to camera frame then to world
+        X_cam = (xs.astype(np.float64) - cx) * depths / fx
+        Y_cam = (ys.astype(np.float64) - cy) * depths / fy
+        Z_cam = depths
+        pts_cam = np.stack([X_cam, Y_cam, Z_cam], axis=1)
+
+        # Camera-to-world transform (inverse of stored w2c)
+        R_c2w = R_mat.T
+        t_c2w = -R_c2w @ t_vec
+        pts_world = (R_c2w @ pts_cam.T).T + t_c2w
+
+        for j in range(len(pts_world)):
+            X, Y, Z = pts_world[j]
+            px, py = int(xs[j]), int(ys[j])
+            B, G, R_val = left_img[py, px]
+
+            pt2d_idx = len(image_points2d[image_id])
+            points3d[point3d_id] = (
+                X, Y, Z, int(R_val), int(G), int(B), 0.5,
+                [(image_id, pt2d_idx)]
+            )
+            image_points2d[image_id].append((float(xs[j]), float(ys[j]), point3d_id))
+            point3d_id += 1
+
+    # Write images.txt with 2D point observations.
+    # CRITICAL: The COLMAP text parser uses iter(readline, "") which stops on the
+    # first empty line. Only include images that have at least one 2D observation.
+    valid_poses = [(p, image_points2d.get(p[0], [])) for p in image_poses]
+    valid_poses = [(p, pts) for p, pts in valid_poses if pts]
+
+    with open(sparse_dir / "images.txt", "w") as f:
+        f.write("# Image list with two lines of data per image:\n")
+        f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
+        for (image_id, name, qw_v, qx_v, qy_v, qz_v, tx_v, ty_v, tz_v), pts2d in valid_poses:
+            f.write(f"{image_id} {qw_v:.10f} {qx_v:.10f} {qy_v:.10f} {qz_v:.10f} "
+                    f"{tx_v:.10f} {ty_v:.10f} {tz_v:.10f} 1 {name}\n")
+            pts2d_str = " ".join(
+                f"{x:.2f} {y:.2f} {pid}" for x, y, pid in pts2d
+            )
+            f.write(f"{pts2d_str}\n")
+
+    total_images = len(valid_poses)
+
+    # Write points3D.txt
+    with open(sparse_dir / "points3D.txt", "w") as f:
+        f.write("# 3D point list\n")
+        f.write(f"# Number of points: {len(points3d)}\n")
+        for pid, (X, Y, Z, R_val, G, B, err, track) in points3d.items():
+            track_str = " ".join(f"{tid} {tidx}" for tid, tidx in track)
+            f.write(f"{pid} {X:.6f} {Y:.6f} {Z:.6f} {R_val} {G} {B} {err:.4f} {track_str}\n")
+
+    logger.info(f"[{workflow_id}] Depth-only reconstruction: {total_images} images, "
+                f"{len(points3d)} points")
+
+    return total_images, total_images
+
+
 def write_colmap_sparse(sparse_dir: Path, image_names: List[str],
                         poses: List, fx: float, fy: float,
                         cx: float, cy: float, width: int, height: int,
-                        left_dir: Path = None):
+                        left_dir: Path = None, right_dir: Path = None,
+                        baseline: float = 0.12, depth_dir: Path = None):
     """Write COLMAP-format sparse reconstruction files (text format).
     
     Creates cameras.txt, images.txt, points3D.txt in the sparse directory.
-    If left_dir is provided, triangulates sparse 3D points from consecutive frames.
+    Uses PFM depth maps if available, otherwise stereo disparity from right images.
+    Falls back to ORB triangulation if depth methods fail or are unavailable.
     """
     sparse_dir.mkdir(parents=True, exist_ok=True)
 
-    # Triangulate sparse 3D points if image directory is available
+    # Generate 3D points — prefer PFM depth > stereo disparity > ORB triangulation
     points3d = {}
     image_points2d = {}
-    if left_dir is not None and left_dir.exists():
+
+    # Try depth-based point generation (PFM or stereo disparity)
+    has_depth_source = (depth_dir is not None and depth_dir.exists()) or \
+                       (right_dir is not None and right_dir.exists())
+    if has_depth_source and left_dir is not None:
         try:
-            points3d, image_points2d = triangulate_sparse_points(
+            points3d, image_points2d = generate_stereo_depth_points(
+                left_dir, right_dir, image_names, poses,
+                fx, fy, cx, cy, baseline=baseline,
+                depth_dir=depth_dir
+            )
+            logger.info(f"Depth-based generation produced {len(points3d)} 3D points")
+        except Exception as e:
+            logger.warning(f"Depth-based point generation failed: {e}")
+            points3d = {}
+            image_points2d = {}
+
+    # Fall back to ORB triangulation if stereo depth gave too few points
+    if len(points3d) < 1000 and left_dir is not None and left_dir.exists():
+        try:
+            orb_points, orb_img_pts = triangulate_sparse_points(
                 left_dir, image_names, poses, fx, fy, cx, cy
             )
-            logger.info(f"Triangulated {len(points3d)} sparse 3D points")
+            # Merge ORB points with any stereo points
+            if orb_points:
+                offset = max(points3d.keys()) if points3d else 0
+                for pid, pdata in orb_points.items():
+                    points3d[pid + offset] = pdata
+                for img_id, pts in orb_img_pts.items():
+                    if img_id not in image_points2d:
+                        image_points2d[img_id] = []
+                    image_points2d[img_id].extend(
+                        [(x, y, pid + offset) for x, y, pid in pts]
+                    )
+            logger.info(f"ORB triangulation added points, total: {len(points3d)}")
         except Exception as e:
-            logger.warning(f"Triangulation failed, writing empty points3D: {e}")
+            logger.warning(f"ORB triangulation failed: {e}")
 
     # cameras.txt - single pinhole camera
     with open(sparse_dir / "cameras.txt", "w") as f:
@@ -528,7 +1080,8 @@ def write_colmap_sparse(sparse_dir: Path, image_names: List[str],
 
 def run_cuvslam_on_frames(left_dir: Path, right_dir: Path,
                           output_dir: Path, workflow_id: str,
-                          camera_params: dict = None):
+                          camera_params: dict = None,
+                          depth_dir: Path = None):
     """Run cuVSLAM on extracted stereo frame pairs and produce COLMAP output."""
     import cv2
 
@@ -633,10 +1186,13 @@ def run_cuvslam_on_frames(left_dir: Path, right_dir: Path,
     if valid_poses < 3:
         raise Exception(f"Only {valid_poses} frames tracked successfully, need at least 3")
 
-    # Write COLMAP-format sparse output (with triangulated 3D points)
+    # Write COLMAP-format sparse output (with stereo depth + triangulated 3D points)
     sparse_dir = output_dir / "sparse" / "0"
+    baseline = params.get("baseline", 0.12)
     write_colmap_sparse(sparse_dir, image_names, poses,
-                        fx, fy, cx, cy, w, h, left_dir=left_dir)
+                        fx, fy, cx, cy, w, h,
+                        left_dir=left_dir, right_dir=right_dir,
+                        baseline=baseline, depth_dir=depth_dir)
 
     return valid_poses, num_pairs
 
@@ -688,6 +1244,7 @@ async def run_colmap_monocular(images_dir: Path, output_dir: Path, workflow_id: 
     })
 
     # Step 1: Feature extraction on CPU with known camera intrinsics
+    # Use high feature count and lower peak threshold for indoor/challenging scenes
     cmd_extract = [
         "colmap", "feature_extractor",
         "--database_path", str(database_path),
@@ -696,7 +1253,8 @@ async def run_colmap_monocular(images_dir: Path, output_dir: Path, workflow_id: 
         "--ImageReader.camera_params", camera_params_str,
         "--ImageReader.single_camera", "1",
         "--SiftExtraction.max_image_size", "2048",
-        "--SiftExtraction.max_num_features", "16384",
+        "--SiftExtraction.max_num_features", "32768",
+        "--SiftExtraction.peak_threshold", "0.004",
         "--SiftExtraction.use_gpu", "0",
     ]
     result = await asyncio.to_thread(
@@ -743,7 +1301,7 @@ async def run_colmap_monocular(images_dir: Path, output_dir: Path, workflow_id: 
         "progress": 0.52
     })
 
-    # Step 3: Incremental mapper
+    # Step 3: Incremental mapper with relaxed settings for challenging scenes
     cmd_mapper = [
         "colmap", "mapper",
         "--database_path", str(database_path),
@@ -751,13 +1309,23 @@ async def run_colmap_monocular(images_dir: Path, output_dir: Path, workflow_id: 
         "--output_path", str(sparse_dir),
         "--Mapper.ba_global_max_num_iterations", "50",
         "--Mapper.ba_global_max_refinements", "3",
+        "--Mapper.init_min_num_inliers", "15",
+        "--Mapper.min_num_matches", "10",
+        "--Mapper.multiple_models", "1",
     ]
     result = await asyncio.to_thread(
         subprocess.run, cmd_mapper, capture_output=True, text=True, timeout=3600, env=env
     )
     if result.returncode != 0:
+        # Log stderr for debugging
         logger.error(f"[{workflow_id}] COLMAP mapper failed: {result.stderr[:500]}")
-        raise Exception(f"COLMAP mapper failed: {result.stderr[:200]}")
+        # Check if any partial model was created
+        any_model = any(
+            (sparse_dir / d / "images.bin").exists()
+            for d in os.listdir(sparse_dir) if (sparse_dir / d).is_dir()
+        ) if sparse_dir.exists() else False
+        if not any_model:
+            raise Exception(f"COLMAP mapper failed: {result.stderr[:200]}")
 
     # Find the best reconstruction (largest sub-model)
     best_model = None
@@ -1158,6 +1726,7 @@ async def workflow_photos_to_model(
 
             images_dir = output_dir / "images"
             images_right_dir = output_dir / "images_right"
+            depth_dir = output_dir / "depth"
             images_dir.mkdir(exist_ok=True, parents=True)
             images_right_dir.mkdir(exist_ok=True, parents=True)
 
@@ -1192,23 +1761,108 @@ async def workflow_photos_to_model(
                                 workflow_id=workflow_id
                             )
                         else:
-                            # Standard ZIP: extract images by directory structure
-                            for zip_info in zip_ref.filelist:
-                                zname = zip_info.filename.lower()
-                                if not zname.endswith(('.jpg', '.jpeg', '.png', '.heic', '.heif')):
-                                    continue
+                            # Check if this is a ZED still image ZIP (PNGs + PFMs)
+                            all_names = [z.filename for z in zip_ref.filelist]
+                            has_pfm = any(n.lower().endswith('.pfm') for n in all_names)
+                            has_png = any(n.lower().endswith('.png') for n in all_names)
+                            is_zed_still = has_pfm and has_png
 
-                                extracted = zip_ref.read(zip_info.filename)
+                            if is_zed_still:
+                                # ZED still image ZIP: side-by-side PNGs + PFM depth maps
+                                import cv2 as cv2_extract
+                                depth_dir = output_dir / "depth"
+                                depth_dir.mkdir(exist_ok=True, parents=True)
 
-                                # Route based on directory in ZIP
-                                if 'right' in zip_info.filename.lower() or 'images_right' in zip_info.filename.lower():
-                                    img_path = images_right_dir / f"frame_{num_right:04d}.jpg"
-                                    save_image_as_jpeg(extracted, img_path)
+                                png_names = sorted(
+                                    [n for n in all_names if n.lower().endswith('.png')]
+                                )
+                                pfm_names = sorted(
+                                    [n for n in all_names if n.lower().endswith('.pfm')]
+                                )
+                                # Build PFM map by stem name
+                                pfm_stem_map = {}
+                                for pfm_n in pfm_names:
+                                    stem = Path(pfm_n).stem
+                                    pfm_stem_map[stem] = pfm_n
+
+                                for png_name in png_names:
+                                    stem = Path(png_name).stem
+                                    # Extract and split side-by-side PNG
+                                    png_data = zip_ref.read(png_name)
+                                    arr = np.frombuffer(png_data, np.uint8)
+                                    img = cv2_extract.imdecode(arr, cv2_extract.IMREAD_COLOR)
+                                    if img is None:
+                                        continue
+                                    h_img, w_img = img.shape[:2]
+
+                                    # Split side-by-side: left half and right half
+                                    left_img = img[:, :w_img // 2, :]
+                                    right_img = img[:, w_img // 2:, :]
+
+                                    left_path = images_dir / f"frame_{num_left:04d}.jpg"
+                                    right_path = images_right_dir / f"frame_{num_left:04d}.jpg"
+                                    cv2_extract.imwrite(str(left_path), left_img,
+                                                        [cv2_extract.IMWRITE_JPEG_QUALITY, 95])
+                                    cv2_extract.imwrite(str(right_path), right_img,
+                                                        [cv2_extract.IMWRITE_JPEG_QUALITY, 95])
+
+                                    # Extract matching PFM depth map
+                                    if stem in pfm_stem_map:
+                                        pfm_data = zip_ref.read(pfm_stem_map[stem])
+                                        pfm_path = depth_dir / f"frame_{num_left:04d}.pfm"
+                                        with open(pfm_path, 'wb') as pf:
+                                            pf.write(pfm_data)
+
+                                    num_left += 1
                                     num_right += 1
-                                else:
+
+                                logger.info(f"[{workflow_id}] ZED still image ZIP: "
+                                            f"split {num_left} side-by-side frames, "
+                                            f"{len(list(depth_dir.glob('*.pfm')))} depth maps")
+                            else:
+                                # Standard ZIP: extract images by directory structure.
+                                # Sort entries to ensure consistent ordering between
+                                # images and their corresponding PFM depth maps.
+                                depth_dir.mkdir(exist_ok=True, parents=True)
+
+                                # Separate entries by type and sort for consistent ordering
+                                left_entries = []
+                                right_entries = []
+                                pfm_entries = []
+                                for zip_info in zip_ref.filelist:
+                                    zname = zip_info.filename.lower()
+                                    if zname.endswith('.pfm') and 'depth' in zname:
+                                        pfm_entries.append(zip_info)
+                                    elif zname.endswith(('.jpg', '.jpeg', '.png', '.heic', '.heif')):
+                                        if 'right' in zname or 'images_right' in zname:
+                                            right_entries.append(zip_info)
+                                        else:
+                                            left_entries.append(zip_info)
+
+                                left_entries.sort(key=lambda z: z.filename)
+                                right_entries.sort(key=lambda z: z.filename)
+                                pfm_entries.sort(key=lambda z: z.filename)
+
+                                # Extract left images (sorted)
+                                for zip_info in left_entries:
+                                    extracted = zip_ref.read(zip_info.filename)
                                     img_path = images_dir / f"frame_{num_left:04d}.jpg"
                                     save_image_as_jpeg(extracted, img_path)
                                     num_left += 1
+
+                                # Extract right images (sorted)
+                                for zip_info in right_entries:
+                                    extracted = zip_ref.read(zip_info.filename)
+                                    img_path = images_right_dir / f"frame_{num_right:04d}.jpg"
+                                    save_image_as_jpeg(extracted, img_path)
+                                    num_right += 1
+
+                                # Extract PFM depth maps (sorted, renumbered to match)
+                                for pfm_idx, zip_info in enumerate(pfm_entries):
+                                    pfm_data = zip_ref.read(zip_info.filename)
+                                    pfm_path = depth_dir / f"frame_{pfm_idx:04d}.pfm"
+                                    with open(pfm_path, 'wb') as pf:
+                                        pf.write(pfm_data)
 
                             # Check for camera_params.json in ZIP
                             try:
@@ -1281,20 +1935,62 @@ async def workflow_photos_to_model(
                 "progress": 0.3
             })
 
-            if is_splatking or num_right == 0:
-                # SplatKing captures use different focal lengths per stream (ultra vs wide),
-                # so they cannot be processed as stereo pairs. Use COLMAP monocular instead.
+            # Determine if PFM depth maps are available (ZED still image ZIP)
+            has_pfm_depth = depth_dir.exists() and \
+                len(list(depth_dir.glob("*.pfm"))) > 0
+
+            if is_splatking or num_right == 0 or has_pfm_depth:
+                # Use COLMAP monocular for:
+                # - SplatKing (different focal lengths per stream)
+                # - No stereo right images
+                # - ZED still images (wide-baseline shots need COLMAP, not SLAM)
+                #   cuVSLAM requires sequential video frames with small inter-frame motion.
+                #   Still images from different positions need feature-based SfM.
+                reason = "splatking" if is_splatking else \
+                         "ZED still images (wide-baseline)" if has_pfm_depth else \
+                         "no right frames"
                 logger.info(f"[{workflow_id}] Using COLMAP monocular reconstruction "
-                            f"(splatking={is_splatking}, right_frames={num_right})")
+                            f"(reason={reason}, right_frames={num_right})")
                 update_workflow(workflow_id, {
-                    "current_step": "Running COLMAP monocular reconstruction",
+                    "current_step": "Running COLMAP reconstruction (feature matching)",
                     "progress": 0.3
                 })
-                valid_poses, total_frames = await run_colmap_monocular(
-                    images_dir, output_dir, workflow_id, camera_params
-                )
+
+                colmap_succeeded = False
+                try:
+                    valid_poses, total_frames = await run_colmap_monocular(
+                        images_dir, output_dir, workflow_id, camera_params
+                    )
+                    colmap_succeeded = True
+                except Exception as colmap_err:
+                    logger.warning(f"[{workflow_id}] COLMAP failed: {colmap_err}")
+
+                if colmap_succeeded and has_pfm_depth and valid_poses >= 3:
+                    # Augment COLMAP sparse points with PFM depth
+                    try:
+                        sparse_dir = output_dir / "sparse" / "0"
+                        augment_colmap_with_depth(
+                            sparse_dir, images_dir, depth_dir, camera_params,
+                            workflow_id
+                        )
+                    except Exception as e:
+                        logger.warning(f"[{workflow_id}] Depth augmentation failed: {e}")
+                elif not colmap_succeeded and has_pfm_depth:
+                    # Fallback: COLMAP failed but we have depth maps.
+                    # Generate reconstruction using depth-only with synthetic poses.
+                    logger.info(f"[{workflow_id}] Falling back to depth-only reconstruction")
+                    update_workflow(workflow_id, {
+                        "current_step": "COLMAP failed, using depth-only reconstruction",
+                        "progress": 0.5
+                    })
+                    valid_poses, total_frames = write_depth_only_reconstruction(
+                        images_dir, depth_dir, output_dir, camera_params,
+                        workflow_id
+                    )
+                elif not colmap_succeeded:
+                    raise Exception("COLMAP reconstruction failed and no depth maps available")
             else:
-                # Standard stereo: use cuVSLAM
+                # Sequential stereo video: use cuVSLAM
                 if not CUVSLAM_AVAILABLE:
                     raise Exception("cuVSLAM library not available in this container")
                 update_workflow(workflow_id, {
@@ -1303,7 +1999,8 @@ async def workflow_photos_to_model(
                 })
                 valid_poses, total_frames = run_cuvslam_on_frames(
                     images_dir, images_right_dir, output_dir,
-                    workflow_id, camera_params
+                    workflow_id, camera_params,
+                    depth_dir=None
                 )
 
             processing_jobs[job_id]["status"] = "completed"

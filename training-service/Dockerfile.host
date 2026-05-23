@@ -52,6 +52,7 @@ WORKDIR /app
 
 COPY training_service.py /app/
 COPY extract_frames.py /app/
+COPY static/ /app/static/
 
 RUN mkdir -p /app/data /app/uploads /app/outputs /app/models
 

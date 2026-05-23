@@ -60,6 +60,7 @@ WORKDIR /app
 # Copy service code
 COPY training_service.py /app/
 COPY requirements.txt /app/
+COPY static/ /app/static/
 
 # Create data directories
 RUN mkdir -p /app/data /app/uploads /app/outputs /app/models

@@ -50,6 +50,7 @@ WORKDIR /app
 
 COPY training_service.py /app/
 COPY requirements.txt /app/
+COPY static/ /app/static/
 
 RUN mkdir -p /app/data /app/uploads /app/outputs /app/models
 

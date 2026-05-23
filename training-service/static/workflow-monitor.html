@@ -318,6 +318,8 @@
                 }
             };
 
+            const TERMINAL_STATES = ['completed', 'failed', 'training_failed', 'completed_colmap_only'];
+
             const fetchStatus = async () => {
                 try {
                     const colmapRes = await fetch(`http://localhost:8003/workflow/status/${workflowId}`);
@@ -328,6 +330,13 @@
                     // Add log entry
                     const newLog = `[${new Date().toLocaleTimeString()}] ${colmapData.current_step}`;
                     setLogs(prev => [...prev.slice(-50), newLog]);
+                    
+                    // Stop polling once workflow reaches a terminal state
+                    if (TERMINAL_STATES.includes(colmapData.status)) {
+                        clearInterval(pollInterval.current);
+                        pollInterval.current = null;
+                        return;
+                    }
                     
                     // If training started, also poll training service
                     if (colmapData.training_job_id) {

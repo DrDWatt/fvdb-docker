@@ -953,8 +953,8 @@ def get_ui_html():
                         <label>Training Steps</label>
                         <select id="wfSteps">
                             <option value="7000">7K (Quick)</option>
-                            <option value="30000" selected>30K (Good)</option>
-                            <option value="62200">62K (Best)</option>
+                            <option value="30000" selected>30K (Best)</option>
+                            <option value="45000">45K (Extended)</option>
                         </select>
                     </div>
                     <div class="workflow-param">
@@ -2242,44 +2242,93 @@ async def analyze_file():
         return JSONResponse({"error": "No file loaded"}, status_code=400)
 
     file_path = None
-    for d in [SVO_DIR, ROSBAG_DIR]:
+    is_zed_zip = False
+    for d in [SVO_DIR, ROSBAG_DIR, ZED_ZIP_DIR]:
         p = d / current_file
         if p.exists():
             file_path = str(p)
+            if d == ZED_ZIP_DIR:
+                is_zed_zip = True
             break
 
     if not file_path:
         return JSONResponse({"error": "File not found on disk"}, status_code=404)
 
     try:
-        cap = cv2.VideoCapture(file_path)
-        if not cap.isOpened():
-            return JSONResponse({"error": "Cannot open file"}, status_code=500)
+        # ZED still image ZIPs: analyze from indexed frames
+        if is_zed_zip:
+            frames = zed_zip_frames.get(current_file, [])
+            if not frames:
+                frames = index_zed_zip(current_file)
+            total_frames = len(frames)
+            if total_frames == 0:
+                return JSONResponse({"error": "No frames in ZED ZIP"}, status_code=400)
 
-        video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            # Read first frame to get dimensions
+            first_frame = get_zed_zip_frame(current_file, 0, view="left")
+            if first_frame is None:
+                return JSONResponse({"error": "Cannot read ZED ZIP frame"}, status_code=500)
+            h, w = first_frame.shape[:2]
+            video_fps = 1.0  # Still images, not video
+            duration = float(total_frames)
+            is_sbs = False  # Already split by get_zed_zip_frame
+            is_tb = False
+            is_stereo = True  # ZED always stereo
+            single_w = w
+            single_h = h
 
-        # Count readable frames
-        all_frames = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            all_frames.append(frame)
-        cap.release()
+            # Sample sharpness
+            blur_scores = []
+            sample_indices = list(range(0, total_frames, max(1, total_frames // 20)))
+            for i in sample_indices:
+                f = get_zed_zip_frame(current_file, i, view="left")
+                if f is None:
+                    continue
+                gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if len(f.shape) == 3 else f
+                blur_scores.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
+        else:
+            cap = cv2.VideoCapture(file_path)
+            if not cap.isOpened():
+                return JSONResponse({"error": "Cannot open file"}, status_code=500)
 
-        total_frames = len(all_frames)
-        if total_frames == 0:
-            return JSONResponse({"error": "No readable frames"}, status_code=400)
+            video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
-        h, w = all_frames[0].shape[:2]
-        duration = total_frames / max(video_fps, 1)
+            # Count readable frames
+            all_frames = []
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                all_frames.append(frame)
+            cap.release()
 
-        # Detect stereo layout
-        is_sbs = w > h * 1.5
-        is_tb = not is_sbs and h > w
-        is_stereo = is_sbs or is_tb
-        single_w = w // 2 if is_sbs else w
-        single_h = h // 2 if is_tb else h
+            total_frames = len(all_frames)
+            if total_frames == 0:
+                return JSONResponse({"error": "No readable frames"}, status_code=400)
+
+            h, w = all_frames[0].shape[:2]
+            duration = total_frames / max(video_fps, 1)
+
+            # Detect stereo layout
+            is_sbs = w > h * 1.5
+            is_tb = not is_sbs and h > w
+            is_stereo = is_sbs or is_tb
+            single_w = w // 2 if is_sbs else w
+            single_h = h // 2 if is_tb else h
+
+            # Sample sharpness (Laplacian variance) across ~20 frames
+            blur_scores = []
+            sample_indices = list(range(0, total_frames, max(1, total_frames // 20)))
+            for i in sample_indices:
+                f = all_frames[i]
+                if is_tb:
+                    f = f[:h // 2, :, :]
+                elif is_sbs:
+                    f = f[:, :w // 2, :]
+                gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                blur_scores.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
+
+            del all_frames  # Free memory
 
         # Resolution class
         if single_w >= 2000:
@@ -2291,23 +2340,9 @@ async def analyze_file():
         else:
             res_class = "VGA"
 
-        # Sample sharpness (Laplacian variance) across ~20 frames
-        blur_scores = []
-        sample_indices = list(range(0, total_frames, max(1, total_frames // 20)))
-        for i in sample_indices:
-            f = all_frames[i]
-            if is_tb:
-                f = f[:h // 2, :, :]
-            elif is_sbs:
-                f = f[:, :w // 2, :]
-            gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
-            blur_scores.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
-
-        del all_frames  # Free memory
-
-        avg_sharpness = float(np.mean(blur_scores))
-        min_sharpness = float(np.min(blur_scores))
-        max_sharpness = float(np.max(blur_scores))
+        avg_sharpness = float(np.mean(blur_scores)) if blur_scores else 100.0
+        min_sharpness = float(np.min(blur_scores)) if blur_scores else 100.0
+        max_sharpness = float(np.max(blur_scores)) if blur_scores else 100.0
         sharpness_range = max_sharpness - min_sharpness
 
         # --- Determine optimal parameters ---
@@ -2319,11 +2354,14 @@ async def analyze_file():
         suggested_fps = max(0.5, min(suggested_fps, video_fps))
         estimated_frames = int(duration * suggested_fps)
 
-        # Training steps: based on resolution and frame count
-        if res_class == "HD2K" and estimated_frames >= 100:
-            suggested_steps = 62200
-            steps_label = "62K (Best)"
-        elif estimated_frames > 80 or res_class in ("HD2K", "HD1080"):
+        # Training steps: based on resolution and frame count.
+        # High-res (4K+) images hit int32 overflow in CUDA rasterizer above ~900K gaussians,
+        # and empirically converge by 30K steps due to the Gaussian cap limiting growth.
+        # 62K steps provides negligible improvement (<5% loss reduction after 25K).
+        if res_class == "HD2K":
+            suggested_steps = 30000
+            steps_label = "30K (Best for 4K)"
+        elif estimated_frames > 80 or res_class == "HD1080":
             suggested_steps = 30000
             steps_label = "30K (Good)"
         elif estimated_frames < 30:
@@ -2351,7 +2389,10 @@ async def analyze_file():
             f"(min ~100 frames recommended for crisp reconstruction)"
         )
         reasons["steps"] = (
-            f"{steps_label} recommended for {res_class} resolution with ~{estimated_frames} frames"
+            f"{steps_label} for {res_class} — "
+            + (f"4K+ images are Gaussian-capped at 900K; model converges by 25-30K steps"
+               if res_class == "HD2K" else
+               f"~{estimated_frames} frames, converges well at 30K steps")
         )
         reasons["depth"] = (
             "Stereo depth from ZED improves Gaussian placement accuracy"
@@ -2572,13 +2613,28 @@ async def run_zed_zip_pipeline(workflow_id: str, zip_name: str, dataset_name: st
         wf["current_step"] = "Sending stereo frames to cuVSLAM"
         wf["progress"] = 0.22
 
-        # Create a ZIP of the stereo images for upload
+        # Extract PFM depth maps from the original ZED ZIP
+        depth_dir = output_dir / "depth"
+        depth_dir.mkdir(parents=True, exist_ok=True)
+        zip_path_src = ZED_ZIP_DIR / zip_name
+        extract_dir = ZED_ZIP_DIR / zip_name.replace('.zip', '')
+        pfm_files = sorted(extract_dir.rglob("*.pfm")) if extract_dir.exists() else []
+        for idx, pfm_file in enumerate(pfm_files[:num_extracted]):
+            dest = depth_dir / f"frame_{idx:04d}.pfm"
+            if not dest.exists():
+                import shutil
+                shutil.copy2(str(pfm_file), str(dest))
+
+        # Create a ZIP of the stereo images + depth for upload
         zip_path = output_dir / "stereo_images.zip"
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for img_file in sorted(images_dir.glob("*.jpg")):
                 zf.write(img_file, f"images/{img_file.name}")
             for img_file in sorted(images_right_dir.glob("*.jpg")):
                 zf.write(img_file, f"images_right/{img_file.name}")
+            # Include PFM depth maps so colmap-processor can use them
+            for pfm_file in sorted(depth_dir.glob("*.pfm")):
+                zf.write(pfm_file, f"depth/{pfm_file.name}")
 
         # ZED X camera intrinsics (HD1200 mode: 1104x1242 per eye)
         camera_params = json.dumps({
@@ -2594,7 +2650,7 @@ async def run_zed_zip_pipeline(workflow_id: str, zip_name: str, dataset_name: st
             data = {
                 'dataset_id': dataset_name,
                 'camera_model': 'PINHOLE',
-                'matcher': 'sequential',
+                'matcher': 'exhaustive',
                 'num_training_steps': str(num_training_steps),
                 'use_mcmc': 'true' if use_mcmc else 'false',
             }
@@ -3010,10 +3066,15 @@ async def run_full_pipeline(workflow_id: str, dataset_name: str, fps: float,
 @app.delete("/file/{filename}")
 async def delete_file(filename: str):
     """Delete a file"""
-    for d in [SVO_DIR, ROSBAG_DIR]:
+    for d in [SVO_DIR, ROSBAG_DIR, ZED_ZIP_DIR]:
         p = d / filename
         if p.exists():
             p.unlink()
+            # Also remove extracted frames directory for ZED ZIPs
+            if filename.endswith('.zip'):
+                extract_dir = d / filename.replace('.zip', '')
+                if extract_dir.exists():
+                    shutil.rmtree(extract_dir)
             logger.info(f"Deleted file: {filename}")
             return {"status": "ok", "filename": filename}
     

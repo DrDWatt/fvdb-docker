@@ -133,9 +133,12 @@ def run_training(job_id: str, dataset_path: str, num_steps: int, output_name: st
         # Calculate safe Gaussian cap for high-res images to prevent int32 overflow
         # in the CUDA rasterizer's cumulative tile-Gaussian intersection counter.
         # With tile_size=16: tiles = (W/16)*(H/16). Safe limit ≈ int32_max / avg_tiles_per_gaussian.
-        # Conservative estimate: avg ~500 tiles/gaussian at high counts → cap at ~2M for large images.
+        # Empirical: 4224x2376 overflows at ~998K gaussians → cap at 900K for 4K+ images.
         max_dim = max(scene.images[0].image_size) if scene.images else 0
-        if max_dim > 1920:
+        if max_dim > 3840:
+            safe_max_gaussians = 900_000
+            logger.info(f"4K+ images ({max_dim}px max dim): capping Gaussians at {safe_max_gaussians:,}")
+        elif max_dim > 1920:
             safe_max_gaussians = 1_500_000
             logger.info(f"High-res images ({max_dim}px max dim): capping Gaussians at {safe_max_gaussians:,}")
         else:
