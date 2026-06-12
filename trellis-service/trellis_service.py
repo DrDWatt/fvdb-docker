@@ -68,6 +68,21 @@ except Exception:
     logger.warning("Static directory not found, viewer page will be embedded")
 
 
+def _ensure_alpha_channel(image: Image.Image) -> Image.Image:
+    """Ensure image sent to TRELLIS has a valid alpha channel so that
+    preprocess_image finds foreground pixels and doesn't crash.
+    If the image has no alpha or all-zero alpha, add a full-white alpha."""
+    if image.mode != 'RGBA':
+        image = image.convert('RGBA')
+    alpha = np.array(image)[:, :, 3]
+    if np.all(alpha == 0):
+        # All transparent — make fully opaque so rembg can segment it
+        arr = np.array(image)
+        arr[:, :, 3] = 255
+        image = Image.fromarray(arr)
+    return image
+
+
 def load_pipeline():
     """Load the TRELLIS.2 pipeline (lazy, on first use)."""
     global pipeline, pipeline_loaded
@@ -124,7 +139,21 @@ async def run_reconstruction(job_id: str, image: Image.Image):
 
         def _generate():
             import o_voxel
-            mesh = pipeline.run(image)[0]
+            # Ensure valid alpha so TRELLIS preprocess_image can find foreground
+            input_img = _ensure_alpha_channel(image)
+            try:
+                mesh = pipeline.run(input_img)[0]
+            except ValueError as e:
+                if "zero-size array" in str(e):
+                    # rembg failed to segment — retry with fully opaque alpha
+                    # so TRELLIS skips rembg and uses the image directly
+                    logger.warning(f"Background removal failed, retrying with opaque alpha")
+                    arr = np.array(input_img.convert('RGBA'))
+                    arr[:, :, 3] = 255
+                    opaque_img = Image.fromarray(arr)
+                    mesh = pipeline.run(opaque_img)[0]
+                else:
+                    raise
             mesh.simplify(16777216)  # nvdiffrast limit
             return mesh
 
