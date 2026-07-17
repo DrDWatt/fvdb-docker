@@ -282,9 +282,56 @@ services:
     networks:
       - workflow-net
 
+  # SuperSplat Viewer (WebGPU viewer + SAM3 + GARField + TRELLIS)
+  supersplat-viewer:
+    build:
+      context: ./supersplat-viewer
+      dockerfile: Dockerfile
+      args:
+        - HF_TOKEN=${HF_TOKEN:-}
+    image: supersplat-viewer:latest
+    container_name: supersplat-viewer
+    runtime: nvidia
+    ports:
+      - "8086:8086"
+    volumes:
+      - ./models:/app/splat-models
+      - ./supersplat-viewer/supersplat_service.py:/app/supersplat_service.py:ro
+      - ./cache/sam3:/app/models/sam3
+      - ./outputs:/app/outputs
+      - ./cache/supersplat:/app/cache
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CUDA_VISIBLE_DEVICES=0
+      - VIEWER_PORT=8086
+      - MODEL_DIR=/app/splat-models
+      - SAM3_MODEL_DIR=/app/models/sam3
+      - TRELLIS_URL=http://trellis-reconstructor:8013
+      - HF_TOKEN=${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    networks:
+      - workflow-net
+      - fvdb-workflow-net
+
 networks:
   workflow-net:
     driver: bridge
+  fvdb-workflow-net:
+    external: true
 
 volumes:
   colmap-data:
