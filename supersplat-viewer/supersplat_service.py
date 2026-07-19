@@ -288,6 +288,67 @@ def build_viewer_html() -> str:
             height: 100%;
             pointer-events: none;
             z-index: 500;
+            opacity: 0.7;
+            transition: opacity 0.3s ease;
+        }}
+        /* Popup modal for 3D viewer */
+        .popup-overlay {{
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 9000;
+            background: rgba(0,0,0,0.75);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .popup-overlay.hidden {{ display: none; }}
+        .popup-container {{
+            position: relative;
+            width: 80vw;
+            height: 80vh;
+            max-width: 1200px;
+            max-height: 800px;
+            background: #0a0a14;
+            border: 1px solid #333;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+        }}
+        .popup-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 16px;
+            background: #111;
+            border-bottom: 1px solid #333;
+        }}
+        .popup-header h3 {{
+            margin: 0;
+            font-size: 14px;
+            color: #17a2b8;
+        }}
+        .popup-close {{
+            background: #dc3545;
+            border: none;
+            color: white;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .popup-close:hover {{ background: #c82333; }}
+        .popup-body {{
+            width: 100%;
+            height: calc(100% - 44px);
+        }}
+        .popup-body iframe {{
+            width: 100%;
+            height: 100%;
+            border: none;
         }}
         #extraction-list {{
             max-height: 120px;
@@ -369,7 +430,21 @@ def build_viewer_html() -> str:
             <div class="load-text" id="loading-text">Loading model...</div>
             <div class="load-bar-bg"><div class="load-bar-fill" id="loading-bar"></div></div>
         </div>
+        <img id="mask-overlay" class="seg-mask-overlay" style="display:none;" />
         <iframe id="viewer-iframe" src="/viewer/index.html?content=/models/{first_model}&noui&webgl"></iframe>
+    </div>
+
+    <!-- Popup modal for 3D viewer -->
+    <div id="popup-modal" class="popup-overlay hidden" onclick="if(event.target===this)closePopup()">
+        <div class="popup-container">
+            <div class="popup-header">
+                <h3 id="popup-title">3D Viewer</h3>
+                <button class="popup-close" onclick="closePopup()">&times;</button>
+            </div>
+            <div class="popup-body">
+                <iframe id="popup-iframe" src="about:blank"></iframe>
+            </div>
+        </div>
     </div>
 
     <!-- Toggle panel button -->
@@ -520,6 +595,7 @@ def build_viewer_html() -> str:
 
             // Show loading overlay immediately
             showLoadingOverlay(model);
+            hideMaskOverlay();
 
             // Notify backend of model switch (non-blocking)
             fetch('/load_model?model=' + model);
@@ -647,6 +723,10 @@ def build_viewer_html() -> str:
                     segMasks = data;
                     statusEl.textContent = '✅ Found ' + data.num_masks + ' object(s): "' + prompt + '"';
                     document.getElementById('extract-btn').disabled = false;
+                    // Show mask overlay on the viewer
+                    if (data.overlay) {{
+                        showMaskOverlay(data.overlay);
+                    }}
                 }} else {{
                     statusEl.textContent = '❌ ' + (data.error || 'Segmentation failed');
                 }}
@@ -655,12 +735,44 @@ def build_viewer_html() -> str:
             }}
         }}
 
+        function showMaskOverlay(overlayBase64) {{
+            const overlayEl = document.getElementById('mask-overlay');
+            overlayEl.src = 'data:image/png;base64,' + overlayBase64;
+            overlayEl.style.display = 'block';
+        }}
+
+        function hideMaskOverlay() {{
+            const overlayEl = document.getElementById('mask-overlay');
+            overlayEl.style.display = 'none';
+            overlayEl.src = '';
+        }}
+
         function clearSegmentation() {{
             segMasks = null;
+            hideMaskOverlay();
             document.getElementById('seg-status').textContent = 'Click on viewer to segment objects with text or click';
             document.getElementById('extract-btn').disabled = true;
             fetch('/segment/clear', {{ method: 'POST' }}).catch(() => {{}});
         }}
+
+        // ===================================================================
+        // Popup modal helpers
+        // ===================================================================
+        function openPopup(title, url) {{
+            document.getElementById('popup-title').textContent = title;
+            document.getElementById('popup-iframe').src = url;
+            document.getElementById('popup-modal').classList.remove('hidden');
+        }}
+
+        function closePopup() {{
+            document.getElementById('popup-modal').classList.add('hidden');
+            document.getElementById('popup-iframe').src = 'about:blank';
+        }}
+
+        // Escape key closes popup
+        document.addEventListener('keydown', (e) => {{
+            if (e.key === 'Escape') closePopup();
+        }});
 
         // ===================================================================
         // 3D Extraction (GARField-style)
@@ -701,7 +813,10 @@ def build_viewer_html() -> str:
             item.className = 'ext-item';
             item.innerHTML = `
                 <span>${{data.job_id}} (${{data.num_gaussians}} gs)</span>
-                <a href="/garfield/download/${{data.job_id}}" style="color:#17a2b8;font-size:11px;">⬇️ PLY</a>
+                <span>
+                    <a href="javascript:void(0)" onclick="openPopup('3D Extraction: ${{data.job_id}}', '/viewer/index.html?content=/garfield/download/${{data.job_id}}&noui&webgl')" style="color:#28a745;font-size:11px;margin-right:6px;">👁️ View</a>
+                    <a href="/garfield/download/${{data.job_id}}" style="color:#17a2b8;font-size:11px;">⬇️ PLY</a>
+                </span>
             `;
             list.appendChild(item);
         }}
@@ -735,9 +850,10 @@ def build_viewer_html() -> str:
                 }});
                 const data = await resp.json();
                 if (data.status === 'ok' || data.status === 'started') {{
-                    statusEl.textContent = '✅ Reconstruction started! Job: ' + data.job_id;
+                    statusEl.textContent = '✅ Reconstruction complete! Job: ' + data.job_id;
                     if (data.viewer_url) {{
-                        statusEl.innerHTML += ` <a href="${{data.viewer_url}}" target="_blank" style="color:#6c63ff;">View 3D →</a>`;
+                        statusEl.innerHTML += ` <a href="javascript:void(0)" onclick="openPopup('TRELLIS Reconstruction: ${{data.job_id}}', '${{data.viewer_url}}')" style="color:#6c63ff;">👁️ View 3D</a>`;
+                        statusEl.innerHTML += ` <a href="${{data.viewer_url}}" target="_blank" style="color:#888;font-size:10px;margin-left:6px;">↗ new tab</a>`;
                     }}
                 }} else {{
                     statusEl.textContent = '❌ ' + (data.error || 'Reconstruction failed');
@@ -919,23 +1035,56 @@ async def segment_with_text(body: dict):
         boxes = output["boxes"]
         scores = output["scores"]
 
-        # Save masks for extraction
+        # Save masks and generate overlay image for the client
+        import base64 as b64mod
         mask_data = []
+        # Composite overlay: semi-transparent colored mask for each detection
+        overlay_colors = [
+            (0, 120, 255, 100),   # blue
+            (255, 80, 0, 100),    # orange
+            (0, 200, 80, 100),    # green
+            (200, 0, 200, 100),   # magenta
+        ]
+        overlay_img = None
+
         for i, mask in enumerate(masks):
             mask_np = mask.cpu().float().numpy() if hasattr(mask, 'cpu') else np.array(mask)
+            # Squeeze extra dimensions — SAM3 returns (1,H,W) or (H,W)
+            while mask_np.ndim > 2:
+                mask_np = mask_np[0]
             mask_path = CACHE_DIR / f"mask_{i}.npy"
             np.save(str(mask_path), mask_np)
+
+            # Build RGBA overlay for this mask
+            h, w = mask_np.shape
+            if overlay_img is None:
+                overlay_img = np.zeros((h, w, 4), dtype=np.uint8)
+            color = overlay_colors[i % len(overlay_colors)]
+            binary = (mask_np > 0.5).astype(np.uint8)
+            for c in range(4):
+                overlay_img[:, :, c] = np.where(binary, color[c], overlay_img[:, :, c])
+
+            bbox_val = boxes[i].tolist() if hasattr(boxes[i], 'tolist') else list(boxes[i])
             mask_data.append({
                 "index": i,
                 "score": float(scores[i]) if hasattr(scores[i], 'item') else float(scores[i]),
-                "bbox": boxes[i].tolist() if hasattr(boxes[i], 'tolist') else list(boxes[i])
+                "bbox": bbox_val
             })
+
+        # Encode overlay as base64 PNG for the client
+        overlay_b64 = ""
+        if overlay_img is not None:
+            pil_overlay = Image.fromarray(overlay_img, 'RGBA')
+            buf = io.BytesIO()
+            pil_overlay.save(buf, format='PNG')
+            overlay_b64 = b64mod.b64encode(buf.getvalue()).decode('utf-8')
 
         return {
             "status": "ok",
             "num_masks": len(masks),
             "masks": mask_data,
-            "prompt": prompt
+            "prompt": prompt,
+            "overlay": overlay_b64
         }
 
     except Exception as e:
@@ -1143,7 +1292,9 @@ async def trellis_reconstruct(body: dict):
                 return {"status": "error", "error": f"TRELLIS returned HTTP {resp.status_code}"}
 
     except httpx.ConnectError:
-        return {"status": "error", "error": "Cannot connect to TRELLIS service (is it running?)"}
+        return {"status": "error", "error": "Cannot connect to TRELLIS service. It may have crashed (OOM on DGX Spark). Check: docker logs trellis-reconstructor"}
+    except httpx.ReadTimeout:
+        return {"status": "error", "error": "TRELLIS timed out (>120s). The model may be too large for available GPU memory."}
     except Exception as e:
         logger.error(f"TRELLIS proxy error: {e}\n{traceback.format_exc()}")
         return {"status": "error", "error": str(e)}
