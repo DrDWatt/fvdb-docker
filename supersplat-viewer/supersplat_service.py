@@ -783,7 +783,7 @@ def build_viewer_html() -> str:
                 return;
             }}
             const statusEl = document.getElementById('extract-status');
-            statusEl.textContent = '⏳ Extracting 3D gaussians...';
+            statusEl.textContent = '⏳ Extracting 3D gaussians from mask region...';
             document.getElementById('extract-btn').disabled = true;
 
             try {{
@@ -794,17 +794,36 @@ def build_viewer_html() -> str:
                 }});
                 const data = await resp.json();
                 if (data.status === 'ok') {{
-                    lastExtraction = data;
-                    statusEl.textContent = '✅ Extracted ' + data.num_gaussians + ' gaussians';
-                    document.getElementById('trellis-btn').disabled = false;
-                    addExtractionToList(data);
+                    // Poll for extraction completion
+                    statusEl.textContent = '⏳ Extracting... (reading ' + currentModel + ')';
+                    const jobId = data.job_id;
+                    const pollInterval = setInterval(async () => {{
+                        try {{
+                            const sResp = await fetch('/garfield/status/' + jobId);
+                            const sData = await sResp.json();
+                            if (sData.status === 'done') {{
+                                clearInterval(pollInterval);
+                                data.num_gaussians = sData.num_gaussians;
+                                lastExtraction = data;
+                                statusEl.textContent = '✅ Extracted ' + sData.num_gaussians.toLocaleString() + ' gaussians from masked region';
+                                document.getElementById('trellis-btn').disabled = false;
+                                document.getElementById('extract-btn').disabled = false;
+                                addExtractionToList(data);
+                            }} else if (sData.status === 'error') {{
+                                clearInterval(pollInterval);
+                                statusEl.textContent = '❌ Extraction failed';
+                                document.getElementById('extract-btn').disabled = false;
+                            }}
+                        }} catch(pe) {{ /* ignore poll errors */ }}
+                    }}, 2000);
                 }} else {{
                     statusEl.textContent = '❌ ' + (data.error || 'Extraction failed');
+                    document.getElementById('extract-btn').disabled = false;
                 }}
             }} catch(e) {{
                 statusEl.textContent = '❌ Error: ' + e.message;
+                document.getElementById('extract-btn').disabled = false;
             }}
-            document.getElementById('extract-btn').disabled = false;
         }}
 
         function addExtractionToList(data) {{
@@ -1159,12 +1178,151 @@ async def segment_clear():
 # ---------------------------------------------------------------------------
 # Routes: GARField-style 3D extraction
 # ---------------------------------------------------------------------------
+def _parse_ply_header(filepath: Path):
+    """Parse PLY header and return (header_bytes, num_vertices, properties, bytes_per_vertex)."""
+    with open(filepath, 'rb') as f:
+        lines = []
+        while True:
+            line = f.readline().decode('ascii', errors='ignore').strip()
+            lines.append(line)
+            if line == 'end_header':
+                break
+        header_end = f.tell()
+
+    num_vertices = 0
+    properties = []
+    for line in lines:
+        if line.startswith('element vertex'):
+            num_vertices = int(line.split()[-1])
+        elif line.startswith('property'):
+            parts = line.split()
+            dtype = parts[1]
+            name = parts[2]
+            properties.append((dtype, name))
+
+    # Calculate bytes per vertex (all floats = 4 bytes each for this format)
+    type_sizes = {'float': 4, 'double': 8, 'uchar': 1, 'int': 4, 'uint': 4, 'short': 2}
+    bytes_per_vertex = sum(type_sizes.get(p[0], 4) for p in properties)
+
+    return header_end, num_vertices, properties, bytes_per_vertex
+
+
+def _extract_gaussians_by_mask(model_path: Path, mask: np.ndarray, output_path: Path) -> int:
+    """Extract gaussians whose 3D positions project into the 2D mask region.
+
+    Uses an orthographic projection based on the gaussian cloud's bounding box
+    mapped to the mask image dimensions. Returns count of extracted gaussians.
+    """
+    import struct
+
+    header_end, num_vertices, properties, bytes_per_vertex = _parse_ply_header(model_path)
+
+    # Find x, y, z property indices
+    prop_names = [p[1] for p in properties]
+    x_idx = prop_names.index('x') if 'x' in prop_names else 0
+    y_idx = prop_names.index('y') if 'y' in prop_names else 1
+    z_idx = prop_names.index('z') if 'z' in prop_names else 2
+
+    # Squeeze mask to 2D
+    while mask.ndim > 2:
+        mask = mask[0]
+    mask_h, mask_w = mask.shape
+
+    # Find mask bounding box (normalized)
+    mask_binary = (mask > 0.5).astype(np.uint8)
+    rows = np.any(mask_binary, axis=1)
+    cols = np.any(mask_binary, axis=0)
+    if not rows.any() or not cols.any():
+        return 0
+    rmin, rmax = np.where(rows)[0][[0, -1]]
+    cmin, cmax = np.where(cols)[0][[0, -1]]
+
+    # Read all vertex positions first pass to get bounding box
+    num_floats = bytes_per_vertex // 4
+    positions = np.zeros((num_vertices, 3), dtype=np.float32)
+
+    with open(model_path, 'rb') as f:
+        f.seek(header_end)
+        # Read all vertex data at once for speed
+        all_data = np.frombuffer(f.read(num_vertices * bytes_per_vertex), dtype=np.float32)
+        all_data = all_data.reshape(num_vertices, num_floats)
+        positions[:, 0] = all_data[:, x_idx]
+        positions[:, 1] = all_data[:, y_idx]
+        positions[:, 2] = all_data[:, z_idx]
+
+    # Filter out NaN/Inf positions before computing bounding box
+    valid = np.isfinite(positions[:, 0]) & np.isfinite(positions[:, 1])
+
+    # Orthographic projection: use XY plane for front-view projection
+    x_valid = positions[valid, 0]
+    y_valid = positions[valid, 1]
+    x_min, x_max = float(x_valid.min()), float(x_valid.max())
+    y_min, y_max = float(y_valid.min()), float(y_valid.max())
+
+    x_range = x_max - x_min if x_max > x_min else 1.0
+    y_range = y_max - y_min if y_max > y_min else 1.0
+
+    # Project gaussian centers to normalized image coords [0, mask_w) and [0, mask_h)
+    proj_u = np.full(num_vertices, -1, dtype=np.int32)
+    proj_v = np.full(num_vertices, -1, dtype=np.int32)
+    proj_u[valid] = ((positions[valid, 0] - x_min) / x_range * (mask_w - 1)).astype(np.int32)
+    # Flip Y: image row 0 is top, but Y-up means higher Y = lower row
+    proj_v[valid] = ((1.0 - (positions[valid, 1] - y_min) / y_range) * (mask_h - 1)).astype(np.int32)
+
+    # Clamp to valid range
+    proj_u = np.clip(proj_u, 0, mask_w - 1)
+    proj_v = np.clip(proj_v, 0, mask_h - 1)
+
+    # Select gaussians that fall inside the mask (and have valid positions)
+    inside_mask = valid & (mask_binary[proj_v, proj_u] > 0)
+    selected_indices = np.where(inside_mask)[0]
+
+    if len(selected_indices) == 0:
+        # Fallback: use bounding box region
+        norm_cmin = cmin / mask_w
+        norm_cmax = cmax / mask_w
+        norm_rmin = rmin / mask_h
+        norm_rmax = rmax / mask_h
+
+        # Map normalized bbox to 3D space
+        x_lo = x_min + norm_cmin * x_range
+        x_hi = x_min + norm_cmax * x_range
+        y_lo = y_min + (1.0 - norm_rmax) * y_range
+        y_hi = y_min + (1.0 - norm_rmin) * y_range
+
+        in_x = (positions[:, 0] >= x_lo) & (positions[:, 0] <= x_hi)
+        in_y = (positions[:, 1] >= y_lo) & (positions[:, 1] <= y_hi)
+        selected_indices = np.where(in_x & in_y)[0]
+
+    if len(selected_indices) == 0:
+        return 0
+
+    # Write output PLY with only selected gaussians
+    header_lines = [
+        "ply",
+        "format binary_little_endian 1.0",
+        f"element vertex {len(selected_indices)}",
+    ]
+    for dtype, name in properties:
+        header_lines.append(f"property {dtype} {name}")
+    header_lines.append("end_header")
+    header_str = "\n".join(header_lines) + "\n"
+
+    with open(output_path, 'wb') as f:
+        f.write(header_str.encode('ascii'))
+        # Write selected vertex data
+        selected_data = all_data[selected_indices]
+        f.write(selected_data.tobytes())
+
+    return len(selected_indices)
+
+
 @app.post("/garfield/extract")
 async def garfield_extract(body: dict):
     """Extract 3D gaussians using the current segmentation mask.
 
-    This uses the mask from SAM3 to select gaussians whose 2D projections
-    fall within the mask region.
+    Projects gaussian centers to 2D using orthographic projection and
+    selects only those that fall within the SAM3 mask region.
     """
     model_name = body.get("model", current_model)
     job_id = str(uuid.uuid4())[:8]
@@ -1178,13 +1336,7 @@ async def garfield_extract(body: dict):
         # Use the highest-scored mask (first one from SAM3)
         mask = np.load(str(mask_files[0]))
 
-        # For full GARField extraction, we need:
-        # 1. The PLY gaussian data
-        # 2. Camera projection matrices
-        # 3. Mask-based gaussian selection
-        # This is a simplified version that creates a job record
         model_path = MODEL_DIR / model_name if model_name else None
-
         if not model_path or not model_path.exists():
             return {"status": "error", "error": "Model not found", "job_id": job_id}
 
@@ -1195,20 +1347,21 @@ async def garfield_extract(body: dict):
             "model": model_name,
             "mask_shape": list(mask.shape),
             "output_path": str(output_path),
-            "status": "pending",
+            "status": "extracting",
             "timestamp": time.time()
         }
 
         # Run extraction in background
         async def _extract():
             try:
-                # Simplified extraction: copy source PLY with mask metadata
-                # Full implementation would project gaussians and filter by mask
-                shutil.copy2(str(model_path), str(output_path))
+                count = await asyncio.to_thread(
+                    _extract_gaussians_by_mask, model_path, mask, output_path
+                )
                 extractions[job_id]["status"] = "done"
-                extractions[job_id]["num_gaussians"] = 0  # Would be actual count
-                logger.info(f"Extraction {job_id} complete")
+                extractions[job_id]["num_gaussians"] = count
+                logger.info(f"Extraction {job_id} complete: {count} gaussians extracted")
             except Exception as e:
+                logger.error(f"Extraction {job_id} failed: {e}\n{traceback.format_exc()}")
                 extractions[job_id]["status"] = "error"
                 extractions[job_id]["error"] = str(e)
 
@@ -1217,13 +1370,26 @@ async def garfield_extract(body: dict):
         return {
             "status": "ok",
             "job_id": job_id,
-            "num_gaussians": "pending",
-            "message": "Extraction started"
+            "num_gaussians": "extracting...",
+            "message": "Extracting masked gaussians from PLY"
         }
 
     except Exception as e:
         logger.error(f"GARField extract error: {e}\n{traceback.format_exc()}")
         return {"status": "error", "error": str(e), "job_id": job_id}
+
+
+@app.get("/garfield/status/{job_id}")
+async def garfield_status(job_id: str):
+    """Get extraction job status."""
+    ext = extractions.get(job_id)
+    if not ext:
+        return {"status": "error", "error": "Extraction not found"}
+    return {
+        "status": ext.get("status", "unknown"),
+        "num_gaussians": ext.get("num_gaussians", 0),
+        "job_id": job_id
+    }
 
 
 @app.get("/garfield/download/{job_id}")
@@ -1265,15 +1431,46 @@ async def trellis_reconstruct(body: dict):
         return {"status": "error", "error": "Extraction file not ready"}
 
     try:
-        # Render a reference image from the extraction for TRELLIS
-        # In full impl, render the extracted gaussians
-        # For now, send a captured frame
+        # Crop the captured frame to the mask bounding box for TRELLIS
         frame_path = CACHE_DIR / "current_frame.png"
         if not frame_path.exists():
             return {"status": "error", "error": "No reference frame for reconstruction"}
 
+        # Load mask and crop the frame to just the segmented region
+        mask_files = sorted(CACHE_DIR.glob("mask_*.npy"))
+        frame_img = Image.open(frame_path).convert("RGB")
+
+        if mask_files:
+            mask_np = np.load(str(mask_files[0]))
+            while mask_np.ndim > 2:
+                mask_np = mask_np[0]
+            mask_binary = (mask_np > 0.5).astype(np.uint8)
+            rows = np.any(mask_binary, axis=1)
+            cols = np.any(mask_binary, axis=0)
+            if rows.any() and cols.any():
+                rmin, rmax = np.where(rows)[0][[0, -1]]
+                cmin, cmax = np.where(cols)[0][[0, -1]]
+                # Add padding (10% each side)
+                h, w = mask_np.shape
+                pad_r = int((rmax - rmin) * 0.1)
+                pad_c = int((cmax - cmin) * 0.1)
+                rmin = max(0, rmin - pad_r)
+                rmax = min(h - 1, rmax + pad_r)
+                cmin = max(0, cmin - pad_c)
+                cmax = min(w - 1, cmax + pad_c)
+                # Crop and add white background where mask is 0
+                cropped = np.array(frame_img)[rmin:rmax+1, cmin:cmax+1]
+                mask_crop = mask_binary[rmin:rmax+1, cmin:cmax+1]
+                # White background outside mask
+                cropped[mask_crop == 0] = [255, 255, 255]
+                frame_img = Image.fromarray(cropped)
+
+        # Save the cropped image for reference
+        cropped_path = CACHE_DIR / f"trellis_input_{job_id}.png"
+        frame_img.save(str(cropped_path))
+
         async with httpx.AsyncClient(timeout=120.0) as client:
-            with open(frame_path, "rb") as f:
+            with open(cropped_path, "rb") as f:
                 files = {"image": (f"extraction_{job_id}.png", f, "image/png")}
                 resp = await client.post(
                     f"{TRELLIS_URL}/reconstruct",

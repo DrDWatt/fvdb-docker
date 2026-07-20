@@ -84,7 +84,7 @@ def _ensure_alpha_channel(image: Image.Image) -> Image.Image:
 
 
 def load_pipeline():
-    """Load the TRELLIS.2 pipeline (lazy, on first use)."""
+    """Load the TRELLIS.2 pipeline."""
     global pipeline, pipeline_loaded
 
     if pipeline_loaded:
@@ -480,6 +480,13 @@ async def get_all_metadata():
             "source_job_id": meta.get("source_job_id", ""),
         }
     return {"metadata": result, "count": len(result)}
+
+
+@app.on_event("startup")
+async def startup_load_pipeline():
+    """Load the TRELLIS.2 pipeline at service startup."""
+    logger.info("Loading TRELLIS.2 pipeline at startup...")
+    load_pipeline()
 
 
 if __name__ == "__main__":
