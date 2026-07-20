@@ -1179,7 +1179,19 @@ async def segment_clear():
 # Routes: GARField-style 3D extraction
 # ---------------------------------------------------------------------------
 def _parse_ply_header(filepath: Path):
-    """Parse PLY header and return (header_bytes, num_vertices, properties, bytes_per_vertex)."""
+    """Parse PLY header and return (header_end, num_vertices, vertex_properties, bytes_per_vertex).
+
+    Handles mixed-type PLY properties and multi-element PLY files.
+    Only returns properties belonging to the vertex element.
+    """
+    TYPE_SIZES = {
+        'float': 4, 'float32': 4,
+        'double': 8, 'float64': 8,
+        'uchar': 1, 'uint8': 1, 'char': 1, 'int8': 1,
+        'short': 2, 'int16': 2, 'ushort': 2, 'uint16': 2,
+        'int': 4, 'int32': 4, 'uint': 4, 'uint32': 4,
+    }
+
     with open(filepath, 'rb') as f:
         lines = []
         while True:
@@ -1189,22 +1201,24 @@ def _parse_ply_header(filepath: Path):
                 break
         header_end = f.tell()
 
+    # Parse elements in order — only collect vertex properties
     num_vertices = 0
-    properties = []
+    vertex_properties = []
+    current_element = None
     for line in lines:
-        if line.startswith('element vertex'):
-            num_vertices = int(line.split()[-1])
-        elif line.startswith('property'):
+        if line.startswith('element'):
+            parts = line.split()
+            current_element = parts[1]
+            if current_element == 'vertex':
+                num_vertices = int(parts[2])
+        elif line.startswith('property') and current_element == 'vertex':
             parts = line.split()
             dtype = parts[1]
             name = parts[2]
-            properties.append((dtype, name))
+            vertex_properties.append((dtype, name))
 
-    # Calculate bytes per vertex (all floats = 4 bytes each for this format)
-    type_sizes = {'float': 4, 'double': 8, 'uchar': 1, 'int': 4, 'uint': 4, 'short': 2}
-    bytes_per_vertex = sum(type_sizes.get(p[0], 4) for p in properties)
-
-    return header_end, num_vertices, properties, bytes_per_vertex
+    bytes_per_vertex = sum(TYPE_SIZES.get(p[0], 4) for p in vertex_properties)
+    return header_end, num_vertices, vertex_properties, bytes_per_vertex
 
 
 def _extract_gaussians_by_mask(model_path: Path, mask: np.ndarray, output_path: Path) -> int:
@@ -1215,20 +1229,44 @@ def _extract_gaussians_by_mask(model_path: Path, mask: np.ndarray, output_path: 
     """
     import struct
 
+    TYPE_SIZES = {
+        'float': 4, 'float32': 4,
+        'double': 8, 'float64': 8,
+        'uchar': 1, 'uint8': 1, 'char': 1, 'int8': 1,
+        'short': 2, 'int16': 2, 'ushort': 2, 'uint16': 2,
+        'int': 4, 'int32': 4, 'uint': 4, 'uint32': 4,
+    }
+    STRUCT_FMTS = {
+        'float': 'f', 'float32': 'f',
+        'double': 'd', 'float64': 'd',
+        'uchar': 'B', 'uint8': 'B', 'char': 'b', 'int8': 'b',
+        'short': 'h', 'int16': 'h', 'ushort': 'H', 'uint16': 'H',
+        'int': 'i', 'int32': 'i', 'uint': 'I', 'uint32': 'I',
+    }
+
     header_end, num_vertices, properties, bytes_per_vertex = _parse_ply_header(model_path)
 
-    # Find x, y, z property indices
+    # Build struct format for one vertex and find x,y,z byte offsets
     prop_names = [p[1] for p in properties]
     x_idx = prop_names.index('x') if 'x' in prop_names else 0
     y_idx = prop_names.index('y') if 'y' in prop_names else 1
     z_idx = prop_names.index('z') if 'z' in prop_names else 2
+
+    # Calculate byte offsets for x, y, z
+    x_offset = sum(TYPE_SIZES.get(properties[i][0], 4) for i in range(x_idx))
+    y_offset = sum(TYPE_SIZES.get(properties[i][0], 4) for i in range(y_idx))
+    z_offset = sum(TYPE_SIZES.get(properties[i][0], 4) for i in range(z_idx))
+    x_fmt = '<' + STRUCT_FMTS.get(properties[x_idx][0], 'f')
+    y_fmt = '<' + STRUCT_FMTS.get(properties[y_idx][0], 'f')
+    z_fmt = '<' + STRUCT_FMTS.get(properties[z_idx][0], 'f')
+    x_size = TYPE_SIZES.get(properties[x_idx][0], 4)
 
     # Squeeze mask to 2D
     while mask.ndim > 2:
         mask = mask[0]
     mask_h, mask_w = mask.shape
 
-    # Find mask bounding box (normalized)
+    # Find mask bounding box
     mask_binary = (mask > 0.5).astype(np.uint8)
     rows = np.any(mask_binary, axis=1)
     cols = np.any(mask_binary, axis=0)
@@ -1237,62 +1275,65 @@ def _extract_gaussians_by_mask(model_path: Path, mask: np.ndarray, output_path: 
     rmin, rmax = np.where(rows)[0][[0, -1]]
     cmin, cmax = np.where(cols)[0][[0, -1]]
 
-    # Read all vertex positions first pass to get bounding box
-    num_floats = bytes_per_vertex // 4
-    positions = np.zeros((num_vertices, 3), dtype=np.float32)
-
+    # Read all raw vertex data as bytes
     with open(model_path, 'rb') as f:
         f.seek(header_end)
-        # Read all vertex data at once for speed
-        all_data = np.frombuffer(f.read(num_vertices * bytes_per_vertex), dtype=np.float32)
-        all_data = all_data.reshape(num_vertices, num_floats)
-        positions[:, 0] = all_data[:, x_idx]
-        positions[:, 1] = all_data[:, y_idx]
-        positions[:, 2] = all_data[:, z_idx]
+        raw_data = f.read(num_vertices * bytes_per_vertex)
 
-    # Filter out NaN/Inf positions before computing bounding box
-    valid = np.isfinite(positions[:, 0]) & np.isfinite(positions[:, 1])
+    if len(raw_data) != num_vertices * bytes_per_vertex:
+        raise ValueError(f"PLY data size mismatch: got {len(raw_data)}, expected {num_vertices * bytes_per_vertex}")
 
-    # Orthographic projection: use XY plane for front-view projection
-    x_valid = positions[valid, 0]
-    y_valid = positions[valid, 1]
-    x_min, x_max = float(x_valid.min()), float(x_valid.max())
-    y_min, y_max = float(y_valid.min()), float(y_valid.max())
+    # Extract x,y positions using numpy for speed (assuming x,y,z are float32)
+    # This works for the common case; for exotic types we fall back to struct
+    if all(properties[i][0] in ('float', 'float32') for i in [x_idx, y_idx, z_idx]):
+        raw_array = np.frombuffer(raw_data, dtype=np.uint8).reshape(num_vertices, bytes_per_vertex)
+        # View x and y columns as float32
+        positions_x = np.frombuffer(raw_array[:, x_offset:x_offset+4].tobytes(), dtype=np.float32)
+        positions_y = np.frombuffer(raw_array[:, y_offset:y_offset+4].tobytes(), dtype=np.float32)
+    else:
+        # Fallback: struct unpack (slower)
+        positions_x = np.zeros(num_vertices, dtype=np.float32)
+        positions_y = np.zeros(num_vertices, dtype=np.float32)
+        for i in range(num_vertices):
+            offset = i * bytes_per_vertex
+            positions_x[i] = struct.unpack_from(x_fmt, raw_data, offset + x_offset)[0]
+            positions_y[i] = struct.unpack_from(y_fmt, raw_data, offset + y_offset)[0]
 
+    # Filter out NaN/Inf positions
+    valid = np.isfinite(positions_x) & np.isfinite(positions_y)
+    if not valid.any():
+        return 0
+
+    x_min, x_max = float(positions_x[valid].min()), float(positions_x[valid].max())
+    y_min, y_max = float(positions_y[valid].min()), float(positions_y[valid].max())
     x_range = x_max - x_min if x_max > x_min else 1.0
     y_range = y_max - y_min if y_max > y_min else 1.0
 
-    # Project gaussian centers to normalized image coords [0, mask_w) and [0, mask_h)
-    proj_u = np.full(num_vertices, -1, dtype=np.int32)
-    proj_v = np.full(num_vertices, -1, dtype=np.int32)
-    proj_u[valid] = ((positions[valid, 0] - x_min) / x_range * (mask_w - 1)).astype(np.int32)
-    # Flip Y: image row 0 is top, but Y-up means higher Y = lower row
-    proj_v[valid] = ((1.0 - (positions[valid, 1] - y_min) / y_range) * (mask_h - 1)).astype(np.int32)
-
-    # Clamp to valid range
+    # Project gaussian centers to image coords
+    proj_u = np.full(num_vertices, 0, dtype=np.int32)
+    proj_v = np.full(num_vertices, 0, dtype=np.int32)
+    proj_u[valid] = ((positions_x[valid] - x_min) / x_range * (mask_w - 1)).astype(np.int32)
+    proj_v[valid] = ((1.0 - (positions_y[valid] - y_min) / y_range) * (mask_h - 1)).astype(np.int32)
     proj_u = np.clip(proj_u, 0, mask_w - 1)
     proj_v = np.clip(proj_v, 0, mask_h - 1)
 
-    # Select gaussians that fall inside the mask (and have valid positions)
+    # Select gaussians inside the mask
     inside_mask = valid & (mask_binary[proj_v, proj_u] > 0)
     selected_indices = np.where(inside_mask)[0]
 
     if len(selected_indices) == 0:
-        # Fallback: use bounding box region
+        # Fallback: bounding box region in 3D space
         norm_cmin = cmin / mask_w
         norm_cmax = cmax / mask_w
         norm_rmin = rmin / mask_h
         norm_rmax = rmax / mask_h
-
-        # Map normalized bbox to 3D space
         x_lo = x_min + norm_cmin * x_range
         x_hi = x_min + norm_cmax * x_range
         y_lo = y_min + (1.0 - norm_rmax) * y_range
         y_hi = y_min + (1.0 - norm_rmin) * y_range
-
-        in_x = (positions[:, 0] >= x_lo) & (positions[:, 0] <= x_hi)
-        in_y = (positions[:, 1] >= y_lo) & (positions[:, 1] <= y_hi)
-        selected_indices = np.where(in_x & in_y)[0]
+        in_x = (positions_x >= x_lo) & (positions_x <= x_hi)
+        in_y = (positions_y >= y_lo) & (positions_y <= y_hi)
+        selected_indices = np.where(valid & in_x & in_y)[0]
 
     if len(selected_indices) == 0:
         return 0
@@ -1310,9 +1351,10 @@ def _extract_gaussians_by_mask(model_path: Path, mask: np.ndarray, output_path: 
 
     with open(output_path, 'wb') as f:
         f.write(header_str.encode('ascii'))
-        # Write selected vertex data
-        selected_data = all_data[selected_indices]
-        f.write(selected_data.tobytes())
+        # Write selected vertex rows from raw bytes
+        for idx in selected_indices:
+            start = idx * bytes_per_vertex
+            f.write(raw_data[start:start + bytes_per_vertex])
 
     return len(selected_indices)
 
@@ -1518,6 +1560,20 @@ if static_viewer_path.exists():
     app.mount("/viewer", StaticFiles(directory=str(static_viewer_path), html=True), name="viewer")
 else:
     logger.warning("SuperSplat viewer static files not found at /app/static/viewer")
+
+
+# ---------------------------------------------------------------------------
+# Startup: eagerly load SAM3
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def startup_load_sam3():
+    """Load SAM3 model at container start so it's ready for segmentation."""
+    logger.info("Startup: loading SAM3 model eagerly...")
+    success = await asyncio.to_thread(load_sam3)
+    if success:
+        logger.info("Startup: SAM3 model ready")
+    else:
+        logger.warning("Startup: SAM3 model failed to load — will retry on first request")
 
 
 # ---------------------------------------------------------------------------
