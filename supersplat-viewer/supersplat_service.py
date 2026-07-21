@@ -499,6 +499,7 @@ def build_viewer_html() -> str:
                 <button class="btn-primary" onclick="segmentWithText()">🔍 Segment</button>
                 <button onclick="clearSegmentation()">Clear</button>
             </div>
+            <div id="seg-object-list" style="max-height:140px;overflow-y:auto;margin-top:6px;"></div>
         </div>
 
         <!-- 3D Extraction (GARField-style) -->
@@ -535,6 +536,7 @@ def build_viewer_html() -> str:
         // ===================================================================
         let currentModel = '{first_model}';
         let segMasks = null;
+        let selectedMaskIndex = null;
         let lastExtraction = null;
         const panelEl = document.getElementById('controls-panel');
 
@@ -721,8 +723,10 @@ def build_viewer_html() -> str:
                 const data = await resp.json();
                 if (data.status === 'ok') {{
                     segMasks = data;
-                    statusEl.textContent = '✅ Found ' + data.num_masks + ' object(s): "' + prompt + '"';
-                    document.getElementById('extract-btn').disabled = false;
+                    selectedMaskIndex = null;
+                    statusEl.textContent = '✅ Found ' + data.num_masks + ' object(s): "' + prompt + '" — select ONE below';
+                    document.getElementById('extract-btn').disabled = true;
+                    buildObjectList(data.masks, prompt);
                     // Show mask overlay on the viewer
                     if (data.overlay) {{
                         showMaskOverlay(data.overlay);
@@ -749,10 +753,49 @@ def build_viewer_html() -> str:
 
         function clearSegmentation() {{
             segMasks = null;
+            selectedMaskIndex = null;
             hideMaskOverlay();
+            document.getElementById('seg-object-list').innerHTML = '';
             document.getElementById('seg-status').textContent = 'Click on viewer to segment objects with text or click';
             document.getElementById('extract-btn').disabled = true;
             fetch('/segment/clear', {{ method: 'POST' }}).catch(() => {{}});
+        }}
+
+        // Build a selectable list of detected objects (one selection at a time)
+        function buildObjectList(masks, prompt) {{
+            const list = document.getElementById('seg-object-list');
+            list.innerHTML = '';
+            masks.forEach((m) => {{
+                const item = document.createElement('div');
+                item.id = 'seg-obj-' + m.index;
+                item.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;margin:2px 0;border-radius:6px;cursor:pointer;background:#1a1a2e;border:1px solid #333;font-size:12px;color:#ccc;';
+                item.innerHTML = `<input type="radio" name="seg-obj" ${{selectedMaskIndex === m.index ? 'checked' : ''}} style="pointer-events:none;"/>
+                    <span>${{prompt}} #${{m.index + 1}} (score ${{m.score.toFixed(2)}})</span>`;
+                item.onclick = () => selectObject(m.index);
+                list.appendChild(item);
+            }});
+        }}
+
+        // Select a single object for extraction/reconstruction
+        async function selectObject(index) {{
+            selectedMaskIndex = index;
+            // Update list styling + radio state
+            document.querySelectorAll('#seg-object-list > div').forEach((el) => {{
+                const isSel = el.id === 'seg-obj-' + index;
+                el.style.background = isSel ? '#2a4d6e' : '#1a1a2e';
+                el.style.border = isSel ? '1px solid #4da3ff' : '1px solid #333';
+                el.querySelector('input').checked = isSel;
+            }});
+            document.getElementById('extract-btn').disabled = false;
+            document.getElementById('seg-status').textContent = '\u2705 Object #' + (index + 1) + ' selected \u2014 ready to extract';
+            // Fetch single-object overlay to highlight only the selected mask
+            try {{
+                const resp = await fetch('/segment/mask_overlay/' + index);
+                const data = await resp.json();
+                if (data.status === 'ok' && data.overlay) {{
+                    showMaskOverlay(data.overlay);
+                }}
+            }} catch(e) {{ /* keep previous overlay */ }}
         }}
 
         // ===================================================================
@@ -782,6 +825,10 @@ def build_viewer_html() -> str:
                 alert('Run segmentation first');
                 return;
             }}
+            if (selectedMaskIndex === null) {{
+                alert('Select ONE object from the list first');
+                return;
+            }}
             const statusEl = document.getElementById('extract-status');
             statusEl.textContent = '⏳ Extracting 3D gaussians from mask region...';
             document.getElementById('extract-btn').disabled = true;
@@ -790,7 +837,7 @@ def build_viewer_html() -> str:
                 const resp = await fetch('/garfield/extract', {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ model: currentModel }})
+                    body: JSON.stringify({{ model: currentModel, mask_index: selectedMaskIndex }})
                 }});
                 const data = await resp.json();
                 if (data.status === 'ok') {{
@@ -1175,6 +1222,34 @@ async def segment_clear():
     return {"status": "ok"}
 
 
+@app.get("/segment/mask_overlay/{mask_index}")
+async def segment_mask_overlay(mask_index: int):
+    """Return a highlight overlay PNG (base64) for a single selected mask."""
+    import base64 as b64mod
+    mask_path = CACHE_DIR / f"mask_{mask_index}.npy"
+    if not mask_path.exists():
+        return {"status": "error", "error": f"Mask {mask_index} not found"}
+    try:
+        mask_np = np.load(str(mask_path))
+        while mask_np.ndim > 2:
+            mask_np = mask_np[0]
+        h, w = mask_np.shape
+        binary = (mask_np > 0.5).astype(np.uint8)
+        overlay_img = np.zeros((h, w, 4), dtype=np.uint8)
+        # Bright green highlight for the selected object
+        color = (0, 220, 100, 130)
+        for c in range(4):
+            overlay_img[:, :, c] = np.where(binary, color[c], 0)
+        pil_overlay = Image.fromarray(overlay_img, 'RGBA')
+        buf = io.BytesIO()
+        pil_overlay.save(buf, format='PNG')
+        overlay_b64 = b64mod.b64encode(buf.getvalue()).decode('utf-8')
+        return {"status": "ok", "overlay": overlay_b64, "mask_index": mask_index}
+    except Exception as e:
+        logger.error(f"Mask overlay error: {e}")
+        return {"status": "error", "error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Routes: GARField-style 3D extraction
 # ---------------------------------------------------------------------------
@@ -1367,26 +1442,27 @@ async def garfield_extract(body: dict):
     selects only those that fall within the SAM3 mask region.
     """
     model_name = body.get("model", current_model)
+    mask_index = body.get("mask_index", 0)
     job_id = str(uuid.uuid4())[:8]
 
     try:
-        # Find best mask
-        mask_files = sorted(CACHE_DIR.glob("mask_*.npy"))
-        if not mask_files:
-            return {"status": "error", "error": "No segmentation mask found. Run segmentation first.", "job_id": job_id}
+        # Load the user-selected mask (one object at a time)
+        mask_path = CACHE_DIR / f"mask_{mask_index}.npy"
+        if not mask_path.exists():
+            return {"status": "error", "error": f"Mask {mask_index} not found. Run segmentation and select an object first.", "job_id": job_id}
 
-        # Use the highest-scored mask (first one from SAM3)
-        mask = np.load(str(mask_files[0]))
+        mask = np.load(str(mask_path))
 
         model_path = MODEL_DIR / model_name if model_name else None
         if not model_path or not model_path.exists():
             return {"status": "error", "error": "Model not found", "job_id": job_id}
 
-        # Store extraction metadata
+        # Store extraction metadata (including which mask was used)
         output_path = OUTPUT_DIR / f"extraction_{job_id}.ply"
         extractions[job_id] = {
             "job_id": job_id,
             "model": model_name,
+            "mask_index": mask_index,
             "mask_shape": list(mask.shape),
             "output_path": str(output_path),
             "status": "extracting",
@@ -1478,12 +1554,13 @@ async def trellis_reconstruct(body: dict):
         if not frame_path.exists():
             return {"status": "error", "error": "No reference frame for reconstruction"}
 
-        # Load mask and crop the frame to just the segmented region
-        mask_files = sorted(CACHE_DIR.glob("mask_*.npy"))
+        # Use the SAME mask that was selected for the extraction
+        mask_index = ext.get("mask_index", 0)
+        mask_path = CACHE_DIR / f"mask_{mask_index}.npy"
         frame_img = Image.open(frame_path).convert("RGB")
 
-        if mask_files:
-            mask_np = np.load(str(mask_files[0]))
+        if mask_path.exists():
+            mask_np = np.load(str(mask_path))
             while mask_np.ndim > 2:
                 mask_np = mask_np[0]
             mask_binary = (mask_np > 0.5).astype(np.uint8)
