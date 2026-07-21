@@ -700,6 +700,16 @@ def build_viewer_html() -> str:
             return canvas.toDataURL('image/png');
         }}
 
+        function captureCameraMatrices() {{
+            // Grab the real view/projection matrices from the PlayCanvas viewer
+            try {{
+                const iframe = document.getElementById('viewer-iframe');
+                const fn = iframe.contentWindow.getCameraMatrices;
+                if (typeof fn === 'function') return fn();
+            }} catch(e) {{ console.warn('Camera matrices unavailable:', e); }}
+            return null;
+        }}
+
         async function segmentWithText() {{
             const prompt = document.getElementById('seg-prompt').value.trim();
             if (!prompt) {{
@@ -710,15 +720,16 @@ def build_viewer_html() -> str:
             statusEl.textContent = '🔍 Capturing frame...';
 
             try {{
-                // Capture current viewer frame from iframe canvas
+                // Capture current viewer frame + camera matrices from iframe
                 const imageData = captureViewerFrame();
+                const cameraData = captureCameraMatrices();
                 statusEl.textContent = '🔍 Segmenting with SAM3...';
 
-                // Send frame + prompt to backend
+                // Send frame + prompt + camera to backend
                 const resp = await fetch('/segment/text', {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ prompt: prompt, image: imageData }})
+                    body: JSON.stringify({{ prompt: prompt, image: imageData, camera: cameraData }})
                 }});
                 const data = await resp.json();
                 if (data.status === 'ok') {{
@@ -1090,6 +1101,16 @@ async def segment_with_text(body: dict):
                 "error": "No frame captured. Use capture endpoint first."
             }
 
+        # Save camera view/projection matrices for accurate 3D extraction
+        camera_data = body.get("camera")
+        camera_path = CACHE_DIR / "camera.json"
+        if camera_data and camera_data.get("view") and camera_data.get("proj"):
+            with open(camera_path, "w") as f:
+                json.dump(camera_data, f)
+            logger.info("Saved camera matrices for extraction")
+        elif camera_path.exists():
+            camera_path.unlink()  # stale camera from a previous frame
+
         import torch
         image = Image.open(frame_path).convert("RGB")
         # Use autocast to handle BFloat16/Float32 dtype on GB10 Blackwell
@@ -1296,11 +1317,15 @@ def _parse_ply_header(filepath: Path):
     return header_end, num_vertices, vertex_properties, bytes_per_vertex
 
 
-def _extract_gaussians_by_mask(model_path: Path, mask: np.ndarray, output_path: Path) -> int:
+def _extract_gaussians_by_mask(model_path: Path, mask: np.ndarray, output_path: Path,
+                               camera: Optional[dict] = None) -> int:
     """Extract gaussians whose 3D positions project into the 2D mask region.
 
-    Uses an orthographic projection based on the gaussian cloud's bounding box
-    mapped to the mask image dimensions. Returns count of extracted gaussians.
+    When camera view/projection matrices are provided (from the viewer at
+    frame-capture time), uses accurate perspective projection so the extracted
+    gaussians match EXACTLY what the user segmented on screen.
+    Falls back to orthographic bounding-box projection when no camera is given.
+    Returns count of extracted gaussians.
     """
     import struct
 
@@ -1358,57 +1383,84 @@ def _extract_gaussians_by_mask(model_path: Path, mask: np.ndarray, output_path: 
     if len(raw_data) != num_vertices * bytes_per_vertex:
         raise ValueError(f"PLY data size mismatch: got {len(raw_data)}, expected {num_vertices * bytes_per_vertex}")
 
-    # Extract x,y positions using numpy for speed (assuming x,y,z are float32)
+    # Extract x,y,z positions using numpy for speed (assuming x,y,z are float32)
     # This works for the common case; for exotic types we fall back to struct
     if all(properties[i][0] in ('float', 'float32') for i in [x_idx, y_idx, z_idx]):
         raw_array = np.frombuffer(raw_data, dtype=np.uint8).reshape(num_vertices, bytes_per_vertex)
-        # View x and y columns as float32
         positions_x = np.frombuffer(raw_array[:, x_offset:x_offset+4].tobytes(), dtype=np.float32)
         positions_y = np.frombuffer(raw_array[:, y_offset:y_offset+4].tobytes(), dtype=np.float32)
+        positions_z = np.frombuffer(raw_array[:, z_offset:z_offset+4].tobytes(), dtype=np.float32)
     else:
         # Fallback: struct unpack (slower)
         positions_x = np.zeros(num_vertices, dtype=np.float32)
         positions_y = np.zeros(num_vertices, dtype=np.float32)
+        positions_z = np.zeros(num_vertices, dtype=np.float32)
         for i in range(num_vertices):
             offset = i * bytes_per_vertex
             positions_x[i] = struct.unpack_from(x_fmt, raw_data, offset + x_offset)[0]
             positions_y[i] = struct.unpack_from(y_fmt, raw_data, offset + y_offset)[0]
+            positions_z[i] = struct.unpack_from(z_fmt, raw_data, offset + z_offset)[0]
 
     # Filter out NaN/Inf positions
-    valid = np.isfinite(positions_x) & np.isfinite(positions_y)
+    valid = np.isfinite(positions_x) & np.isfinite(positions_y) & np.isfinite(positions_z)
     if not valid.any():
         return 0
 
-    x_min, x_max = float(positions_x[valid].min()), float(positions_x[valid].max())
-    y_min, y_max = float(positions_y[valid].min()), float(positions_y[valid].max())
-    x_range = x_max - x_min if x_max > x_min else 1.0
-    y_range = y_max - y_min if y_max > y_min else 1.0
+    if camera and camera.get("view") and camera.get("proj"):
+        # --- Accurate perspective projection using the viewer camera ---
+        # PlayCanvas Mat4.data is column-major; transpose to row-major
+        view = np.array(camera["view"], dtype=np.float64).reshape(4, 4).T
+        proj = np.array(camera["proj"], dtype=np.float64).reshape(4, 4).T
+        vp = proj @ view
 
-    # Project gaussian centers to image coords
-    proj_u = np.full(num_vertices, 0, dtype=np.int32)
-    proj_v = np.full(num_vertices, 0, dtype=np.int32)
-    proj_u[valid] = ((positions_x[valid] - x_min) / x_range * (mask_w - 1)).astype(np.int32)
-    proj_v[valid] = ((1.0 - (positions_y[valid] - y_min) / y_range) * (mask_h - 1)).astype(np.int32)
-    proj_u = np.clip(proj_u, 0, mask_w - 1)
-    proj_v = np.clip(proj_v, 0, mask_h - 1)
+        px = positions_x.astype(np.float64)
+        py = positions_y.astype(np.float64)
+        pz = positions_z.astype(np.float64)
 
-    # Select gaussians inside the mask
-    inside_mask = valid & (mask_binary[proj_v, proj_u] > 0)
-    selected_indices = np.where(inside_mask)[0]
+        clip_x = vp[0, 0] * px + vp[0, 1] * py + vp[0, 2] * pz + vp[0, 3]
+        clip_y = vp[1, 0] * px + vp[1, 1] * py + vp[1, 2] * pz + vp[1, 3]
+        clip_w = vp[3, 0] * px + vp[3, 1] * py + vp[3, 2] * pz + vp[3, 3]
 
-    if len(selected_indices) == 0:
-        # Fallback: bounding box region in 3D space
-        norm_cmin = cmin / mask_w
-        norm_cmax = cmax / mask_w
-        norm_rmin = rmin / mask_h
-        norm_rmax = rmax / mask_h
-        x_lo = x_min + norm_cmin * x_range
-        x_hi = x_min + norm_cmax * x_range
-        y_lo = y_min + (1.0 - norm_rmax) * y_range
-        y_hi = y_min + (1.0 - norm_rmin) * y_range
-        in_x = (positions_x >= x_lo) & (positions_x <= x_hi)
-        in_y = (positions_y >= y_lo) & (positions_y <= y_hi)
-        selected_indices = np.where(valid & in_x & in_y)[0]
+        in_front = clip_w > 1e-8
+        safe_w = np.where(in_front, clip_w, 1.0)
+        ndc_x = clip_x / safe_w
+        ndc_y = clip_y / safe_w
+
+        # NDC [-1,1] -> pixel coords (y flipped: NDC +y is up, image row 0 is top)
+        u_f = (ndc_x * 0.5 + 0.5) * (mask_w - 1)
+        v_f = (1.0 - (ndc_y * 0.5 + 0.5)) * (mask_h - 1)
+
+        # Only points that are in front of the camera AND land inside the image
+        on_screen = (valid & in_front &
+                     (u_f >= 0) & (u_f <= mask_w - 1) &
+                     (v_f >= 0) & (v_f <= mask_h - 1))
+
+        proj_u = np.zeros(num_vertices, dtype=np.int32)
+        proj_v = np.zeros(num_vertices, dtype=np.int32)
+        proj_u[on_screen] = u_f[on_screen].astype(np.int32)
+        proj_v[on_screen] = v_f[on_screen].astype(np.int32)
+
+        inside_mask = on_screen.copy()
+        inside_mask[on_screen] = mask_binary[proj_v[on_screen], proj_u[on_screen]] > 0
+        selected_indices = np.where(inside_mask)[0]
+        logger.info(f"Perspective projection: {on_screen.sum()} on-screen, {len(selected_indices)} in mask")
+    else:
+        # --- Orthographic fallback (no camera data) ---
+        x_min, x_max = float(positions_x[valid].min()), float(positions_x[valid].max())
+        y_min, y_max = float(positions_y[valid].min()), float(positions_y[valid].max())
+        x_range = x_max - x_min if x_max > x_min else 1.0
+        y_range = y_max - y_min if y_max > y_min else 1.0
+
+        proj_u = np.full(num_vertices, 0, dtype=np.int32)
+        proj_v = np.full(num_vertices, 0, dtype=np.int32)
+        proj_u[valid] = ((positions_x[valid] - x_min) / x_range * (mask_w - 1)).astype(np.int32)
+        proj_v[valid] = ((1.0 - (positions_y[valid] - y_min) / y_range) * (mask_h - 1)).astype(np.int32)
+        proj_u = np.clip(proj_u, 0, mask_w - 1)
+        proj_v = np.clip(proj_v, 0, mask_h - 1)
+
+        inside_mask = valid & (mask_binary[proj_v, proj_u] > 0)
+        selected_indices = np.where(inside_mask)[0]
+        logger.info(f"Orthographic projection (no camera): {len(selected_indices)} in mask")
 
     if len(selected_indices) == 0:
         return 0
@@ -1453,6 +1505,16 @@ async def garfield_extract(body: dict):
 
         mask = np.load(str(mask_path))
 
+        # Load camera matrices saved at segmentation time (for accurate projection)
+        camera_data = None
+        camera_path = CACHE_DIR / "camera.json"
+        if camera_path.exists():
+            try:
+                with open(camera_path) as f:
+                    camera_data = json.load(f)
+            except Exception:
+                logger.warning("Failed to load camera.json — falling back to orthographic projection")
+
         model_path = MODEL_DIR / model_name if model_name else None
         if not model_path or not model_path.exists():
             return {"status": "error", "error": "Model not found", "job_id": job_id}
@@ -1473,7 +1535,7 @@ async def garfield_extract(body: dict):
         async def _extract():
             try:
                 count = await asyncio.to_thread(
-                    _extract_gaussians_by_mask, model_path, mask, output_path
+                    _extract_gaussians_by_mask, model_path, mask, output_path, camera_data
                 )
                 extractions[job_id]["status"] = "done"
                 extractions[job_id]["num_gaussians"] = count

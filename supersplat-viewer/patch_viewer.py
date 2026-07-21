@@ -70,8 +70,38 @@ def write_settings_json(viewer_dir: Path) -> None:
     print("Wrote settings.json")
 
 
+def patch_index_js(viewer_dir: Path) -> None:
+    """Expose window.getCameraMatrices in the viewer bundle.
+
+    Injects next to window.captureFrame where the PlayCanvas camera component
+    is in scope. Used by the backend for accurate 3D gaussian extraction.
+    """
+    index_js = viewer_dir / "index.js"
+    src = index_js.read_text()
+    if "getCameraMatrices" in src:
+        print("index.js already exposes getCameraMatrices")
+        return
+
+    anchor = "window.captureFrame = ({ time, width = 480, height = width, supersample } = {}) => {"
+    inject = """window.getCameraMatrices = () => {
+                const cc = camera.camera;
+                return {
+                    view: Array.from(cc.viewMatrix.data),
+                    proj: Array.from(cc.projectionMatrix.data)
+                };
+            };
+            """
+    if anchor not in src:
+        print("WARNING: captureFrame anchor not found — getCameraMatrices not injected")
+        return
+    src = src.replace(anchor, inject + anchor, 1)
+    index_js.write_text(src)
+    print("Patched index.js with getCameraMatrices")
+
+
 if __name__ == "__main__":
     viewer_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/app/static/viewer")
     patch_index_html(viewer_dir)
+    patch_index_js(viewer_dir)
     write_settings_json(viewer_dir)
     print("Viewer patching complete")
