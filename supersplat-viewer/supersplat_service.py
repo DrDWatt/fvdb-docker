@@ -1412,6 +1412,10 @@ def _extract_gaussians_by_mask(model_path: Path, mask: np.ndarray, output_path: 
         view = np.array(camera["view"], dtype=np.float64).reshape(4, 4).T
         proj = np.array(camera["proj"], dtype=np.float64).reshape(4, 4).T
         vp = proj @ view
+        # Apply the splat entity's model transform (viewer rotates PLY 180° about Z)
+        if camera.get("model"):
+            model = np.array(camera["model"], dtype=np.float64).reshape(4, 4).T
+            vp = vp @ model
 
         px = positions_x.astype(np.float64)
         py = positions_y.astype(np.float64)

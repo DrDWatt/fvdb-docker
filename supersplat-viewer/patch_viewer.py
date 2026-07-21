@@ -85,9 +85,15 @@ def patch_index_js(viewer_dir: Path) -> None:
     anchor = "window.captureFrame = ({ time, width = 480, height = width, supersample } = {}) => {"
     inject = """window.getCameraMatrices = () => {
                 const cc = camera.camera;
+                let model = null;
+                try {
+                    const gs = app.root.findComponents('gsplat')[0];
+                    if (gs) model = Array.from(gs.entity.getWorldTransform().data);
+                } catch (e) {}
                 return {
                     view: Array.from(cc.viewMatrix.data),
-                    proj: Array.from(cc.projectionMatrix.data)
+                    proj: Array.from(cc.projectionMatrix.data),
+                    model: model
                 };
             };
             """
