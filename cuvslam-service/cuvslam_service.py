@@ -19,7 +19,11 @@ import subprocess
 import numpy as np
 from datetime import datetime
 import asyncio
-from splatking_parser import is_splatking_zip, extract_splatking_images
+from splatking_parser import (
+    is_splatking_zip, extract_splatking_images,
+    extract_streaming_zip, parse_video_splatpack,
+    get_video_camera_intrinsics, find_video_files
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1679,6 +1683,402 @@ async def workflow_video_to_model(
         "message": "Video workflow initiated. Monitor at GET /workflow/status/{workflow_id}",
         "dataset_id": dataset_id
     }
+
+
+@app.post("/workflow/multi-video-to-model")
+async def workflow_multi_video_to_model(
+    file: UploadFile = File(...),
+    dataset_id: str = Form(...),
+    fps: float = Form(1.0),
+    camera_model: str = Form("SIMPLE_RADIAL"),
+    matcher: str = Form("exhaustive"),
+    num_training_steps: int = Form(30000),
+    use_mcmc: str = Form("false"),
+    mode: str = Form("auto"),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """
+    Multi-video workflow: Upload ZIP with multiple videos -> Extract frames -> COLMAP -> Train.
+
+    Modes:
+      - auto: Detect SplatKing format (splatpack.json) or fall back to multi-video
+      - splatking: Process as SplatKing dual-camera video capture with intrinsics
+      - multi_video: Treat all .mov/.mp4/.avi in ZIP as separate video sources
+    """
+    import httpx
+
+    workflow_id = f"workflow_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+
+    update_workflow(workflow_id, {
+        "workflow_id": workflow_id,
+        "status": "uploading",
+        "progress": 0.0,
+        "current_step": "Uploading ZIP file",
+        "dataset_id": dataset_id,
+        "started_at": datetime.now().isoformat(),
+        "colmap_job_id": None,
+        "training_job_id": None,
+        "error": None,
+        "mode": mode
+    })
+
+    # Stream ZIP to disk in chunks to avoid loading multi-GB uploads into memory
+    dataset_dir = UPLOAD_DIR / dataset_id
+    dataset_dir.mkdir(exist_ok=True, parents=True)
+    zip_path = dataset_dir / file.filename
+    file_size = 0
+    with open(zip_path, "wb") as f:
+        while chunk := await file.read(1024 * 1024):  # 1MB chunks
+            f.write(chunk)
+            file_size += len(chunk)
+    logger.info(f"[{workflow_id}] ZIP saved: {file_size / (1024*1024):.1f} MB")
+
+    async def run_multi_video_workflow():
+        job_id = None
+        try:
+            # Step 1: Extract ZIP contents
+            update_workflow(workflow_id, {"current_step": "Extracting ZIP contents", "progress": 0.1})
+            extract_dir = dataset_dir / "extracted"
+
+            # Try standard zipfile first, fall back to streaming parser
+            # (SplatKing video exports lack a central directory)
+            try:
+                extracted_files = {}
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    zf.extractall(extract_dir)
+                    for info in zf.infolist():
+                        if not info.is_dir():
+                            basename = Path(info.filename).name
+                            extracted_files[basename] = extract_dir / info.filename
+                logger.info(f"[{workflow_id}] Extracted via standard zipfile")
+            except Exception as e:
+                logger.info(f"[{workflow_id}] Standard zipfile failed ({e}), using streaming parser")
+                extracted_files = await asyncio.to_thread(
+                    extract_streaming_zip, zip_path, extract_dir
+                )
+
+            logger.info(f"[{workflow_id}] Extracted {len(extracted_files)} files")
+
+            # Step 2: Detect mode
+            splatpack = parse_video_splatpack(extracted_files)
+            detected_mode = mode
+            if mode == "auto":
+                detected_mode = "splatking" if splatpack else "multi_video"
+
+            update_workflow(workflow_id, {
+                "current_step": f"Detected mode: {detected_mode}",
+                "progress": 0.15,
+                "mode": detected_mode
+            })
+            logger.info(f"[{workflow_id}] Mode: {detected_mode}")
+
+            # Step 3: Extract frames from videos
+            output_dir = OUTPUT_DIR / dataset_id
+            output_dir.mkdir(exist_ok=True, parents=True)
+            images_dir = output_dir / "images"
+            images_dir.mkdir(exist_ok=True, parents=True)
+
+            if detected_mode == "splatking" and splatpack:
+                total_frames = await _extract_splatking_video_frames(
+                    workflow_id, extracted_files, splatpack, images_dir, fps
+                )
+            else:
+                total_frames = await _extract_multi_video_frames(
+                    workflow_id, extracted_files, images_dir, fps
+                )
+
+            if total_frames < 3:
+                raise Exception(f"Only {total_frames} frames extracted, need at least 3")
+
+            update_workflow(workflow_id, {
+                "current_step": f"Extracted {total_frames} total frames",
+                "progress": 0.3
+            })
+
+            # Step 4: Run COLMAP
+            job_id = f"colmap_{dataset_id}_{datetime.now().strftime('%H%M%S')}"
+            processing_jobs[job_id] = {
+                "job_id": job_id,
+                "dataset_id": dataset_id,
+                "status": "processing",
+                "progress": 0.0,
+                "message": "Starting COLMAP processing",
+                "started_at": datetime.now().isoformat()
+            }
+            update_workflow(workflow_id, {"colmap_job_id": job_id})
+
+            sparse_dir = output_dir / "sparse" / "0"
+            sparse_dir.mkdir(exist_ok=True, parents=True)
+            database_path = output_dir / "database.db"
+
+            env = os.environ.copy()
+            env['QT_QPA_PLATFORM'] = 'offscreen'
+
+            # Use single_camera_per_folder for multi-camera setups
+            has_subfolders = any(d.is_dir() for d in images_dir.iterdir())
+
+            # Feature extraction
+            processing_jobs[job_id]["message"] = "Extracting features..."
+            update_workflow(workflow_id, {"current_step": "COLMAP: extracting features", "progress": 0.35})
+
+            cmd_extract = [
+                "colmap", "feature_extractor",
+                "--database_path", str(database_path),
+                "--image_path", str(images_dir),
+                "--ImageReader.camera_model", camera_model,
+                "--SiftExtraction.max_image_size", "2048",
+                "--SiftExtraction.max_num_features", "16384",
+                "--SiftExtraction.use_gpu", "0"
+            ]
+            if has_subfolders:
+                cmd_extract += ["--ImageReader.single_camera_per_folder", "1"]
+            else:
+                cmd_extract += ["--ImageReader.single_camera", "1"]
+
+            result = await asyncio.to_thread(
+                subprocess.run, cmd_extract,
+                capture_output=True, text=True, timeout=1800, env=env
+            )
+            if result.returncode != 0:
+                raise Exception(f"Feature extraction failed: {result.stderr}")
+
+            # Auto-switch to sequential matcher for large frame counts.
+            # Exhaustive is O(n²) on CPU and will timeout for >200 images.
+            effective_matcher = matcher
+            if matcher == "exhaustive" and total_frames > 200:
+                effective_matcher = "sequential"
+                logger.info(f"[{workflow_id}] Auto-switching to sequential matcher ({total_frames} images)")
+
+            processing_jobs[job_id]["progress"] = 0.5
+            processing_jobs[job_id]["message"] = f"Matching features ({effective_matcher})..."
+            update_workflow(workflow_id, {"current_step": f"COLMAP: matching features ({effective_matcher})", "progress": 0.45})
+
+            if effective_matcher == "exhaustive":
+                cmd_match = [
+                    "colmap", "exhaustive_matcher",
+                    "--database_path", str(database_path),
+                    "--SiftMatching.use_gpu", "0"
+                ]
+            else:
+                cmd_match = [
+                    "colmap", "sequential_matcher",
+                    "--database_path", str(database_path),
+                    "--SequentialMatching.overlap", "10",
+                    "--SiftMatching.use_gpu", "0"
+                ]
+
+            result = await asyncio.to_thread(
+                subprocess.run, cmd_match,
+                capture_output=True, text=True, timeout=7200, env=env
+            )
+            if result.returncode != 0:
+                raise Exception(f"Feature matching failed: {result.stderr}")
+
+            # Sparse reconstruction
+            processing_jobs[job_id]["progress"] = 0.7
+            processing_jobs[job_id]["message"] = "Running sparse reconstruction..."
+            update_workflow(workflow_id, {"current_step": "COLMAP: sparse reconstruction", "progress": 0.55})
+
+            cmd_mapper = [
+                "colmap", "mapper",
+                "--database_path", str(database_path),
+                "--image_path", str(images_dir),
+                "--output_path", str(sparse_dir.parent)
+            ]
+
+            result = await asyncio.to_thread(
+                subprocess.run, cmd_mapper,
+                capture_output=True, text=True, timeout=3600, env=env
+            )
+            if result.returncode != 0:
+                raise Exception(f"Sparse reconstruction failed: {result.stderr}")
+
+            processing_jobs[job_id]["status"] = "completed"
+            processing_jobs[job_id]["progress"] = 1.0
+            processing_jobs[job_id]["message"] = "COLMAP processing complete"
+            processing_jobs[job_id]["num_images"] = total_frames
+            processing_jobs[job_id]["completed_at"] = datetime.now().isoformat()
+
+            update_workflow(workflow_id, {"current_step": "COLMAP complete, starting training", "progress": 0.7})
+            logger.info(f"[{workflow_id}] COLMAP complete with {total_frames} frames")
+
+            # Step 5: Trigger training
+            update_workflow(workflow_id, {"current_step": "Starting Gaussian Splat training"})
+
+            training_url = os.environ.get(
+                "TRAINING_SERVICE_URL", "http://fvdb-training-gpu:8000"
+            )
+
+            training_job_id = None
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                try:
+                    response = await client.post(
+                        f"{training_url}/train",
+                        json={
+                            "dataset_id": dataset_id,
+                            "num_training_steps": num_training_steps,
+                            "output_name": f"{dataset_id}_model",
+                            "use_mcmc": use_mcmc.lower() == "true"
+                        }
+                    )
+
+                    if response.status_code == 200:
+                        train_data = response.json()
+                        training_job_id = train_data.get("job_id")
+                        update_workflow(workflow_id, {
+                            "training_job_id": training_job_id,
+                            "status": "training",
+                            "progress": 0.75,
+                            "current_step": "Training in progress"
+                        })
+                        logger.info(f"[{workflow_id}] Training started: {training_job_id}")
+                    else:
+                        raise Exception(f"Training service returned {response.status_code}")
+
+                except Exception as e:
+                    logger.error(f"[{workflow_id}] Failed to start training: {e}")
+                    update_workflow(workflow_id, {
+                        "status": "completed_colmap_only",
+                        "progress": 0.7,
+                        "current_step": "COLMAP complete, training failed to start",
+                        "error": f"Training failed: {str(e)}"
+                    })
+
+            # Poll training status until complete (reuse shared poller)
+            if training_job_id:
+                await _poll_training_completion(workflow_id, training_job_id, training_url)
+
+        except Exception as e:
+            logger.error(f"[{workflow_id}] Multi-video workflow failed: {e}")
+            update_workflow(workflow_id, {
+                "status": "failed",
+                "error": str(e),
+                "current_step": f"Failed: {str(e)}"
+            })
+            if job_id and job_id in processing_jobs:
+                processing_jobs[job_id]["status"] = "failed"
+                processing_jobs[job_id]["message"] = str(e)
+
+    background_tasks.add_task(run_multi_video_workflow)
+
+    return {
+        "workflow_id": workflow_id,
+        "status": "started",
+        "message": "Multi-video workflow initiated. Monitor at GET /workflow/status/{workflow_id}",
+        "dataset_id": dataset_id,
+        "mode": mode
+    }
+
+
+async def _extract_splatking_video_frames(
+    workflow_id: str,
+    extracted_files: dict,
+    splatpack: dict,
+    images_dir: Path,
+    fps: float
+) -> int:
+    """
+    Extract frames from a SplatKing dual-camera video capture.
+    Organizes frames into per-camera subdirectories for multi-camera COLMAP.
+    Uses camera intrinsics from splatpack.json.
+    """
+    intrinsics = get_video_camera_intrinsics(splatpack)
+    total_frames = 0
+
+    for cam_info in intrinsics:
+        camera_name = cam_info['camera']
+        video_file = cam_info['video_file']
+
+        video_path = extracted_files.get(video_file)
+        if not video_path or not video_path.exists():
+            logger.warning(f"[{workflow_id}] Video not found: {video_file}")
+            continue
+
+        # Create per-camera subdirectory
+        cam_dir = images_dir / camera_name
+        cam_dir.mkdir(exist_ok=True, parents=True)
+
+        update_workflow(workflow_id, {
+            "current_step": f"Extracting frames from {video_file} ({camera_name} camera, "
+                          f"{cam_info['width']}x{cam_info['height']}, "
+                          f"FoV {cam_info['field_of_view']:.1f}°)"
+        })
+
+        result = await asyncio.to_thread(subprocess.run, [
+            "ffmpeg", "-i", str(video_path),
+            "-vf", f"fps={fps}",
+            "-q:v", "2",
+            str(cam_dir / f"{camera_name}_%04d.jpg")
+        ], capture_output=True, text=True, timeout=600)
+
+        if result.returncode != 0:
+            logger.error(f"[{workflow_id}] ffmpeg failed for {video_file}: {result.stderr}")
+            continue
+
+        cam_frames = len(list(cam_dir.glob("*.jpg")))
+        total_frames += cam_frames
+        logger.info(f"[{workflow_id}] {camera_name}: {cam_frames} frames from {video_file}")
+
+    # Save intrinsics metadata alongside images for reference
+    meta_path = images_dir.parent / "splatking_intrinsics.json"
+    with open(meta_path, 'w') as f:
+        json.dump({
+            "capture_type": splatpack.get("captureType"),
+            "schema": splatpack.get("schema"),
+            "cameras": intrinsics
+        }, f, indent=2)
+
+    return total_frames
+
+
+async def _extract_multi_video_frames(
+    workflow_id: str,
+    extracted_files: dict,
+    images_dir: Path,
+    fps: float
+) -> int:
+    """
+    Extract frames from multiple generic video files.
+    Each video gets its own subdirectory for multi-camera COLMAP.
+    """
+    video_files = find_video_files(extracted_files)
+
+    if not video_files:
+        raise Exception("No video files (.mov, .mp4, .avi) found in ZIP")
+
+    # If only one video, extract directly to images_dir (single-camera mode)
+    single_video = len(video_files) == 1
+    total_frames = 0
+
+    for idx, video_path in enumerate(video_files):
+        video_name = video_path.stem
+
+        if single_video:
+            target_dir = images_dir
+        else:
+            target_dir = images_dir / video_name
+            target_dir.mkdir(exist_ok=True, parents=True)
+
+        update_workflow(workflow_id, {
+            "current_step": f"Extracting frames from {video_path.name} ({idx+1}/{len(video_files)})"
+        })
+
+        result = await asyncio.to_thread(subprocess.run, [
+            "ffmpeg", "-i", str(video_path),
+            "-vf", f"fps={fps}",
+            "-q:v", "2",
+            str(target_dir / f"{video_name}_%04d.jpg")
+        ], capture_output=True, text=True, timeout=600)
+
+        if result.returncode != 0:
+            logger.error(f"[{workflow_id}] ffmpeg failed for {video_path.name}: {result.stderr}")
+            continue
+
+        vid_frames = len(list(target_dir.glob("*.jpg")))
+        total_frames += vid_frames
+        logger.info(f"[{workflow_id}] {video_name}: {vid_frames} frames")
+
+    return total_frames
 
 
 @app.post("/workflow/photos-to-model")
