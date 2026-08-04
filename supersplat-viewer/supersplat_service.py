@@ -12,6 +12,7 @@ Port: 8086
 
 import os
 import io
+import gc
 import json
 import math
 import uuid
@@ -19,9 +20,14 @@ import time
 import shutil
 import asyncio
 import logging
+import threading
 import traceback
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+
+# Reduce CUDA allocator fragmentation on unified-memory GPUs (GB10).
+# Must be set before torch is imported anywhere in this process.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
 import numpy as np
 from PIL import Image
@@ -79,6 +85,16 @@ loading_status: Dict[str, Any] = {"state": "idle", "model": "", "error": ""}
 sam3_model = None
 sam3_processor = None
 sam3_loaded = False
+sam3_last_used = 0.0
+
+# Memory policy: unload SAM3 after this many idle minutes so the GB10's
+# unified memory is available for training and other services.
+SAM3_IDLE_UNLOAD_SECONDS = float(
+    os.environ.get("SAM3_IDLE_UNLOAD_MINUTES", "10")
+) * 60
+
+_sam3_lock = threading.Lock()          # prevents concurrent double-load
+_sam3_semaphore = asyncio.Semaphore(1)  # one GPU inference at a time
 
 # Extraction state (GARField-style)
 extractions: Dict[str, Dict[str, Any]] = {}
@@ -88,29 +104,77 @@ extractions: Dict[str, Dict[str, Any]] = {}
 # SAM3 helper
 # ---------------------------------------------------------------------------
 def load_sam3():
-    """Load SAM3 model for image segmentation."""
+    """Load SAM3 model for image segmentation (thread-safe, lazy)."""
+    global sam3_model, sam3_processor, sam3_loaded, sam3_last_used
+    with _sam3_lock:
+        if sam3_loaded:
+            sam3_last_used = time.time()
+            return True
+        try:
+            import torch
+            from sam3.model_builder import build_sam3_image_model
+            from sam3.model.sam3_image_processor import Sam3Processor
+
+            logger.info("Loading SAM3 model...")
+            # GB10 Blackwell LayerNorm auto-casts to BFloat16, causing dtype mismatches.
+            # Solution: keep model float32, use torch.amp.autocast(bfloat16) at inference.
+            torch.set_default_dtype(torch.float32)
+            if hasattr(torch, 'set_float32_matmul_precision'):
+                torch.set_float32_matmul_precision('highest')
+            sam3_model = build_sam3_image_model()
+            sam3_processor = Sam3Processor(sam3_model)
+            sam3_loaded = True
+            sam3_last_used = time.time()
+            logger.info("SAM3 model loaded successfully on GPU (autocast bfloat16)")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load SAM3: {e}\n{traceback.format_exc()}")
+            return False
+
+
+def unload_sam3():
+    """Release SAM3 and free GPU memory (idle-unload policy)."""
     global sam3_model, sam3_processor, sam3_loaded
-    if sam3_loaded:
+    with _sam3_lock:
+        if not sam3_loaded:
+            return False
+        logger.info("Unloading SAM3 (idle) to free GPU memory")
+        sam3_model = None
+        sam3_processor = None
+        sam3_loaded = False
+        gc.collect()
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
         return True
+
+
+def _release_sam3_cache():
+    """Refresh idle timer and drop cached CUDA blocks after an inference."""
+    global sam3_last_used
+    sam3_last_used = time.time()
     try:
         import torch
-        from sam3.model_builder import build_sam3_image_model
-        from sam3.model.sam3_image_processor import Sam3Processor
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
 
-        logger.info("Loading SAM3 model...")
-        # GB10 Blackwell LayerNorm auto-casts to BFloat16, causing dtype mismatches.
-        # Solution: keep model float32, use torch.amp.autocast(bfloat16) at inference.
-        torch.set_default_dtype(torch.float32)
-        if hasattr(torch, 'set_float32_matmul_precision'):
-            torch.set_float32_matmul_precision('highest')
-        sam3_model = build_sam3_image_model()
-        sam3_processor = Sam3Processor(sam3_model)
-        sam3_loaded = True
-        logger.info("SAM3 model loaded successfully on GPU (autocast bfloat16)")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to load SAM3: {e}\n{traceback.format_exc()}")
-        return False
+
+async def _sam3_idle_unload_loop():
+    """Unload SAM3 after SAM3_IDLE_UNLOAD_SECONDS without a request."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if not sam3_loaded:
+                continue
+            if _sam3_semaphore.locked():
+                continue  # never unload mid-inference
+            if time.time() - sam3_last_used > SAM3_IDLE_UNLOAD_SECONDS:
+                await asyncio.to_thread(unload_sam3)
+        except Exception as e:
+            logger.error(f"[idle-unload] {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1076,11 +1140,12 @@ async def segment_with_text(body: dict):
     if not prompt:
         return {"status": "error", "error": "No prompt provided"}
 
-    if not sam3_loaded:
-        success = load_sam3()
-        if not success:
-            return {"status": "error", "error": "SAM3 model failed to load"}
+    success = await asyncio.to_thread(load_sam3)
+    if not success:
+        return {"status": "error", "error": "SAM3 model failed to load"}
 
+    # Serialize GPU inference: one request at a time avoids memory spikes
+    await _sam3_semaphore.acquire()
     try:
         # Accept base64 image from client-side canvas capture
         image_data = body.get("image", "")
@@ -1177,6 +1242,9 @@ async def segment_with_text(body: dict):
     except Exception as e:
         logger.error(f"SAM3 segmentation error: {e}\n{traceback.format_exc()}")
         return {"status": "error", "error": str(e)}
+    finally:
+        _sam3_semaphore.release()
+        _release_sam3_cache()
 
 
 @app.post("/segment/click")
@@ -1185,11 +1253,11 @@ async def segment_with_click(body: dict):
     x = body.get("x", 0)
     y = body.get("y", 0)
 
-    if not sam3_loaded:
-        success = load_sam3()
-        if not success:
-            return {"status": "error", "error": "SAM3 model failed to load"}
+    success = await asyncio.to_thread(load_sam3)
+    if not success:
+        return {"status": "error", "error": "SAM3 model failed to load"}
 
+    await _sam3_semaphore.acquire()
     try:
         frame_path = CACHE_DIR / "current_frame.png"
         if not frame_path.exists():
@@ -1233,6 +1301,9 @@ async def segment_with_click(body: dict):
     except Exception as e:
         logger.error(f"SAM3 click segmentation error: {e}\n{traceback.format_exc()}")
         return {"status": "error", "error": str(e)}
+    finally:
+        _sam3_semaphore.release()
+        _release_sam3_cache()
 
 
 @app.post("/segment/clear")
@@ -1706,17 +1777,17 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# Startup: eagerly load SAM3
+# Startup: lazy SAM3 with idle unload
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
-async def startup_load_sam3():
-    """Load SAM3 model at container start so it's ready for segmentation."""
-    logger.info("Startup: loading SAM3 model eagerly...")
-    success = await asyncio.to_thread(load_sam3)
-    if success:
-        logger.info("Startup: SAM3 model ready")
-    else:
-        logger.warning("Startup: SAM3 model failed to load — will retry on first request")
+async def startup_sam3_policy():
+    """SAM3 is loaded lazily on the first segmentation request and unloaded
+    when idle, keeping the GB10's unified memory free for training."""
+    asyncio.create_task(_sam3_idle_unload_loop())
+    logger.info(
+        f"SAM3 policy: lazy load, idle unload after "
+        f"{SAM3_IDLE_UNLOAD_SECONDS/60:.0f} min"
+    )
 
 
 # ---------------------------------------------------------------------------

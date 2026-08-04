@@ -11,6 +11,8 @@ Features:
 """
 
 import os
+import gc
+import time
 import uuid
 import json
 import asyncio
@@ -19,6 +21,10 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from enum import Enum
 from datetime import datetime
+
+# Reduce CUDA allocator fragmentation on unified-memory GPUs (GB10).
+# Must be set before torch is imported.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
 import numpy as np
 import cv2
@@ -66,7 +72,15 @@ app.add_middleware(
 sam2_predictor = None
 sam2_video_predictor = None
 model_loaded = False
+model_last_used = 0.0
 jobs: Dict[str, Dict[str, Any]] = {}
+
+# Memory policy: unload models after this many idle minutes so the GB10's
+# unified memory is available for training and other services.
+IDLE_UNLOAD_SECONDS = float(os.environ.get("SAM2_IDLE_UNLOAD_MINUTES", "10")) * 60
+
+_model_lock = asyncio.Lock()        # prevents concurrent double-load
+_inference_semaphore = asyncio.Semaphore(1)  # one GPU inference at a time
 
 
 class ModelSize(str, Enum):
@@ -118,37 +132,109 @@ async def download_checkpoint(size: ModelSize):
 
 
 async def load_sam2_model(size: ModelSize = ModelSize.BASE_PLUS):
-    global sam2_predictor, sam2_video_predictor, model_loaded
-    
-    if model_loaded:
-        return
-    
-    logger.info(f"Loading SAM-2 model (size: {size})...")
-    
-    try:
-        from sam2.build_sam import build_sam2, build_sam2_video_predictor
-        from sam2.sam2_image_predictor import SAM2ImagePredictor
-        
+    """Lazily load the SAM-2 image predictor (thread-safe).
+
+    The video predictor is loaded separately on demand by
+    load_sam2_video_model() since only the video routes need it.
+    """
+    global sam2_predictor, model_loaded, model_last_used
+
+    async with _model_lock:
+        if sam2_predictor is not None:
+            model_last_used = time.time()
+            return
+
+        logger.info(f"Loading SAM-2 image model (size: {size})...")
+
+        try:
+            from sam2.build_sam import build_sam2
+            from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+            checkpoint, config = get_model_config(size)
+            checkpoint_path = MODEL_DIR / checkpoint
+
+            if not checkpoint_path.exists():
+                logger.info(f"Downloading SAM-2 checkpoint: {checkpoint}")
+                await download_checkpoint(size)
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            logger.info(f"Using device: {device}")
+
+            sam2_model = build_sam2(config, str(checkpoint_path), device=device)
+            sam2_predictor = SAM2ImagePredictor(sam2_model)
+
+            model_loaded = True
+            model_last_used = time.time()
+            logger.info("SAM-2 image model loaded successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to load SAM-2 model: {e}")
+            raise
+
+
+async def load_sam2_video_model(size: ModelSize = ModelSize.BASE_PLUS):
+    """Load the SAM-2 video predictor on demand (video routes only)."""
+    global sam2_video_predictor, model_last_used
+
+    async with _model_lock:
+        if sam2_video_predictor is not None:
+            model_last_used = time.time()
+            return
+
+        logger.info(f"Loading SAM-2 video predictor (size: {size})...")
+        from sam2.build_sam import build_sam2_video_predictor
+
         checkpoint, config = get_model_config(size)
         checkpoint_path = MODEL_DIR / checkpoint
-        
         if not checkpoint_path.exists():
-            logger.info(f"Downloading SAM-2 checkpoint: {checkpoint}")
             await download_checkpoint(size)
-        
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Using device: {device}")
-        
-        sam2_model = build_sam2(config, str(checkpoint_path), device=device)
-        sam2_predictor = SAM2ImagePredictor(sam2_model)
-        sam2_video_predictor = build_sam2_video_predictor(config, str(checkpoint_path), device=device)
-        
-        model_loaded = True
-        logger.info("SAM-2 model loaded successfully")
-        
-    except Exception as e:
-        logger.error(f"Failed to load SAM-2 model: {e}")
-        raise
+        sam2_video_predictor = build_sam2_video_predictor(
+            config, str(checkpoint_path), device=device
+        )
+        model_last_used = time.time()
+        logger.info("SAM-2 video predictor loaded successfully")
+
+
+def unload_sam2_models():
+    """Release SAM-2 models and free GPU memory (idle-unload policy)."""
+    global sam2_predictor, sam2_video_predictor, model_loaded
+
+    if sam2_predictor is None and sam2_video_predictor is None:
+        return False
+    logger.info("Unloading SAM-2 models (idle) to free GPU memory")
+    sam2_predictor = None
+    sam2_video_predictor = None
+    model_loaded = False
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return True
+
+
+async def _idle_unload_loop():
+    """Unload models after IDLE_UNLOAD_SECONDS without a request."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if sam2_predictor is None and sam2_video_predictor is None:
+                continue
+            if _inference_semaphore.locked():
+                continue  # never unload mid-inference
+            if time.time() - model_last_used > IDLE_UNLOAD_SECONDS:
+                async with _model_lock:
+                    unload_sam2_models()
+        except Exception as e:
+            logger.error(f"[idle-unload] {e}")
+
+
+def _release_gpu_cache():
+    """Refresh idle timer and drop cached CUDA blocks after an inference."""
+    global model_last_used
+    model_last_used = time.time()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def create_mask_overlay(image: np.ndarray, mask_paths: List[str]) -> np.ndarray:
@@ -169,10 +255,13 @@ def create_mask_overlay(image: np.ndarray, mask_paths: List[str]) -> np.ndarray:
 
 @app.on_event("startup")
 async def startup_event():
-    try:
-        await load_sam2_model()
-    except Exception as e:
-        logger.warning(f"Model not loaded on startup: {e}")
+    # Models are loaded lazily on first request and unloaded when idle,
+    # keeping the GB10's unified memory free for training between uses.
+    asyncio.create_task(_idle_unload_loop())
+    logger.info(
+        f"SAM-2 service ready (lazy load, idle unload after "
+        f"{IDLE_UNLOAD_SECONDS/60:.0f} min)"
+    )
 
 
 @app.get("/health")
@@ -211,9 +300,8 @@ async def segment_image(
     multimask_output: bool = Form(False)
 ):
     """Segment objects in a single image"""
-    if not model_loaded:
-        await load_sam2_model()
-    
+    await load_sam2_model()  # lazy: loads if unloaded, refreshes idle timer
+
     job_id = str(uuid.uuid4())
     upload_path = UPLOAD_DIR / f"{job_id}_{file.filename}"
     async with aiofiles.open(upload_path, 'wb') as f:
@@ -231,6 +319,8 @@ async def segment_image(
         "created_at": datetime.utcnow().isoformat()
     }
     
+    # Serialize GPU inference: one request at a time avoids memory spikes
+    await _inference_semaphore.acquire()
     try:
         image = cv2.imread(str(upload_path))
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -308,6 +398,9 @@ async def segment_image(
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(e)
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _inference_semaphore.release()
+        _release_gpu_cache()
 
 
 @app.post("/api/segment/video")
@@ -318,9 +411,7 @@ async def segment_video(
     background_tasks: BackgroundTasks = None
 ):
     """Segment and track objects across video frames with temporal consistency"""
-    if not model_loaded:
-        await load_sam2_model()
-    
+    # Video predictor is loaded on demand inside the background task
     job_id = str(uuid.uuid4())
     video_path = UPLOAD_DIR / f"{job_id}_{file.filename}"
     async with aiofiles.open(video_path, 'wb') as f:
@@ -341,6 +432,8 @@ async def segment_video(
 
 async def process_video_segmentation(job_id: str, video_path: Path, frame_prompts: Dict, track_objects: bool):
     """Background task for video segmentation"""
+    await load_sam2_video_model()  # on-demand: only video routes need it
+    await _inference_semaphore.acquire()
     try:
         output_dir = OUTPUT_DIR / job_id
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -401,6 +494,9 @@ async def process_video_segmentation(job_id: str, video_path: Path, frame_prompt
         logger.error(f"Video segmentation failed: {e}")
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(e)
+    finally:
+        _inference_semaphore.release()
+        _release_gpu_cache()
 
 
 @app.get("/api/jobs/{job_id}")
@@ -454,11 +550,11 @@ async def segment_splat_render(
     Render a view from a trained splat model and segment it.
     Integrates with fvdb-viewer/rendering service.
     """
-    if not model_loaded:
-        await load_sam2_model()
-    
+    await load_sam2_model()  # lazy: loads if unloaded, refreshes idle timer
+
     job_id = str(uuid.uuid4())
     
+    await _inference_semaphore.acquire()
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             render_params = {"model": model_name}
@@ -523,6 +619,9 @@ async def segment_splat_render(
     except Exception as e:
         logger.error(f"Splat render segmentation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _inference_semaphore.release()
+        _release_gpu_cache()
 
 
 @app.post("/api/labels/save")
