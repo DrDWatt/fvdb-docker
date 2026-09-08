@@ -582,6 +582,15 @@ services:
       - HF_HOME=/app/model_cache
       - HF_TOKEN=${HF_TOKEN}
       - ATTN_BACKEND=xformers
+      # Memory tuning (GB10 unified memory). low_vram=0 keeps weights resident
+      # once instead of ping-ponging CPU<->GPU (halves footprint: ~14 GB vs 28).
+      # Peak during a job is ~37 GB at 1024_cascade + 4096 textures; drop to
+      # PIPELINE_TYPE=512 / TEXTURE_SIZE=2048 to run in ~20 GB.
+      - TRELLIS_LOW_VRAM=0
+      - TRELLIS_PIPELINE_TYPE=1024_cascade
+      - TRELLIS_MAX_NUM_TOKENS=49152
+      - TRELLIS_TEXTURE_SIZE=4096
+      - TRELLIS_MIN_FREE_GB=40
     runtime: nvidia
     shm_size: '8gb'
     restart: unless-stopped

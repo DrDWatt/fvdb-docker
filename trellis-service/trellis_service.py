@@ -48,6 +48,35 @@ CLEANUP_INTERVAL_SECONDS = int(os.environ.get("TRELLIS_CLEANUP_INTERVAL", "3600"
 IDLE_UNLOAD_SECONDS = float(os.environ.get("TRELLIS_IDLE_UNLOAD_MINUTES", "10")) * 60
 # Watchdog: fail any generation that runs longer than this (thrashing guard)
 JOB_TIMEOUT_SECONDS = float(os.environ.get("TRELLIS_JOB_TIMEOUT_MINUTES", "30")) * 60
+# Pre-flight: on the GB10 the GPU shares unified memory with the host, and
+# loading the 4B pipeline peaks well above its resident size. Refuse to start
+# a load unless at least this much memory is available, so we fail in
+# milliseconds with a clear message instead of thrashing for a minute and
+# leaving a half-loaded pipeline pinned in memory.
+MIN_FREE_GB = float(os.environ.get("TRELLIS_MIN_FREE_GB", "40"))
+
+# Memory/quality knobs.
+# low_vram ping-pongs each model CPU<->GPU per stage. That helps a discrete
+# GPU with little VRAM, but on unified memory (GB10) it roughly doubles the
+# footprint (host copy + CUDA reserved cache) and adds copy time - so off.
+LOW_VRAM = os.environ.get("TRELLIS_LOW_VRAM", "0").lower() in ("1", "true", "yes")
+# '512' | '1024' | '1024_cascade' | '1536_cascade'. Higher = more tokens,
+# more activation memory and two extra 1.3B models resident.
+PIPELINE_TYPE = os.environ.get("TRELLIS_PIPELINE_TYPE", "1024_cascade")
+# Cap on sparse-latent tokens; the main driver of peak activation memory.
+MAX_NUM_TOKENS = int(os.environ.get("TRELLIS_MAX_NUM_TOKENS", "49152"))
+# GLB texture bake size (nvdiffrast buffers scale with its square).
+TEXTURE_SIZE = int(os.environ.get("TRELLIS_TEXTURE_SIZE", "4096"))
+
+# Flow models each resolution tier needs; anything else is dropped after load.
+_TIER_MODELS = {
+    "512": {"shape_slat_flow_model_512", "tex_slat_flow_model_512"},
+    "1024": {"shape_slat_flow_model_1024", "tex_slat_flow_model_1024"},
+    "1024_cascade": {"shape_slat_flow_model_512", "shape_slat_flow_model_1024",
+                     "tex_slat_flow_model_1024"},
+    "1536_cascade": {"shape_slat_flow_model_512", "shape_slat_flow_model_1024",
+                     "tex_slat_flow_model_1024"},
+}
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -162,6 +191,18 @@ def _ensure_alpha_channel(image: Image.Image) -> Image.Image:
     return image
 
 
+def available_memory_gb() -> float:
+    """MemAvailable from /proc/meminfo in GB (unified memory on GB10)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024 / 1024
+    except Exception:
+        pass
+    return float("inf")  # unknown platform - don't block
+
+
 def load_pipeline():
     """Load the TRELLIS.2 pipeline (thread-safe, lazy)."""
     global pipeline, pipeline_loaded, pipeline_last_used
@@ -182,13 +223,28 @@ def load_pipeline():
             )
 
             from trellis2.pipelines import Trellis2ImageTo3DPipeline
-            pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
+            loaded = Trellis2ImageTo3DPipeline.from_pretrained(
                 "microsoft/TRELLIS.2-4B"
             )
-            pipeline.cuda()
+
+            # Free the flow models this resolution tier never uses (~2.6 GB each)
+            needed = _TIER_MODELS.get(PIPELINE_TYPE, set())
+            for name in list(loaded.models):
+                if "slat_flow_model" in name and name not in needed:
+                    del loaded.models[name]
+                    logger.info(f"Dropped unused model for tier {PIPELINE_TYPE}: {name}")
+            gc.collect()
+
+            loaded.low_vram = LOW_VRAM
+            loaded.default_pipeline_type = PIPELINE_TYPE
+            loaded.cuda()
+            pipeline = loaded
             pipeline_loaded = True
             pipeline_last_used = time.time()
-            logger.info("TRELLIS.2 pipeline loaded successfully")
+            logger.info(
+                f"TRELLIS.2 pipeline loaded (tier={PIPELINE_TYPE}, low_vram={LOW_VRAM}, "
+                f"max_tokens={MAX_NUM_TOKENS}, texture={TEXTURE_SIZE})"
+            )
             return True
 
         except ImportError as e:
@@ -196,6 +252,15 @@ def load_pipeline():
             return False
         except Exception as e:
             logger.error(f"Failed to load TRELLIS.2 pipeline: {e}")
+            # Drop any partially constructed pipeline so its tensors can be freed
+            pipeline = None
+            pipeline_loaded = False
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
             return False
 
 
@@ -253,6 +318,17 @@ async def run_reconstruction(job_id: str, image: Image.Image):
             job["progress"] = 0.1
             job["current_step"] = "Loading TRELLIS.2 model"
 
+            # Pre-flight: only when the model is not already resident
+            if pipeline is None:
+                free_gb = available_memory_gb()
+                if free_gb < MIN_FREE_GB:
+                    raise Exception(
+                        f"Insufficient memory to load TRELLIS.2: {free_gb:.0f} GB "
+                        f"available, {MIN_FREE_GB:.0f} GB required. The GB10 shares "
+                        "memory between GPU and host - stop or shrink other GPU "
+                        "services (e.g. vLLM --gpu-memory-utilization) and retry."
+                    )
+
             ready = await asyncio.to_thread(load_pipeline)
             if not ready or pipeline is None:
                 job["status"] = "failed"
@@ -269,16 +345,21 @@ async def run_reconstruction(job_id: str, image: Image.Image):
                 # Ensure valid alpha so TRELLIS preprocess_image can find foreground
                 input_img = _ensure_alpha_channel(image)
                 try:
-                    mesh = pipeline.run(input_img)[0]
+                    mesh = pipeline.run(input_img, max_num_tokens=MAX_NUM_TOKENS)[0]
                 except ValueError as e:
                     if "zero-size array" in str(e):
-                        # rembg failed to segment — retry with fully opaque alpha
-                        # so TRELLIS skips rembg and uses the image directly
-                        logger.warning(f"Background removal failed, retrying with opaque alpha")
+                        # rembg found no foreground (typical for a full SAR scene
+                        # chip). TRELLIS only bypasses rembg when alpha is
+                        # NON-uniform, so a fully-255 alpha would just re-run it
+                        # and fail again. Opaque interior + 1px transparent border
+                        # forces the bypass and uses the whole chip as the object.
+                        logger.warning("Background removal failed, retrying with alpha bypass")
                         arr = np.array(input_img.convert('RGBA'))
                         arr[:, :, 3] = 255
+                        arr[0, :, 3] = arr[-1, :, 3] = 0
+                        arr[:, 0, 3] = arr[:, -1, 3] = 0
                         opaque_img = Image.fromarray(arr)
-                        mesh = pipeline.run(opaque_img)[0]
+                        mesh = pipeline.run(opaque_img, max_num_tokens=MAX_NUM_TOKENS)[0]
                     else:
                         raise
                 mesh.simplify(16777216)  # nvdiffrast limit
@@ -317,7 +398,7 @@ async def run_reconstruction(job_id: str, image: Image.Image):
                     voxel_size=mesh.voxel_size,
                     aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
                     decimation_target=1000000,
-                    texture_size=4096,
+                    texture_size=TEXTURE_SIZE,
                     remesh=True,
                     remesh_band=1,
                     remesh_project=0,
@@ -378,6 +459,12 @@ async def health():
         "service": "trellis2",
         "pipeline_loaded": pipeline is not None,
         "job_running": _job_semaphore.locked(),
+        "memory_available_gb": round(available_memory_gb(), 1),
+        "memory_required_gb": MIN_FREE_GB,
+        "pipeline_type": PIPELINE_TYPE,
+        "low_vram": LOW_VRAM,
+        "max_num_tokens": MAX_NUM_TOKENS,
+        "texture_size": TEXTURE_SIZE,
         "idle_unload_minutes": IDLE_UNLOAD_SECONDS / 60,
         "job_timeout_minutes": JOB_TIMEOUT_SECONDS / 60,
         "jobs_count": len(reconstruction_jobs),
