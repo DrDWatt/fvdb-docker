@@ -37,12 +37,17 @@ RUN pip install --no-cache-dir --pre \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# Pinned to the SAM3 commit validated on GB10 with the torch nightly above
+ARG SAM3_REF=46957e47805eaa273f4aa7bbbd25a88bca9108ce
 RUN git clone https://github.com/facebookresearch/sam3.git /opt/sam3 && \
-    cd /opt/sam3 && pip install --no-cache-dir -e .
+    cd /opt/sam3 && git checkout ${SAM3_REF} && pip install --no-cache-dir -e .
 
-# Build SuperSplat viewer from source
+# Build SuperSplat viewer from source, pinned to the release whose window.captureFrame /
+# window.scrubTo / animTrack settings API the flythrough + patch_viewer.py rely on (v1.27.1)
+ARG SUPERSPLAT_VIEWER_REF=e9fd1775de56d3b96b38945fe21f9307c119b053
 RUN git clone https://github.com/playcanvas/supersplat-viewer.git /opt/supersplat-viewer && \
     cd /opt/supersplat-viewer && \
+    git checkout ${SUPERSPLAT_VIEWER_REF} && \
     npm install && \
     npm run build
 
@@ -53,22 +58,26 @@ RUN mkdir -p /app/static/viewer && \
     python3 /tmp/patch_viewer.py /app/static/viewer && \
     rm /tmp/patch_viewer.py
 
-# Download SAM3 model at build time (requires HF_TOKEN build arg + gated access)
-# If download fails (token missing or access not yet granted), model downloads at runtime.
-ARG HF_TOKEN=""
-ENV HF_TOKEN=${HF_TOKEN}
-RUN mkdir -p /app/models/sam3 && \
-    if [ -n "$HF_TOKEN" ]; then \
-      python3 -c "from huggingface_hub import login, snapshot_download; \
-                  login(token='${HF_TOKEN}'); \
-                  snapshot_download(repo_id='facebook/sam3', local_dir='/app/models/sam3')" \
+# Download SAM3 model at build time (requires the hf_token build secret + gated access).
+# The token is a BuildKit secret, so it never lands in an image layer or `docker history`;
+# at runtime the service gets HF_TOKEN from compose. If download fails (token missing or
+# access not yet granted), the model downloads at runtime.
+RUN --mount=type=secret,id=hf_token,required=false \
+    mkdir -p /app/models/sam3 && \
+    if [ -s /run/secrets/hf_token ]; then \
+      python3 -c "from huggingface_hub import snapshot_download; \
+                  snapshot_download(repo_id='facebook/sam3', local_dir='/app/models/sam3', \
+                                    token=open('/run/secrets/hf_token').read().strip())" \
       || echo 'WARNING: SAM3 model download failed (gated repo?). Will download at runtime.'; \
     else \
-      echo 'WARNING: HF_TOKEN not set. SAM3 model will download on first use.'; \
+      echo 'WARNING: hf_token build secret not set. SAM3 model will download on first use.'; \
     fi
 
-# Copy application code
+# Copy application code (features/ = flythrough + metadata/RAG routers, web/ = their UI).
+# ../shared/viewer_common is outside this build context and is mounted by compose.
 COPY supersplat_service.py /app/supersplat_service.py
+COPY features /app/features
+COPY web /app/web
 
 # Create model and output directories
 RUN mkdir -p /app/splat-models /app/outputs /app/cache

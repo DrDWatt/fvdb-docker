@@ -11,6 +11,8 @@ numpy>=1.26.0
 scipy>=1.12.0
 scikit-learn>=1.4.0
 opencv-python-headless>=4.9.0
+# Static ffmpeg with libx264 for H.264 flythrough MP4 export (OpenCV's FFmpeg lacks libx264)
+imageio-ffmpeg==0.6.0
 
 # SAM3 dependencies (not always declared by sam3 setup.py)
 einops>=0.8.0

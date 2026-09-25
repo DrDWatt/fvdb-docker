@@ -42,6 +42,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
+from features import flythrough, rag_metadata
+from viewer_common.camera_path import MIN_VIDEO_SECONDS
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -98,6 +101,9 @@ _sam3_semaphore = asyncio.Semaphore(1)  # one GPU inference at a time
 
 # Extraction state (GARField-style)
 extractions: Dict[str, Dict[str, Any]] = {}
+
+# Last SAM3 text segmentation (prompt + per-mask scores), used as RAG context
+last_segmentation: Dict[str, Any] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +217,15 @@ def get_gaussian_count(model_name: str) -> int:
 # ---------------------------------------------------------------------------
 # HTML page (serves the SuperSplat viewer + controls overlay)
 # ---------------------------------------------------------------------------
+def viewer_src(model: str) -> str:
+    """Viewer iframe URL: model content + flythrough animTrack settings, starting paused.
+    Must match viewerSrc() in web/flythrough.js."""
+    from urllib.parse import quote
+    settings = f"/flythrough/settings/{quote(model)}?duration={MIN_VIDEO_SECONDS}"
+    return (f"/viewer/index.html?content=/models/{quote(model)}"
+            f"&settings={quote(settings, safe='')}&noanim&noui&webgl")
+
+
 def build_viewer_html() -> str:
     """Build the HTML page that embeds SuperSplat viewer with AI controls."""
     models = get_available_models()
@@ -225,6 +240,7 @@ def build_viewer_html() -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Reality Engine - SuperSplat Viewer</title>
+    <link rel="stylesheet" href="/web/features.css">
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -495,7 +511,7 @@ def build_viewer_html() -> str:
             <div class="load-bar-bg"><div class="load-bar-fill" id="loading-bar"></div></div>
         </div>
         <img id="mask-overlay" class="seg-mask-overlay" style="display:none;" />
-        <iframe id="viewer-iframe" src="/viewer/index.html?content=/models/{first_model}&noui&webgl"></iframe>
+        <iframe id="viewer-iframe" src="{viewer_src(first_model)}"></iframe>
     </div>
 
     <!-- Popup modal for 3D viewer -->
@@ -553,6 +569,9 @@ def build_viewer_html() -> str:
             </div>
         </div>
 
+        <!-- Flythrough + MP4 export (rendered by /web/flythrough.js) -->
+        <div class="ctrl-section" id="flythrough-section"></div>
+
         <!-- SAM3 Segmentation -->
         <div class="ctrl-section">
             <h3>2D Segmentation (SAM3)</h3>
@@ -594,6 +613,10 @@ def build_viewer_html() -> str:
         </div>
     </div>
 
+    <!-- Flythrough/MP4 export and metadata linking + RAG query modules -->
+    <script>window.FLY_MIN_SECONDS = {MIN_VIDEO_SECONDS};</script>
+    <script src="/web/flythrough.js"></script>
+    <script src="/web/rag.js"></script>
     <script>
         // ===================================================================
         // State
@@ -662,6 +685,8 @@ def build_viewer_html() -> str:
             // Show loading overlay immediately
             showLoadingOverlay(model);
             hideMaskOverlay();
+            Flythrough.pause();
+            MetadataLinks.close();
 
             // Notify backend of model switch (non-blocking)
             fetch('/load_model?model=' + model);
@@ -669,13 +694,14 @@ def build_viewer_html() -> str:
             // Directly update iframe — SuperSplat fetches and renders client-side
             const iframe = document.getElementById('viewer-iframe');
             const startTime = Date.now();
-            iframe.src = '/viewer/index.html?content=/models/' + model + '&noui&webgl';
+            iframe.src = Flythrough.viewerSrc(model);
 
             iframe.onload = function() {{
                 const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
                 hideLoadingOverlay(elapsed);
                 currentModel = model;
                 refreshModels();
+                Flythrough.onViewerLoaded();
             }};
         }});
 
@@ -684,6 +710,7 @@ def build_viewer_html() -> str:
             const elapsed = '0';
             hideLoadingOverlay(elapsed);
             this.removeEventListener('load', handler);
+            Flythrough.onViewerLoaded();
         }});
 
         // Upload with progress
@@ -956,9 +983,12 @@ def build_viewer_html() -> str:
                 <span>${{data.job_id}} (${{data.num_gaussians}} gs)</span>
                 <span>
                     <a href="javascript:void(0)" onclick="openPopup('3D Extraction: ${{data.job_id}}', '/viewer/index.html?content=/garfield/download/${{data.job_id}}&noui&webgl')" style="color:#28a745;font-size:11px;margin-right:6px;">👁️ View</a>
-                    <a href="/garfield/download/${{data.job_id}}" style="color:#17a2b8;font-size:11px;">⬇️ PLY</a>
+                    <a href="/garfield/download/${{data.job_id}}" style="color:#17a2b8;font-size:11px;margin-right:6px;">⬇️ PLY</a>
+                    <a href="javascript:void(0)" class="ext-meta" style="color:#ffc107;font-size:11px;">📄 Info</a>
                 </span>
             `;
+            item.querySelector('.ext-meta').onclick = () =>
+                MetadataLinks.open('extraction', data.job_id, 'Extraction ' + data.job_id);
             list.appendChild(item);
         }}
 
@@ -1008,6 +1038,7 @@ def build_viewer_html() -> str:
         // ===================================================================
         // Init
         // ===================================================================
+        Flythrough.render(document.getElementById('flythrough-section'));
         window.addEventListener('load', () => {{
             refreshModels();
         }});
@@ -1231,6 +1262,9 @@ async def segment_with_text(body: dict):
             pil_overlay.save(buf, format='PNG')
             overlay_b64 = b64mod.b64encode(buf.getvalue()).decode('utf-8')
 
+        last_segmentation.clear()
+        last_segmentation.update(prompt=prompt, model=current_model, masks=mask_data)
+
         return {
             "status": "ok",
             "num_masks": len(masks),
@@ -1311,6 +1345,7 @@ async def segment_clear():
     """Clear segmentation state."""
     for f in CACHE_DIR.glob("mask_*.npy"):
         f.unlink()
+    last_segmentation.clear()
     return {"status": "ok"}
 
 
@@ -1764,6 +1799,28 @@ async def health():
         "model_loaded": current_model is not None,
         "sam3_loaded": sam3_loaded
     }
+
+
+# ---------------------------------------------------------------------------
+# Feature routers: flythrough/MP4 export, metadata linking + RAG query
+# ---------------------------------------------------------------------------
+def get_scene_state() -> Dict[str, Any]:
+    """Read-only snapshot of viewer state for the RAG context."""
+    return {
+        "model": current_model,
+        "num_gaussians": get_gaussian_count(current_model) if current_model else 0,
+        "detections": dict(last_segmentation),
+        "extractions": [dict(e) for e in extractions.values()],
+    }
+
+
+app.include_router(flythrough.create_router(MODEL_DIR, OUTPUT_DIR))
+app.include_router(rag_metadata.create_router(get_scene_state))
+
+# Frontend modules for the features above (plain JS/CSS, no templating)
+WEB_DIR = Path(__file__).parent / "web"
+if WEB_DIR.exists():
+    app.mount("/web", StaticFiles(directory=str(WEB_DIR)), name="web")
 
 
 # ---------------------------------------------------------------------------

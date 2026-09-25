@@ -266,6 +266,8 @@ services:
       - ./models:/app/models
       - ./sam2-data/models:/app/sam2-models:ro
       - ./fvdb-viewer/image_viewer_service.py:/app/image_viewer_service.py:ro
+      # Flythrough path, H.264 encoder and RAG helpers shared with supersplat-viewer
+      - ./shared/viewer_common:/app/viewer_common:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility

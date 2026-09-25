@@ -18,6 +18,13 @@ from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
+# Shared with the SuperSplat viewer (:8086) - mounted from fvdb-docker/shared/viewer_common
+from viewer_common.camera_path import (
+    MIN_VIDEO_SECONDS, build_smooth_path, ease_in_out, frames_for_duration, sample_path,
+)
+from viewer_common.rag import build_system_prompt, extract_file_text, ollama_status, ollama_stream_sse
+from viewer_common.video import H264Writer
+
 # Patch GPU arch detection for GB10 (compute 12.1) - nvrtc doesn't support sm_121,
 # so we force it to use sm_120 which is the closest supported architecture.
 try:
@@ -55,6 +62,7 @@ device = None
 model_name = ""
 model_metadata = None
 available_models = []
+loading_status = {"state": "idle", "model": "", "error": ""}
 
 # SAM-2 segmentation state
 sam2_predictor = None
@@ -1329,6 +1337,13 @@ async def root():
     <body>
         <div id="viewer">
             <div id="loading">Loading...</div>
+            <div id="load-progress-container" style="display:none;text-align:center;padding:20px;">
+                <div style="font-size:16px;color:#17a2b8;margin-bottom:10px;" id="load-progress-label">Loading model...</div>
+                <div style="width:80%;max-width:400px;height:22px;background:#1a1a2e;border-radius:11px;overflow:hidden;border:1px solid #333;margin:0 auto;">
+                    <div id="load-progress-bar" style="width:0%;height:100%;background:linear-gradient(90deg,#17a2b8,#6c63ff);transition:width 0.3s;border-radius:11px;"></div>
+                </div>
+                <div style="margin-top:8px;color:#aaa;font-size:13px;" id="load-progress-detail">Estimated: calculating...</div>
+            </div>
             <img id="render" style="display:none;" />
         </div>
         
@@ -1351,8 +1366,14 @@ async def root():
                 </select>
                 <button onclick="refreshModels()" style="margin-left:5px;padding:5px 8px;background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer;" title="Refresh model list">🔄</button>
                 <button onclick="deleteCurrentModel()" style="margin-left:10px;padding:5px 10px;background:#dc3545;color:white;border:none;border-radius:4px;cursor:pointer;">🗑️ Delete</button>
-                <button onclick="document.getElementById('ply-upload').click()" style="margin-left:10px;padding:5px 10px;background:#6c63ff;color:white;border:none;border-radius:4px;cursor:pointer;">⬆️ Upload .ply</button>
+                <button id="ply-upload-btn" onclick="document.getElementById('ply-upload').click()" style="margin-left:10px;padding:5px 10px;background:#6c63ff;color:white;border:none;border-radius:4px;cursor:pointer;">⬆️ Upload .ply</button>
                 <input type="file" id="ply-upload" accept=".ply" style="display:none;" onchange="uploadPlyFile(this)" />
+                <div id="upload-progress-container" style="display:none;margin-left:10px;align-items:center;gap:8px;">
+                    <div style="width:150px;height:18px;background:#1a1a2e;border-radius:9px;overflow:hidden;border:1px solid #333;">
+                        <div id="upload-progress-bar" style="width:0%;height:100%;background:linear-gradient(90deg,#6c63ff,#17a2b8);transition:width 0.2s;border-radius:9px;"></div>
+                    </div>
+                    <span id="upload-progress-text" style="color:#aaa;font-size:12px;">0%</span>
+                </div>
             </div>
             <div class="slider-group">
                 <label>Rotation: <span id="az-val">0</span>°</label>
@@ -1375,15 +1396,15 @@ async def root():
             <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
                 <button id="flyBtn" onclick="toggleFlythrough()" style="padding:5px 12px;background:#2F6BFF;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">▶ Play</button>
                 <button onclick="exportFlythrough()" id="exportBtn" style="padding:5px 10px;background:#17a2b8;color:white;border:none;border-radius:4px;cursor:pointer;">📥 Export MP4</button>
-                <label style="font-size:11px;">Frames:</label>
-                <input type="number" id="flyFrames" value="120" min="10" max="600" style="width:50px;padding:3px;">
+                <label style="font-size:11px;">Seconds:</label>
+                <input type="number" id="flyDuration" value="{MIN_VIDEO_SECONDS}" min="{MIN_VIDEO_SECONDS}" max="120" style="width:50px;padding:3px;" title="Video length (minimum {MIN_VIDEO_SECONDS}s)">
                 <label style="font-size:11px;">FPS:</label>
-                <input type="number" id="flyFps" value="24" min="1" max="60" style="width:40px;padding:3px;">
+                <input type="number" id="flyFps" value="30" min="1" max="60" style="width:40px;padding:3px;">
             </div>
             <div style="margin-top:6px;">
-                <input type="range" id="flyProgress" min="0" max="119" value="0" style="width:100%;" oninput="seekFlythrough(this.value)">
+                <input type="range" id="flyProgress" min="0" max="{MIN_VIDEO_SECONDS * 30 - 1}" value="0" style="width:100%;" oninput="seekFlythrough(this.value)">
                 <div style="display:flex;justify-content:space-between;font-size:11px;color:#888;">
-                    <span id="flyFrameLabel">Frame 0 / 120</span>
+                    <span id="flyFrameLabel">Frame 0 / {MIN_VIDEO_SECONDS * 30}</span>
                     <span id="flyStatus" style="color:#2F6BFF;"></span>
                 </div>
             </div>
@@ -1884,45 +1905,95 @@ async def root():
             // Model selection
             const modelSelect = document.getElementById('model-select');
             modelSelect.addEventListener('change', async () => {{
-                loading.textContent = 'Loading model...';
-                loading.style.display = 'block';
+                loading.style.display = 'none';
                 img.style.display = 'none';
-                
+
+                // Show loading progress bar
+                const lpContainer = document.getElementById('load-progress-container');
+                const lpBar = document.getElementById('load-progress-bar');
+                const lpLabel = document.getElementById('load-progress-label');
+                const lpDetail = document.getElementById('load-progress-detail');
+                lpContainer.style.display = 'block';
+                lpBar.style.width = '0%';
+                lpLabel.textContent = 'Loading ' + modelSelect.value + '...';
+                lpDetail.textContent = 'Starting load...';
+
+                // Kick off async load (returns immediately)
                 const response = await fetch('/load_model?model=' + modelSelect.value);
-                if (response.ok) {{
-                    // Reset controls
-                    azSlider.value = 0;
-                    elSlider.value = 0;
-                    zoomSlider.value = 1;
-                    camSlider.value = 0;
-                    panX = 0; panY = 0; panZ = 0;
-                    syncSliderLabels();
-                    
-                    // Clear segmentation state
-                    showSegments = false;
-                    segmentMasks = [];
-                    segmentLabelMap = {{}};
-                    document.getElementById('segStatus').textContent = 'Click "Auto Segment" to detect objects';
-                    document.getElementById('labels-list').innerHTML = '';
-                    await fetch('/segment/clear', {{ method: 'POST' }}).catch(() => {{}});
-                    
-                    // Clear extraction state
-                    if (typeof viewingExtraction !== 'undefined') viewingExtraction = null;
-                    if (typeof extractions !== 'undefined') extractions = [];
-                    if (typeof extractMode !== 'undefined') extractMode = false;
-                    const extList = document.getElementById('extraction-list');
-                    if (extList) extList.innerHTML = '';
-                    const extStatus = document.getElementById('extractStatus');
-                    if (extStatus) extStatus.textContent = 'Click to extract 3D assets from scene';
-                    await fetch('/garfield/clear', {{ method: 'POST' }}).catch(() => {{}});
-                    
-                    // Update info and render
-                    const info = await fetch('/info').then(r => r.json());
-                    document.getElementById('num-gs').textContent = info.num_gaussians || 'N/A';
-                    updateRender();
-                }} else {{
-                    loading.textContent = 'Failed to load model';
+                if (!response.ok) {{
+                    lpLabel.textContent = 'Failed to start load';
+                    lpDetail.textContent = '';
+                    return;
                 }}
+
+                // Client-side timer + polling
+                const startTime = Date.now();
+                const estSecsPerMillion = 15;
+                let pollInterval = setInterval(async () => {{
+                    try {{
+                        const status = await fetch('/load_status').then(r => r.json());
+                        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+
+                        if (status.state === 'done') {{
+                            clearInterval(pollInterval);
+                            lpBar.style.width = '100%';
+                            const numGs = status.num_gaussians || 0;
+                            lpLabel.textContent = 'Loaded! ' + (numGs / 1e6).toFixed(1) + 'M gaussians';
+                            lpDetail.textContent = 'Completed in ' + elapsed + 's';
+
+                            // Reset controls
+                            azSlider.value = 0;
+                            elSlider.value = 0;
+                            zoomSlider.value = 1;
+                            camSlider.value = 0;
+                            panX = 0; panY = 0; panZ = 0;
+                            syncSliderLabels();
+
+                            // Clear segmentation state
+                            showSegments = false;
+                            segmentMasks = [];
+                            segmentLabelMap = {{}};
+                            document.getElementById('segStatus').textContent = 'Click "Auto Segment" to detect objects';
+                            document.getElementById('labels-list').innerHTML = '';
+                            await fetch('/segment/clear', {{ method: 'POST' }}).catch(() => {{}});
+
+                            // Clear extraction state
+                            if (typeof viewingExtraction !== 'undefined') viewingExtraction = null;
+                            if (typeof extractions !== 'undefined') extractions = [];
+                            if (typeof extractMode !== 'undefined') extractMode = false;
+                            const extList = document.getElementById('extraction-list');
+                            if (extList) extList.innerHTML = '';
+                            const extStatus = document.getElementById('extractStatus');
+                            if (extStatus) extStatus.textContent = 'Click to extract 3D assets from scene';
+                            await fetch('/garfield/clear', {{ method: 'POST' }}).catch(() => {{}});
+
+                            // Update info and render
+                            const info = await fetch('/info').then(r => r.json());
+                            document.getElementById('num-gs').textContent = info.num_gaussians || 'N/A';
+
+                            setTimeout(() => {{
+                                lpContainer.style.display = 'none';
+                                updateRender();
+                            }}, 1500);
+
+                        }} else if (status.state === 'error') {{
+                            clearInterval(pollInterval);
+                            lpLabel.textContent = 'Load failed';
+                            lpDetail.textContent = status.error || 'Unknown error';
+                            lpBar.style.background = '#dc3545';
+                            lpBar.style.width = '100%';
+
+                        }} else {{
+                            // Still loading — animate progress bar based on elapsed time
+                            // Use a logarithmic curve that approaches but never reaches 95%
+                            const pct = Math.min(95, (1 - Math.exp(-elapsed / 60)) * 100);
+                            lpBar.style.width = pct.toFixed(0) + '%';
+                            lpDetail.textContent = elapsed + 's elapsed...';
+                        }}
+                    }} catch(e) {{
+                        // Polling fetch failed — server may be busy, keep trying
+                    }}
+                }}, 2000);
             }});
             
             // Delete current model
@@ -1952,35 +2023,64 @@ async def root():
                     input.value = '';
                     return;
                 }}
-                const btn = input.previousElementSibling;
+                const btn = document.getElementById('ply-upload-btn');
+                const progressContainer = document.getElementById('upload-progress-container');
+                const progressBar = document.getElementById('upload-progress-bar');
+                const progressText = document.getElementById('upload-progress-text');
                 const origText = btn.textContent;
                 btn.textContent = '⏳ Uploading...';
                 btn.disabled = true;
-                try {{
-                    const formData = new FormData();
-                    formData.append('file', file);
-                    const resp = await fetch('/upload_model', {{
-                        method: 'POST',
-                        body: formData
-                    }});
-                    const data = await resp.json();
-                    if (resp.ok) {{
-                        alert('Uploaded ' + file.name + ' successfully!');
+                progressContainer.style.display = 'flex';
+                progressBar.style.width = '0%';
+                progressText.textContent = '0%';
+
+                const sizeMB = (file.size / 1048576).toFixed(1);
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/upload_model');
+
+                xhr.upload.onprogress = function(e) {{
+                    if (e.lengthComputable) {{
+                        const pct = Math.round((e.loaded / e.total) * 100);
+                        progressBar.style.width = pct + '%';
+                        const loadedMB = (e.loaded / 1048576).toFixed(1);
+                        progressText.textContent = pct + '% (' + loadedMB + '/' + sizeMB + ' MB)';
+                    }}
+                }};
+
+                xhr.onload = async function() {{
+                    if (xhr.status >= 200 && xhr.status < 300) {{
+                        progressBar.style.width = '100%';
+                        progressText.textContent = 'Complete!';
                         await refreshModels();
-                        // Auto-load the uploaded model
                         const select = document.getElementById('model-select');
                         select.value = file.name;
                         select.dispatchEvent(new Event('change'));
                     }} else {{
-                        alert('Upload failed: ' + (data.detail || data.message || 'Unknown error'));
+                        try {{
+                            const data = JSON.parse(xhr.responseText);
+                            alert('Upload failed: ' + (data.detail || data.message || 'Unknown error'));
+                        }} catch(e) {{
+                            alert('Upload failed: HTTP ' + xhr.status);
+                        }}
                     }}
-                }} catch(e) {{
-                    alert('Upload error: ' + e);
-                }} finally {{
+                    setTimeout(() => {{ progressContainer.style.display = 'none'; }}, 3000);
                     btn.textContent = origText;
                     btn.disabled = false;
                     input.value = '';
-                }}
+                }};
+
+                xhr.onerror = function() {{
+                    alert('Upload error: network failure');
+                    progressContainer.style.display = 'none';
+                    btn.textContent = origText;
+                    btn.disabled = false;
+                    input.value = '';
+                }};
+
+                xhr.send(formData);
             }}
 
             // Refresh models list from server
@@ -2018,7 +2118,74 @@ async def root():
             let flyPlaying = false;
             let flyFrame = 0;
             let flyTimer = null;
-            let flyFrameCache = {{}};
+            let flyFrameCache = {{}};       // frame index -> Promise<objectURL|null>
+            let flyCacheKey = '';
+            let flyShownUrl = null;
+            let flyNextDue = 0;
+            const FLY_PREFETCH = 12;        // frames requested ahead of the playhead
+            
+            const FLY_MIN_SECONDS = {MIN_VIDEO_SECONDS};
+            function flyDuration() {{
+                // Videos are never shorter than the minimum length
+                const el = document.getElementById('flyDuration');
+                const d = Math.max(FLY_MIN_SECONDS, parseFloat(el.value) || FLY_MIN_SECONDS);
+                el.value = d;
+                return d;
+            }}
+            
+            function flyParams() {{
+                const fps = parseInt(document.getElementById('flyFps').value) || 30;
+                const duration = flyDuration();
+                const numFrames = Math.round(duration * fps);
+                const camIdx = parseInt(document.getElementById('camera').value) || 0;
+                const segParam = (typeof showSegments !== 'undefined' && showSegments) ? '&segments=true' : '';
+                return {{ numFrames, fps, duration, camIdx, segParam }};
+            }}
+            
+            function flyFrameUrl(i, p) {{
+                return `/flythrough/frame/${{i}}?num_frames=${{p.numFrames}}&width=1024&height=768&cam_idx=${{p.camIdx}}${{p.segParam}}`;
+            }}
+            
+            // Drop every cached frame (revoking blob URLs) when the path parameters change
+            function flyResetCache(p) {{
+                const key = `${{p.numFrames}}|${{p.camIdx}}|${{p.segParam}}`;
+                if (key === flyCacheKey) return;
+                Object.values(flyFrameCache).forEach(pr => pr.then(u => {{ if (u && u !== flyShownUrl) URL.revokeObjectURL(u); }}));
+                flyFrameCache = {{}};
+                flyCacheKey = key;
+            }}
+            
+            // Fetch a frame and pre-decode it so swapping it in never stalls the display
+            function flyFetchFrame(i, p) {{
+                if (!flyFrameCache[i]) {{
+                    flyFrameCache[i] = fetch(flyFrameUrl(i, p))
+                        .then(r => r.ok ? r.blob() : null)
+                        .then(async b => {{
+                            if (!b) return null;
+                            const u = URL.createObjectURL(b);
+                            const pre = new Image();
+                            pre.src = u;
+                            try {{ await pre.decode(); }} catch (e) {{}}
+                            return u;
+                        }})
+                        .catch(e => {{ console.error('Flythrough frame error:', e); return null; }});
+                }}
+                return flyFrameCache[i];
+            }}
+            
+            function flyShow(url) {{
+                if (!url) return;
+                const img = document.getElementById('render');
+                img.src = url;
+                img.style.display = 'block';
+                flyShownUrl = url;
+            }}
+            
+            function flyUpdateLabel(p) {{
+                document.getElementById('flyProgress').max = p.numFrames - 1;
+                document.getElementById('flyProgress').value = flyFrame;
+                document.getElementById('flyFrameLabel').textContent = `Frame ${{flyFrame}} / ${{p.numFrames}}`;
+            }}
             
             function toggleFlythrough() {{
                 if (flyPlaying) {{
@@ -2034,6 +2201,7 @@ async def root():
                 btn.textContent = '⏸ Pause';
                 btn.style.background = '#dc3545';
                 document.getElementById('flyStatus').textContent = 'Playing...';
+                flyNextDue = performance.now();
                 playNextFrame();
             }}
             
@@ -2047,79 +2215,59 @@ async def root():
                 document.getElementById('flyStatus').textContent = 'Paused';
             }}
             
+            // Steady-clock playback: frames are prefetched ahead of the playhead and shown
+            // on a drift-corrected schedule, instead of "fetch, then sleep 1/fps" which
+            // stacked network latency onto every frame and made playback uneven.
             async function playNextFrame() {{
                 if (!flyPlaying) return;
-                const numFrames = parseInt(document.getElementById('flyFrames').value) || 120;
-                const fps = parseInt(document.getElementById('flyFps').value) || 24;
-                const camIdx = parseInt(document.getElementById('camera').value) || 0;
+                const p = flyParams();
+                flyResetCache(p);
+                if (flyFrame >= p.numFrames) flyFrame = 0;
                 
-                // Update progress bar
-                document.getElementById('flyProgress').max = numFrames - 1;
-                document.getElementById('flyProgress').value = flyFrame;
-                document.getElementById('flyFrameLabel').textContent = `Frame ${{flyFrame}} / ${{numFrames}}`;
+                for (let k = 0; k < FLY_PREFETCH; k++) flyFetchFrame((flyFrame + k) % p.numFrames, p);
                 
-                // Fetch and display frame (with segments overlay if active)
-                const segParam = (typeof showSegments !== 'undefined' && showSegments) ? '&segments=true' : '';
-                const url = `/flythrough/frame/${{flyFrame}}?num_frames=${{numFrames}}&width=1024&height=768&cam_idx=${{camIdx}}${{segParam}}`;
-                try {{
-                    const response = await fetch(url);
-                    if (response.ok) {{
-                        const blob = await response.blob();
-                        const img = document.getElementById('render');
-                        img.src = URL.createObjectURL(blob);
-                        img.style.display = 'block';
-                    }}
-                }} catch(e) {{
-                    console.error('Flythrough frame error:', e);
+                // Wait for the frame if it is not ready yet (hold rather than skip)
+                const url = await flyFetchFrame(flyFrame, p);
+                if (!flyPlaying) return;
+                flyShow(url);
+                flyUpdateLabel(p);
+                
+                // Release frames behind the playhead (keep the one on screen)
+                const behind = (flyFrame - 2 + p.numFrames) % p.numFrames;
+                const old = flyFrameCache[behind];
+                if (old && behind !== flyFrame) {{
+                    delete flyFrameCache[behind];
+                    old.then(u => {{ if (u && u !== flyShownUrl) URL.revokeObjectURL(u); }});
                 }}
                 
-                // Advance to next frame
-                flyFrame = (flyFrame + 1) % numFrames;
-                if (flyFrame === 0 && flyPlaying) {{
-                    // Loop completed
-                    document.getElementById('flyStatus').textContent = 'Looping...';
-                }}
+                flyFrame = (flyFrame + 1) % p.numFrames;
+                if (flyFrame === 0) document.getElementById('flyStatus').textContent = 'Looping...';
                 
-                if (flyPlaying) {{
-                    // Schedule next frame - adapt delay based on actual render time
-                    flyTimer = setTimeout(playNextFrame, 1000 / fps);
-                }}
+                const interval = 1000 / p.fps;
+                const now = performance.now();
+                flyNextDue = Math.max(flyNextDue + interval, now);   // no catch-up bursts after a stall
+                flyTimer = setTimeout(playNextFrame, flyNextDue - now);
             }}
             
             async function seekFlythrough(frameNum) {{
+                const p = flyParams();
+                flyResetCache(p);
                 flyFrame = parseInt(frameNum);
-                const numFrames = parseInt(document.getElementById('flyFrames').value) || 120;
-                const camIdx = parseInt(document.getElementById('camera').value) || 0;
-                document.getElementById('flyFrameLabel').textContent = `Frame ${{flyFrame}} / ${{numFrames}}`;
-                
-                const segParam = (typeof showSegments !== 'undefined' && showSegments) ? '&segments=true' : '';
-                const url = `/flythrough/frame/${{flyFrame}}?num_frames=${{numFrames}}&width=1024&height=768&cam_idx=${{camIdx}}${{segParam}}`;
-                try {{
-                    const response = await fetch(url);
-                    if (response.ok) {{
-                        const blob = await response.blob();
-                        const img = document.getElementById('render');
-                        img.src = URL.createObjectURL(blob);
-                        img.style.display = 'block';
-                    }}
-                }} catch(e) {{
-                    console.error('Seek error:', e);
-                }}
+                flyUpdateLabel(p);
+                const url = await flyFetchFrame(flyFrame, p);
+                flyShow(url);
             }}
             
             async function exportFlythrough() {{
-                const numFrames = parseInt(document.getElementById('flyFrames').value) || 120;
-                const fps = parseInt(document.getElementById('flyFps').value) || 24;
-                const camIdx = parseInt(document.getElementById('camera').value) || 0;
+                const {{ numFrames, fps, duration, camIdx, segParam }} = flyParams();
                 const btn = document.getElementById('exportBtn');
                 btn.disabled = true;
                 btn.textContent = '⏳ Rendering...';
-                document.getElementById('flyStatus').textContent = `Exporting ${{numFrames}} frames...`;
+                document.getElementById('flyStatus').textContent = `Exporting ${{duration}}s (${{numFrames}} frames)...`;
                 
                 try {{
-                    const segParam = (typeof showSegments !== 'undefined' && showSegments) ? '&segments=true' : '';
                     const response = await fetch(
-                        `/flythrough/export?num_frames=${{numFrames}}&fps=${{fps}}&width=1024&height=768&cam_idx=${{camIdx}}${{segParam}}`,
+                        `/flythrough/export?duration=${{duration}}&fps=${{fps}}&width=1024&height=768&cam_idx=${{camIdx}}${{segParam}}`,
                         {{ method: 'POST' }}
                     );
                     if (response.ok) {{
@@ -3266,11 +3414,37 @@ async def render(
 
 @app.get("/load_model")
 async def load_model_endpoint(model: str = Query(...)):
-    """Load a different model"""
-    success = load_model(model)
-    if success:
-        return {"status": "ok", "model": model_name, "num_gaussians": gsplat.num_gaussians}
-    return {"status": "error", "message": "Failed to load model"}
+    """Load a different model in a background thread so the server stays responsive."""
+    import asyncio
+    global loading_status
+
+    if loading_status["state"] == "loading":
+        return {"status": "already_loading", "model": loading_status["model"]}
+
+    loading_status = {"state": "loading", "model": model, "error": ""}
+
+    async def _bg_load():
+        global loading_status
+        try:
+            success = await asyncio.to_thread(load_model, model)
+            if success:
+                loading_status = {"state": "done", "model": model_name, "error": ""}
+            else:
+                loading_status = {"state": "error", "model": model, "error": "Failed to load model"}
+        except Exception as e:
+            logger.error(f"Background model load failed: {e}")
+            loading_status = {"state": "error", "model": model, "error": str(e)}
+
+    asyncio.create_task(_bg_load())
+    return {"status": "loading", "model": model}
+
+@app.get("/load_status")
+async def load_status_endpoint():
+    """Poll the current model loading status."""
+    result = dict(loading_status)
+    if loading_status["state"] == "done" and gsplat is not None:
+        result["num_gaussians"] = gsplat.num_gaussians
+    return result
 
 @app.get("/info")
 async def info():
@@ -3803,35 +3977,7 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "nemotron-mini")
 
 
-def _extract_file_text(file_info: dict, max_chars: int = 2000) -> str:
-    """Extract readable text from an uploaded file for RAG context."""
-    ct = file_info.get("content_type", "")
-    data = file_info.get("data", b"")
-    name = file_info.get("name", "file")
-    
-    # Plain text, JSON, CSV, markdown, etc.
-    if "text" in ct or ct in ("application/json", "application/csv"):
-        try:
-            return data.decode("utf-8", errors="replace")[:max_chars]
-        except Exception:
-            return ""
-    
-    # PDF extraction using PyMuPDF
-    if ct == "application/pdf" or name.lower().endswith(".pdf"):
-        try:
-            import io
-            import fitz  # PyMuPDF
-            doc = fitz.open(stream=data, filetype="pdf")
-            text_parts = []
-            for page in doc[:10]:
-                text_parts.append(page.get_text())
-            doc.close()
-            return "\n".join(text_parts)[:max_chars]
-        except Exception:
-            return f"[PDF file: {name}, {file_info.get('size', 'unknown size')}]"
-    
-    # Non-text files: include name/type as context
-    return f"[Uploaded file: {name}, type: {ct}, size: {file_info.get('size', 'unknown')}]"
+_extract_file_text = extract_file_text
 
 
 def _build_rag_context(model_name: str = None) -> str:
@@ -3988,27 +4134,13 @@ async def get_rag_context(model: str = Query(None)):
 @app.get("/rag/status")
 async def get_rag_status():
     """Check if the Ollama LLM is reachable and the model is available"""
-    try:
-        import requests as req
-        resp = req.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-        if resp.status_code == 200:
-            models = [m["name"] for m in resp.json().get("models", [])]
-            # Check if our model (or a prefix match) is available
-            matched = [m for m in models if OLLAMA_MODEL in m]
-            if matched:
-                return {"available": True, "model": matched[0], "all_models": models}
-            else:
-                return {"available": False, "error": f"Model '{OLLAMA_MODEL}' not found. Available: {models}", "all_models": models}
-        return {"available": False, "error": f"Ollama returned {resp.status_code}"}
-    except Exception as e:
-        return {"available": False, "error": str(e)}
+    return ollama_status(OLLAMA_URL, OLLAMA_MODEL)
 
 
 @app.post("/rag/query")
 async def rag_query(body: dict):
     """Query the LLM with RAG context from the scene. Streams SSE tokens."""
     from starlette.responses import StreamingResponse
-    import requests as req
 
     query = body.get("query", "").strip()
     model_name = body.get("model")
@@ -4021,59 +4153,20 @@ async def rag_query(body: dict):
     context = _build_rag_context(model_name)
 
     # Build messages
-    system_msg = (
-        "You are an AI assistant for a 3D Gaussian Splat viewer application. "
-        "You help users understand what is in their 3D scene based on available data including: "
-        "SAM-2 segmentation results, GARField 3D extractions, uploaded documents/data, "
-        "and scene metadata. Answer concisely and accurately based on the "
-        "available context. If you don't have enough information, say so.\n\n"
-        "=== Scene Context ===\n"
-        f"{context if context else 'No context data available yet. Try: (1) Run SAM-2 Auto Segment to detect objects, (2) Use GARField Click to Extract for 3D extractions, (3) Upload documents via Upload Info.'}\n"
-        "=== End Context ==="
+    system_msg = build_system_prompt(
+        context,
+        sources="SAM-2 segmentation results, GARField 3D extractions",
+        empty_hint="No context data available yet. Try: (1) Run SAM-2 Auto Segment to detect objects, "
+                   "(2) Use GARField Click to Extract for 3D extractions, (3) Upload documents via Upload Info.",
     )
-
     messages = [{"role": "system", "content": system_msg}]
     # Add conversation history (last 10 exchanges max)
     for msg in history[-20:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": query})
 
-    # Find the actual model name
-    try:
-        tags_resp = req.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-        available_models = [m["name"] for m in tags_resp.json().get("models", [])]
-        actual_model = next((m for m in available_models if OLLAMA_MODEL in m), OLLAMA_MODEL)
-    except Exception:
-        actual_model = OLLAMA_MODEL
-
-    def stream_response():
-        try:
-            resp = req.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={"model": actual_model, "messages": messages, "stream": True},
-                stream=True,
-                timeout=120,
-            )
-            if resp.status_code != 200:
-                yield f"data: {json.dumps({'error': f'Ollama error {resp.status_code}: {resp.text[:200]}'})}\n\n"
-                return
-
-            for line in resp.iter_lines():
-                if line:
-                    try:
-                        chunk = json.loads(line)
-                        token = chunk.get("message", {}).get("content", "")
-                        done = chunk.get("done", False)
-                        if token:
-                            yield f"data: {json.dumps({'token': token})}\n\n"
-                        if done:
-                            yield f"data: {json.dumps({'done': True})}\n\n"
-                    except json.JSONDecodeError:
-                        pass
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
-    return StreamingResponse(stream_response(), media_type="text/event-stream")
+    return StreamingResponse(ollama_stream_sse(OLLAMA_URL, OLLAMA_MODEL, messages),
+                             media_type="text/event-stream")
 
 
 # ===== GARField 3D Extraction Endpoints =====
@@ -4546,27 +4639,6 @@ def render_extracted_gaussians(job_id, width, height, azimuth, elevation, zoom):
 
 # ===== Camera Flythrough Endpoints =====
 
-def _slerp_rotation_np(R1_np, R2_np, t):
-    """Spherical linear interpolation between two 3x3 rotation matrices (numpy, CPU).
-    Uses SVD re-orthogonalization to ensure a proper rotation."""
-    R_blend = (1 - t) * R1_np + t * R2_np
-    U, _, Vt = np.linalg.svd(R_blend)
-    # Ensure proper rotation (det = +1)
-    det = np.linalg.det(U @ Vt)
-    diag = np.array([1, 1, np.sign(det)])
-    return U @ np.diag(diag) @ Vt
-
-
-def _catmull_rom_np(p0, p1, p2, p3, t):
-    """Catmull-Rom spline interpolation for smooth position curves (numpy, CPU)."""
-    return 0.5 * (
-        2 * p1 +
-        (-p0 + p2) * t +
-        (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t +
-        (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t
-    )
-
-
 def _has_camera_path():
     """Check if current model has multiple trained camera positions for path interpolation."""
     if model_metadata is None:
@@ -4599,43 +4671,40 @@ def _render_orbit_frame(frame_num, num_frames, width, height, cam_idx=0, return_
     return img
 
 
+_smooth_path_cache = {"key": None, "path": None}
+
+
+def _get_smooth_camera_path():
+    """Build (and cache per model) the shared smoothed, constant-speed camera path."""
+    c2w_all = model_metadata.get('camera_to_world_matrices')
+    key = (model_name, id(c2w_all), tuple(c2w_all.shape))
+    if _smooth_path_cache["key"] == key:
+        return _smooth_path_cache["path"]
+    path = build_smooth_path(
+        c2w_all.detach().cpu().numpy(),
+        model_metadata.get('projection_matrices').detach().cpu().numpy(),
+        model_metadata.get('image_sizes').detach().cpu().numpy(),
+    )
+    _smooth_path_cache.update(key=key, path=path)
+    logger.info(f"Built smoothed flythrough path for {model_name}: "
+                f"{path['num_cameras']} cameras, sigma={path['sigma']:.1f}")
+    return path
+
+
 def _render_camera_path_frame(frame_num, num_frames, width, height, return_matrices=False):
-    """Interpolate between trained camera positions using Catmull-Rom + SLERP.
-    All interpolation done on CPU (numpy) to avoid nvrtc JIT issues on aarch64.
-    Only the final matrices are sent to GPU for rendering."""
+    """Sample the smoothed, densely resampled camera path at constant speed (with
+    ease-in/out). All interpolation done on CPU (numpy) to avoid nvrtc JIT issues
+    on aarch64. Only the final matrices are sent to GPU for rendering."""
     import torch
     
     if gsplat is None or model_metadata is None:
         return (None, None, None) if return_matrices else None
     
     try:
-        c2w_all = model_metadata.get('camera_to_world_matrices')
-        K_all = model_metadata.get('projection_matrices')
-        sizes = model_metadata.get('image_sizes')
-        
-        num_cams = c2w_all.shape[0]
-        
-        # Map frame number to position along camera path (0 to num_cams, wrapping)
-        t_total = frame_num / num_frames
-        pos = t_total * num_cams
-        idx = int(pos)
-        frac = pos - idx
-        
-        # 4 camera indices for Catmull-Rom (wrapping)
-        def ci(i):
-            return i % num_cams
-        
-        i0, i1, i2, i3 = ci(idx - 1), ci(idx), ci(idx + 1), ci(idx + 2)
-        
-        # Convert to numpy for CPU interpolation
-        c0 = c2w_all[i0].cpu().numpy().astype(np.float32)
-        c1 = c2w_all[i1].cpu().numpy().astype(np.float32)
-        c2_np = c2w_all[i2].cpu().numpy().astype(np.float32)
-        c3 = c2w_all[i3].cpu().numpy().astype(np.float32)
-        
-        # Catmull-Rom for position, SLERP for rotation (all numpy/CPU)
-        pos_interp = _catmull_rom_np(c0[:3, 3], c1[:3, 3], c2_np[:3, 3], c3[:3, 3], frac)
-        rot_interp = _slerp_rotation_np(c1[:3, :3], c2_np[:3, :3], frac)
+        # Map frame to [0, 1] along the path (first frame = start, last frame = end),
+        # eased so the video starts and stops gently instead of snapping.
+        u = ease_in_out(frame_num / max(num_frames - 1, 1))
+        pos_interp, rot_interp, K_np, _ = sample_path(_get_smooth_camera_path(), u)
         
         # Build interpolated c2w on CPU then transfer to GPU
         c2w_np = np.eye(4, dtype=np.float32)
@@ -4645,13 +4714,10 @@ def _render_camera_path_frame(frame_num, num_frames, width, height, return_matri
         c2w = torch.from_numpy(c2w_np).unsqueeze(0).to(device).contiguous()
         w2c = torch.inverse(c2w).contiguous()
         
-        # Projection matrix from nearest camera, scaled to output size
-        nearest_idx = i1 if frac < 0.5 else i2
-        orig_h, orig_w = sizes[nearest_idx].tolist()
-        K = K_all[nearest_idx:nearest_idx+1].to(device).clone()
-        K[:, 0, :] *= width / orig_w
-        K[:, 1, :] *= height / orig_h
-        K = K.contiguous()
+        # Intrinsics blended along the path (no pop between cameras), scaled to output size
+        K_np[0, :] *= width
+        K_np[1, :] *= height
+        K = torch.from_numpy(K_np.astype(np.float32)).unsqueeze(0).to(device).contiguous()
         
         images, alpha = gsplat.render_images(
             world_to_camera_matrices=w2c,
@@ -4680,9 +4746,12 @@ def _render_camera_path_frame(frame_num, num_frames, width, height, return_matri
         return None
 
 
+MAX_FLYTHROUGH_FRAMES = 120 * 60  # up to 2 minutes at 60 fps
+
+
 @app.get("/flythrough/config")
 async def flythrough_config(
-    num_frames: int = Query(120, ge=10, le=600),
+    num_frames: int = Query(MIN_VIDEO_SECONDS * 30, ge=10, le=MAX_FLYTHROUGH_FRAMES),
     cam_idx: int = Query(0, ge=0)
 ):
     """Get the flythrough camera path configuration"""
@@ -4701,7 +4770,7 @@ async def flythrough_config(
 @app.get("/flythrough/frame/{frame_num}")
 async def flythrough_frame(
     frame_num: int,
-    num_frames: int = Query(120, ge=10, le=600),
+    num_frames: int = Query(MIN_VIDEO_SECONDS * 30, ge=10, le=MAX_FLYTHROUGH_FRAMES),
     width: int = Query(1024, ge=100, le=1920),
     height: int = Query(768, ge=100, le=1080),
     cam_idx: int = Query(0, ge=0),
@@ -4737,46 +4806,47 @@ async def flythrough_frame(
 
 @app.post("/flythrough/export")
 async def flythrough_export(
-    num_frames: int = Query(120, ge=10, le=600),
+    duration: float = Query(MIN_VIDEO_SECONDS, gt=0, le=120),  # raised to MIN_VIDEO_SECONDS
     width: int = Query(1024, ge=100, le=1920),
     height: int = Query(768, ge=100, le=1080),
     fps: int = Query(30, ge=1, le=60),
     cam_idx: int = Query(0, ge=0),
     segments: bool = Query(False)
 ):
-    """Export flythrough as MP4 video using OpenCV.
-    If segments=true, applies segmentation overlay on each frame."""
-    import cv2
-    
+    """Export flythrough as a universally playable H.264 MP4 of at least
+    MIN_VIDEO_SECONDS. If segments=true, applies segmentation overlay on each frame."""
+    num_frames = frames_for_duration(duration, fps)
     suffix = '_segmented' if segments else ''
     output_path = MODEL_DIR / f"{model_name}_flythrough{suffix}.mp4"
+    writer = H264Writer(output_path, width, height, fps)
+    width, height = writer.width, writer.height
     
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
-    
-    if not writer.isOpened():
-        return JSONResponse(status_code=500, content={"message": "Failed to initialize video writer"})
-    
+    rendered = 0
+    last_img = None
     try:
-        rendered = 0
         use_3d_seg = segments and gaussian_segment_ids is not None
         for i in range(num_frames):
             if use_3d_seg:
                 result = render_flythrough_frame(i, num_frames, width, height, return_matrices=True)
-                if result is None or result[0] is None:
-                    continue
-                img, w2c, K_mat = result
-                if w2c is not None:
-                    img = create_3d_segment_overlay(img, w2c, K_mat, width, height)
+                img = None
+                if result is not None and result[0] is not None:
+                    img, w2c, K_mat = result
+                    if w2c is not None:
+                        img = create_3d_segment_overlay(img, w2c, K_mat, width, height)
             else:
                 img = render_flythrough_frame(i, num_frames, width, height)
-                if img is None:
-                    continue
-            bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            writer.write(bgr)
+            # Repeat the previous frame on a render failure to keep timing constant
+            img = last_img if img is None else np.ascontiguousarray(img[..., :3], dtype=np.uint8)
+            if img is None:
+                continue
+            writer.write(img.tobytes())
+            last_img = img
             rendered += 1
-    finally:
-        writer.release()
+        writer.close()
+    except Exception as e:
+        writer.abort()
+        logger.error(f"Flythrough export failed: {e}")
+        return JSONResponse(status_code=500, content={"message": f"Video export failed: {e}"})
     
     if rendered == 0:
         return JSONResponse(status_code=500, content={"message": "No frames rendered"})

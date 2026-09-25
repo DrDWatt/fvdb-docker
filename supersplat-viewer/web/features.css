@@ -1,0 +1,81 @@
+/* Flythrough, RAG and metadata-link UI for the SuperSplat viewer page.
+   Reuses the page's base button/progress styles (.btn-*, .progress-bar-*, .popup-close). */
+
+/* ----- Flythrough section ----- */
+.fly-options { display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: #aaa; }
+.fly-options label { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.fly-options input, .fly-options select {
+    width: 100%; padding: 4px 6px; font-size: 12px; border-radius: 6px;
+    border: 1px solid #333; background: #1a1a2e; color: #e0e0e0;
+}
+#fly-progress { width: 100%; margin-top: 8px; accent-color: #17a2b8; }
+.fly-meta { display: flex; justify-content: space-between; gap: 6px; font-size: 11px; color: #888; }
+#fly-status { text-align: right; }
+#fly-export-progress { margin-top: 6px; height: 8px; }
+
+/* ----- Metadata link buttons in object / extraction lists ----- */
+.meta-link {
+    margin-left: auto; padding: 1px 6px; font-size: 11px;
+    background: #17a2b8; border-color: #17a2b8; color: #fff;
+}
+.btn-warning { background: #ffc107; color: #000; border-color: #ffc107; font-weight: 600; }
+.btn-warning:hover { background: #e0a800; }
+
+/* ----- RAG pane (bottom center, like :8085) ----- */
+#rag-pane {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 1000;
+    display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+    background: rgba(10, 10, 20, 0.92); border: 1px solid #ffc107; border-radius: 10px;
+    backdrop-filter: blur(10px);
+}
+#rag-pane .rag-title { color: #ffc107; font-weight: 600; font-size: 13px; white-space: nowrap; }
+
+/* ----- Modals ----- */
+.rag-modal {
+    position: fixed; inset: 0; z-index: 9500; background: rgba(0, 0, 0, 0.8);
+    display: flex; align-items: center; justify-content: center;
+}
+.rag-dialog {
+    width: 90%; max-width: 700px; max-height: 85vh; display: flex; flex-direction: column; gap: 10px;
+    background: #1a1a2e; border: 2px solid #00d4ff; border-radius: 12px; padding: 24px;
+}
+.rag-dialog-small { max-width: 480px; border-color: #17a2b8; }
+.rag-dialog-head { display: flex; justify-content: space-between; align-items: center; }
+.rag-dialog-head h2 { margin: 0; font-size: 16px; color: #00d4ff; }
+.rag-summary {
+    white-space: pre-wrap; font-size: 13px; line-height: 1.5; color: #eee; max-height: 120px;
+    overflow-y: auto; padding: 10px; background: rgba(0, 0, 0, 0.3); border-radius: 6px;
+}
+.rag-chat {
+    flex: 1; min-height: 150px; max-height: 350px; overflow-y: auto; padding: 10px;
+    background: rgba(0, 0, 0, 0.25); border-radius: 6px;
+}
+.rag-msg { margin-bottom: 10px; }
+.rag-msg span {
+    display: inline-block; max-width: 85%; padding: 6px 12px; font-size: 13px; white-space: pre-wrap;
+}
+.rag-user { text-align: right; }
+.rag-user span { background: #00d4ff; color: #1a1a2e; border-radius: 12px 12px 2px 12px; text-align: left; }
+.rag-assistant span { background: rgba(255, 255, 255, 0.1); color: #eee; border-radius: 12px 12px 12px 2px; }
+.rag-input-row { display: flex; gap: 8px; }
+.rag-input-row input {
+    flex: 1; padding: 10px 14px; font-size: 14px; border-radius: 6px;
+    border: 1px solid #555; background: rgba(0, 0, 0, 0.4); color: #eee;
+}
+
+/* ----- Metadata panel (right side) ----- */
+#meta-panel {
+    position: absolute; top: 10px; right: 10px; width: 300px; z-index: 1100;
+    display: flex; flex-direction: column; gap: 8px; padding: 14px;
+    background: rgba(10, 10, 20, 0.94); border: 1px solid #17a2b8; border-radius: 12px;
+    backdrop-filter: blur(10px); font-size: 12px;
+}
+#meta-panel h2 { color: #17a2b8; font-size: 14px; }
+#meta-panel input[type="text"], #meta-panel textarea {
+    width: 100%; padding: 6px 8px; font-size: 12px; border-radius: 6px;
+    border: 1px solid #333; background: #1a1a2e; color: #e0e0e0;
+}
+#meta-panel textarea { min-height: 80px; resize: vertical; }
+#meta-file-list { list-style: none; max-height: 100px; overflow-y: auto; }
+#meta-file-list a { color: #00d4ff; }
+#meta-file-list small { color: #888; }

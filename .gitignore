@@ -50,7 +50,10 @@ venv/
 *.swo
 
 # Docker volumes (managed separately)
-shared/
+shared/*
+# ...except source code shared by the splat viewers (:8085 / :8086)
+!shared/viewer_common/
+shared/viewer_common/__pycache__/
 
 # SSL certificates (sensitive)
 streaming-server/cert.pem

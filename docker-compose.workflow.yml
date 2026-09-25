@@ -287,8 +287,9 @@ services:
     build:
       context: ./supersplat-viewer
       dockerfile: Dockerfile
-      args:
-        - HF_TOKEN=${HF_TOKEN:-}
+      # HF token as a BuildKit secret (never stored in image layers)
+      secrets:
+        - hf_token
     image: supersplat-viewer:latest
     container_name: supersplat-viewer
     runtime: nvidia
@@ -297,6 +298,11 @@ services:
     volumes:
       - ./models:/app/splat-models
       - ./supersplat-viewer/supersplat_service.py:/app/supersplat_service.py:ro
+      # Flythrough/MP4 export + metadata/RAG routers and their frontend modules
+      - ./supersplat-viewer/features:/app/features:ro
+      - ./supersplat-viewer/web:/app/web:ro
+      # Flythrough path, H.264 encoder and RAG helpers shared with fvdb-viewer (:8085)
+      - ./shared/viewer_common:/app/viewer_common:ro
       - ./cache/sam3:/app/models/sam3
       - ./outputs:/app/outputs
       - ./cache/supersplat:/app/cache
@@ -308,6 +314,9 @@ services:
       - MODEL_DIR=/app/splat-models
       - SAM3_MODEL_DIR=/app/models/sam3
       - TRELLIS_URL=http://trellis-reconstructor:8013
+      - MODEL_SERVICE_URL=http://rendering-service:8001
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=nemotron-mini
       - HF_TOKEN=${HF_TOKEN:-}
     deploy:
       resources:
@@ -332,6 +341,11 @@ networks:
     driver: bridge
   fvdb-workflow-net:
     external: true
+
+secrets:
+  # Build-time Hugging Face token for the gated SAM3 download (from HF_TOKEN in .env)
+  hf_token:
+    environment: HF_TOKEN
 
 volumes:
   colmap-data:
