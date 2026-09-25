@@ -23,7 +23,35 @@ usd-outputs/
 models/*.ply
 models/*.pt
 models/*.pth
+# Generated flythrough videos
+models/*.mp4
 test-models/
+
+# Model caches and captures (multi-GB; provisioned per host, not versioned)
+trellis-data/
+ollama-data/
+isaac-data/
+cusfm-data/
+
+# NVIDIA TensorRT / AI runtime libraries (vendor binaries, >100 MB)
+dependencies/
+
+# Stereolabs ZED SDK installed into this directory (proprietary vendor install)
+/lib/
+/tools/
+/resources/
+/firmware/
+/include/
+/desktop/
+/samples/
+/icons/
+/doc/API/
+/doc/license/
+/zed-config.cmake
+/zed-config-version.cmake
+/get_python_api.py
+/linux_install_release.sh
+/99-slabs.rules
 
 # SpectacularAI data
 spectacularai-data/uploads/

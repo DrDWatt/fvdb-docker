@@ -1,0 +1,44 @@
+FROM nginx:alpine
+COPY architecture.md /usr/share/nginx/html/
+COPY DGX-SPARK-DEPLOYMENT.md /usr/share/nginx/html/
+
+# Create a simple index page that links to the docs
+RUN cat > /usr/share/nginx/html/index.html << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Reality Engine - Documentation</title>
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #0B0D12; color: #fff; margin: 0; padding: 40px; }
+        h1 { color: #7DB5FF; }
+        a { color: #2F6BFF; text-decoration: none; font-size: 1.2em; }
+        a:hover { color: #7DB5FF; }
+        .doc-list { margin-top: 30px; }
+        .doc-list li { margin: 15px 0; }
+        pre { background: #181C28; padding: 20px; border-radius: 8px; overflow-x: auto; color: #C7CBD1; }
+        .container { max-width: 800px; margin: 0 auto; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Reality Engine Platform Documentation</h1>
+    <ul class="doc-list">
+        <li><a href="/architecture.md">Architecture Diagram (Mermaid)</a></li>
+        <li><a href="/DGX-SPARK-DEPLOYMENT.md">DGX Spark / GB10 Deployment Guide</a></li>
+    </ul>
+    <h2 style="color:#C7CBD1;margin-top:40px;">Quick Pull Command</h2>
+    <pre>aws ecr get-login-password --region us-east-1 | \
+  docker login --username AWS --password-stdin 172176423313.dkr.ecr.us-east-1.amazonaws.com
+
+docker pull 172176423313.dkr.ecr.us-east-1.amazonaws.com/reality-engine:docs
+docker run -d -p 8080:80 172176423313.dkr.ecr.us-east-1.amazonaws.com/reality-engine:docs</pre>
+</div>
+</body>
+</html>
+EOF
+
+# Serve .md files as plain text
+RUN echo 'types { text/plain md; }' > /etc/nginx/conf.d/md.conf
+
+EXPOSE 80

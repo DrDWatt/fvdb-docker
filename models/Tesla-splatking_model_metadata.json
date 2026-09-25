@@ -1,0 +1,24 @@
+{
+  "num_gaussians": 1493229,
+  "num_gaussians_cleaned": 1392220,
+  "device": "cuda:0",
+  "num_channels": 3,
+  "num_images": 189,
+  "training_steps": 40000,
+  "optimizer": "standard",
+  "output_file": "/app/outputs/job_20260511_010450_207959/Tesla-splatking_model.ply",
+  "cleanup_stats": {
+    "original": 1493229,
+    "low_opacity_removed": 5492,
+    "large_scale_removed": 7439,
+    "scale_threshold": 0.31057825684547424,
+    "spatial_removed": 14803,
+    "spatial_threshold": 48.206886291503906,
+    "knn_isolated_removed": 73275,
+    "knn_threshold": 0.13228754488669672,
+    "final": 1392220,
+    "removed": 101009,
+    "pct_removed": 6.8,
+    "file_size_mb": 313.4
+  }
+}

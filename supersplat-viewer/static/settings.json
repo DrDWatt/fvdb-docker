@@ -1,0 +1,14 @@
+{
+    "camera": {
+        "fov": 60,
+        "nearClip": 0.01,
+        "farClip": 10000
+    },
+    "controls": {
+        "orbitSensitivity": 0.3,
+        "zoomSensitivity": 0.4
+    },
+    "rendering": {
+        "backgroundColor": [0.04, 0.04, 0.06]
+    }
+}

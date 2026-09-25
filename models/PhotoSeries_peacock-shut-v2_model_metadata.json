@@ -1,0 +1,24 @@
+{
+  "num_gaussians": 899706,
+  "num_gaussians_cleaned": 840335,
+  "device": "cuda:0",
+  "num_channels": 3,
+  "num_images": 71,
+  "training_steps": 30000,
+  "optimizer": "standard",
+  "output_file": "/app/outputs/job_20260522_231851_014863/PhotoSeries_peacock-shut-v2_model.ply",
+  "cleanup_stats": {
+    "original": 899706,
+    "low_opacity_removed": 1717,
+    "large_scale_removed": 4490,
+    "scale_threshold": 0.4650734066963196,
+    "spatial_removed": 8935,
+    "spatial_threshold": 10.27014446258545,
+    "knn_isolated_removed": 44229,
+    "knn_threshold": 0.14852635355919122,
+    "final": 840335,
+    "removed": 59371,
+    "pct_removed": 6.6,
+    "file_size_mb": 189.1
+  }
+}

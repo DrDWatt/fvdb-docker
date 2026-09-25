@@ -1,0 +1,24 @@
+{
+  "num_gaussians": 633834,
+  "num_gaussians_cleaned": 588061,
+  "device": "cuda:0",
+  "num_channels": 3,
+  "num_images": 122,
+  "training_steps": 40000,
+  "optimizer": "standard",
+  "output_file": "/app/outputs/job_20260417_031035_599922/APL-copter-ultra_model.ply",
+  "cleanup_stats": {
+    "original": 633834,
+    "low_opacity_removed": 5426,
+    "large_scale_removed": 3143,
+    "scale_threshold": 0.7458881139755249,
+    "spatial_removed": 6253,
+    "spatial_threshold": 65.2808837890625,
+    "knn_isolated_removed": 30951,
+    "knn_threshold": 0.4609417962872749,
+    "final": 588061,
+    "removed": 45773,
+    "pct_removed": 7.2,
+    "file_size_mb": 132.4
+  }
+}
