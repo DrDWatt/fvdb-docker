@@ -21,6 +21,20 @@
   `projection_matrices`, `image_sizes`, `median_depths`); `supersplat-viewer/features/flythrough.py` reads them with numpy.
   The SuperSplat viewer displays splats rotated (0, 0, 180): viewer = (-x, -y, z).
 
+## Tests (`tests/`, `docker-compose.test.yml`)
+| Suite | Where | Command |
+|---|---|---|
+| Unit: Python (`tests/unit`, GPU parts faked) + JS (`tests/js`, node:test) | runner container | `docker compose -f docker-compose.test.yml run --rm viewer-tests` |
+| Integration (`tests/integration`, real GPU services) | isolated test stack | `docker compose -f docker-compose.test.yml --profile integration up -d` then `docker compose -f docker-compose.test.yml run --rm viewer-tests pytest -m "integration and not slow"` |
+| TRELLIS.2 mesh (`-m slow`, ~5 min, needs ~40 GB free) | test stack + shared TRELLIS | `... run --rm viewer-tests pytest -m slow` |
+| Browser E2E (`tests/browser`, host Chromium + GPU) | host | `node --test --test-concurrency=1 tests/browser/` |
+- The test stack (`fvdb-test` project: ports 18085/18086, own `./test-models`, own rendering service) never
+  touches the dev viewers; tests seed `APL-copter-ultra_model.ply` into `./test-models`.
+  Tear down with `docker compose -f docker-compose.test.yml --profile integration down`.
+- Each capability is covered for both viewers: navigation, segmentation, 3D extraction/reconstruction,
+  typed + uploaded object/extraction metadata, RAG document upload, RAG chat, PLY upload/download,
+  flythrough, 30 s+ H.264 MP4 export.
+
 ## Verification
 - Health: `curl localhost:8085/health`, `curl localhost:8086/health`
 - Export (≥30 s, H.264 High yuv420p): `curl -X POST -o f.mp4 "localhost:8085/flythrough/export?duration=30&fps=30"`,

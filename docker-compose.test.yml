@@ -1,0 +1,100 @@
+# Test environment for the splat viewers.
+#
+#   Unit + frontend tests (no GPU services):
+#     docker compose -f docker-compose.test.yml run --rm viewer-tests
+#   Integration tests against an isolated copy of both viewers (own ports, own model
+#   directory ./test-models, own rendering service), never touching the dev stack:
+#     docker compose -f docker-compose.test.yml --profile integration up -d
+#     docker compose -f docker-compose.test.yml run --rm viewer-tests pytest -m integration
+#     docker compose -f docker-compose.test.yml --profile integration down
+name: fvdb-test
+
+x-viewer-common: &viewer-common
+  runtime: nvidia
+  restart: "no"
+  profiles: ["integration"]
+  networks: [test-net, fvdb-workflow-net]
+
+services:
+  # Model summaries ("Upload Info") are stored here, not in the dev rendering service
+  rendering-service-test:
+    image: fvdb-rendering-minimal:latest
+    profiles: ["integration"]
+    volumes:
+      - ./test-models:/app/models
+      - ./rendering-service/rendering_service_clean.py:/app/rendering_service.py:ro
+    networks: [test-net]
+
+  fvdb-viewer-test:
+    <<: *viewer-common
+    image: fvdb-training-gpu:latest
+    ports: ["18085:8085"]
+    volumes:
+      - /home/dwatkins3/miniforge3/envs/fvdb:/host-fvdb:ro
+      - /usr/local/cuda-13.0:/usr/local/cuda-13.0:ro
+      - ./test-models:/app/models
+      - ./sam2-data/models:/app/sam2-models:ro
+      - ./fvdb-viewer/image_viewer_service.py:/app/image_viewer_service.py:ro
+      - ./shared/viewer_common:/app/viewer_common:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTHONPATH=/host-fvdb/lib/python3.12/site-packages
+      - PATH=/host-fvdb/bin:/usr/local/cuda-13.0/bin:/usr/local/bin:/usr/bin:/bin
+      - LD_LIBRARY_PATH=/host-fvdb/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cublas/lib:/host-fvdb/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/cuda-13.0/lib64
+      - MODEL_DIR=/app/models
+      - VIEWER_PORT=8085
+      - MODEL_SERVICE_URL=http://rendering-service-test:8001
+      - OLLAMA_URL=http://ollama:11434
+    command: ["python3", "/app/image_viewer_service.py"]
+
+  supersplat-viewer-test:
+    <<: *viewer-common
+    image: supersplat-viewer:latest
+    ports: ["18086:8086"]
+    volumes:
+      - ./test-models:/app/splat-models
+      - ./supersplat-viewer/supersplat_service.py:/app/supersplat_service.py:ro
+      - ./supersplat-viewer/features:/app/features:ro
+      - ./supersplat-viewer/web:/app/web:ro
+      - ./shared/viewer_common:/app/viewer_common:ro
+      - ./cache/sam3:/app/models/sam3:ro
+      - supersplat-test-outputs:/app/outputs
+      - supersplat-test-cache:/app/cache
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CUDA_VISIBLE_DEVICES=0
+      - VIEWER_PORT=8086
+      - MODEL_DIR=/app/splat-models
+      - SAM3_MODEL_DIR=/app/models/sam3
+      - TRELLIS_URL=http://trellis-reconstructor:8013
+      - MODEL_SERVICE_URL=http://rendering-service-test:8001
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=nemotron-mini
+      - HF_TOKEN=${HF_TOKEN:-}
+
+  viewer-tests:
+    build: ./tests
+    image: fvdb-viewer-tests:latest
+    volumes:
+      - ./:/repo:ro
+      - ./test-models:/test-models
+      - ./models:/seed-models:ro
+    environment:
+      - VIEWER_8085_URL=http://fvdb-viewer-test:8085
+      - VIEWER_8086_URL=http://supersplat-viewer-test:8086
+      - TRELLIS_URL=http://trellis-reconstructor:8013
+      - TEST_MODELS_DIR=/test-models
+      - SEED_MODELS_DIR=/seed-models
+      - SEED_MODEL=APL-copter-ultra_model.ply
+    networks: [test-net, fvdb-workflow-net]
+
+networks:
+  test-net:
+  fvdb-workflow-net:
+    external: true
+
+volumes:
+  supersplat-test-outputs:
+  supersplat-test-cache:

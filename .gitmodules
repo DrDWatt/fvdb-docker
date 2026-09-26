@@ -1,6 +1,7 @@
 [submodule "fvdb-examples"]
 	path = fvdb-examples
 	url = https://github.com/openvdb/fvdb-examples.git
+	ignore = untracked
 [submodule "cusfm-service/pycusfm"]
 	path = cusfm-service/pycusfm
 	url = https://github.com/nvidia-isaac/PyCuSFM
