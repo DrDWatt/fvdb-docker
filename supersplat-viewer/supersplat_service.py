@@ -872,8 +872,13 @@ def build_viewer_html() -> str:
                 item.id = 'seg-obj-' + m.index;
                 item.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;margin:2px 0;border-radius:6px;cursor:pointer;background:#1a1a2e;border:1px solid #333;font-size:12px;color:#ccc;';
                 item.innerHTML = `<input type="radio" name="seg-obj" ${{selectedMaskIndex === m.index ? 'checked' : ''}} style="pointer-events:none;"/>
-                    <span>${{prompt}} #${{m.index + 1}} (score ${{m.score.toFixed(2)}})</span>`;
+                    <span>${{prompt}} #${{m.index + 1}} (score ${{m.score.toFixed(2)}})</span>
+                    <button class="meta-link" title="Link label, notes and documents (RAG)">📄</button>`;
                 item.onclick = () => selectObject(m.index);
+                item.querySelector('.meta-link').onclick = (e) => {{
+                    e.stopPropagation();
+                    MetadataLinks.open('object', `${{currentModel}}|${{prompt}}|${{m.index}}`, `${{prompt}} #${{m.index + 1}}`);
+                }};
                 list.appendChild(item);
             }});
         }}
