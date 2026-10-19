@@ -79,3 +79,23 @@
 #meta-file-list { list-style: none; max-height: 100px; overflow-y: auto; }
 #meta-file-list a { color: #00d4ff; }
 #meta-file-list small { color: #888; }
+
+/* ----- Cosmos 3 measurement panel ----- */
+.measure-input {
+    width: 100%; margin-top: 6px; padding: 6px 10px; border-radius: 6px;
+    border: 1px solid #333; background: #1a1a2e; color: #e0e0e0; font-size: 12px;
+}
+.measure-examples { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.measure-chip {
+    padding: 2px 8px; font-size: 10px; border-radius: 10px; cursor: pointer;
+    border: 1px solid #3a7bb9; background: transparent; color: #8ab4f8;
+}
+.measure-answer { font-size: 13px; font-weight: 600; color: #fff; margin: 6px 0 2px; }
+.measure-overlay { width: 100%; margin: 6px 0; border-radius: 6px; border: 1px solid #333; cursor: zoom-in; }
+.measure-card { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.05); }
+.measure-title { font-size: 11px; color: #8ab4f8; }
+.measure-value { font-size: 13px; font-weight: 700; color: #fff; }
+.measure-tag { font-size: 9px; font-weight: 400; padding: 1px 6px; border-radius: 8px; background: #6c4a00; color: #ffd27f; }
+.measure-eq { font-size: 11px; font-style: italic; color: #cbd5e1; margin-top: 2px; }
+.measure-work { font: 10px/1.35 monospace; color: #94a3b8; word-break: break-all; }
+.measure-meta { margin-top: 6px; font-size: 10px; }

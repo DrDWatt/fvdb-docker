@@ -27,10 +27,12 @@
         return d;
     }
 
-    function viewerSrc(modelName, seconds) {
+    function viewerSrc(modelName, seconds, orient) {
         const settings = `/flythrough/settings/${encodeURIComponent(modelName)}?duration=${seconds || duration()}`;
+        // orient: splat quaternion [x, y, z, w] for PLYs without trained cameras (patched viewer ?orient=)
+        const o = Array.isArray(orient) && orient.length === 4 ? `&orient=${orient.join(',')}` : '';
         return `/viewer/index.html?content=/models/${encodeURIComponent(modelName)}` +
-            `&settings=${encodeURIComponent(settings)}&noanim&noui&webgl`;
+            `&settings=${encodeURIComponent(settings)}&noanim&noui&webgl${o}`;
     }
 
     const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
@@ -47,7 +49,7 @@
         const loop = loopDuration();
         if (!loop) return;
         $('fly-progress').value = Math.round((state.t / loop) * 1000);
-        const oneWay = state.info && state.info.mode === 'camera_path' ? duration() : loop;
+        const oneWay = state.info && ['camera_path', 'arc'].includes(state.info.mode) ? duration() : loop;
         const shown = state.t <= oneWay ? state.t : loop - state.t;
         $('fly-time').textContent = `${fmt(shown)} / ${fmt(oneWay)}${state.t > oneWay ? ' (returning)' : ''}`;
     }
@@ -114,6 +116,7 @@
             const i = state.info;
             $('fly-info').textContent = i.mode === 'camera_path'
                 ? `Smoothed path through ${i.num_cameras} trained cameras`
+                : i.mode === 'arc' ? 'Sweep around the clearest view (model has no trained cameras)'
                 : i.mode === 'orbit' ? 'Orbit (model has no trained cameras)' : 'Viewer default camera motion';
         } catch (e) {
             $('fly-info').textContent = 'Flythrough info unavailable';
@@ -130,7 +133,7 @@
 
     function reloadViewer() {
         pause();
-        iframe().src = viewerSrc(model());
+        iframe().src = viewerSrc(model(), undefined, state.info && state.info.orient);
     }
 
     // ----- MP4 export -----

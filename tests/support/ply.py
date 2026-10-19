@@ -39,14 +39,14 @@ def orbit_cameras(n=24, radius=3.0, height=0.5, image_size=(720, 1280), focal=90
     return np.array(c2w), np.array(K, dtype=np.float64), np.array(sizes)
 
 
-def write_splat_ply(path: Path, points=None, cameras=None) -> Path:
-    """Write a 3DGS PLY; `cameras` = (c2w, K, sizes) adds fVDB camera elements."""
+def write_splat_ply(path: Path, points=None, cameras=None, log_scales=None) -> Path:
+    """Write a 3DGS PLY; `cameras` = (c2w, K, sizes) adds fVDB camera elements; `log_scales` (n, 3) optional."""
     points = grid_points() if points is None else np.asarray(points, dtype=np.float64)
     n = len(points)
     vertex = np.zeros((n, len(VERTEX_PROPS)), dtype=np.float32)
     vertex[:, :3] = points
     vertex[:, 3] = 2.0                      # opacity (pre-sigmoid)
-    vertex[:, 4:7] = -4.0                   # log scales
+    vertex[:, 4:7] = -4.0 if log_scales is None else np.asarray(log_scales, dtype=np.float32)  # log scales
     vertex[:, 7] = 1.0                      # identity quaternion
     vertex[:, 11:14] = 0.5
 

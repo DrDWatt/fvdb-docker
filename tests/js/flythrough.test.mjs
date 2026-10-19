@@ -74,6 +74,8 @@ test('viewer URL loads the model with the flythrough settings, paused', () => {
     const { sandbox } = setup();
     const url = new URL(sandbox.Flythrough.viewerSrc('my scan (v2).ply'), 'http://x');
     assert.equal(url.pathname, '/viewer/index.html');
+    assert.equal(url.searchParams.get('orient'), null);
+    assert.equal(new URL(sandbox.Flythrough.viewerSrc('z.ply', 30, [0, 0.7, 0.7, 0.1]), 'http://x').searchParams.get('orient'), '0,0.7,0.7,0.1');
     assert.equal(url.searchParams.get('content'), '/models/my scan (v2).ply');
     assert.equal(decodeURIComponent(url.searchParams.get('settings')),
         '/flythrough/settings/my scan (v2).ply?duration=30');

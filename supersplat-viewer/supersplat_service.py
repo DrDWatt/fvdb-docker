@@ -42,7 +42,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from features import flythrough, rag_metadata
+from features import flythrough, measure, model_files, rag_metadata
 from viewer_common.camera_path import MIN_VIDEO_SECONDS
 
 # ---------------------------------------------------------------------------
@@ -222,8 +222,10 @@ def viewer_src(model: str) -> str:
     Must match viewerSrc() in web/flythrough.js."""
     from urllib.parse import quote
     settings = f"/flythrough/settings/{quote(model)}?duration={MIN_VIDEO_SECONDS}"
+    orient = flythrough.viewer_orientation(MODEL_DIR / model) if model and (MODEL_DIR / model).is_file() else None
+    extra = f"&orient={','.join(str(v) for v in orient['quat'])}" if orient else ""
     return (f"/viewer/index.html?content=/models/{quote(model)}"
-            f"&settings={quote(settings, safe='')}&noanim&noui&webgl")
+            f"&settings={quote(settings, safe='')}&noanim&noui&webgl{extra}")
 
 
 def build_viewer_html() -> str:
@@ -569,6 +571,9 @@ def build_viewer_html() -> str:
             </div>
         </div>
 
+        <!-- Cosmos 3 equation-based measurement (rendered by /web/measure.js) -->
+        <div class="ctrl-section" id="measure-section"></div>
+
         <!-- Flythrough + MP4 export (rendered by /web/flythrough.js) -->
         <div class="ctrl-section" id="flythrough-section"></div>
 
@@ -617,6 +622,8 @@ def build_viewer_html() -> str:
     <script>window.FLY_MIN_SECONDS = {MIN_VIDEO_SECONDS};</script>
     <script src="/web/flythrough.js"></script>
     <script src="/web/rag.js"></script>
+    <script src="/web/measure.js"></script>
+    <script src="/web/loading.js"></script>
     <script>
         // ===================================================================
         // State
@@ -648,42 +655,10 @@ def build_viewer_html() -> str:
             document.getElementById('info-gaussians').textContent = data.num_gaussians || '-';
         }}
 
-        // Loading overlay helpers
-        function showLoadingOverlay(modelName) {{
-            const overlay = document.getElementById('loading-overlay');
-            const loadText = document.getElementById('loading-text');
-            const loadBar = document.getElementById('loading-bar');
-            overlay.classList.remove('fade-out');
-            overlay.style.display = 'flex';
-            loadText.textContent = 'Loading ' + modelName + '...';
-            loadBar.style.width = '10%';
-
-            // Animate progress bar smoothly
-            let pct = 10;
-            window._loadInterval = setInterval(() => {{
-                pct = Math.min(90, pct + (90 - pct) * 0.08);
-                loadBar.style.width = pct.toFixed(0) + '%';
-            }}, 200);
-        }}
-
-        function hideLoadingOverlay(elapsed) {{
-            clearInterval(window._loadInterval);
-            const overlay = document.getElementById('loading-overlay');
-            const loadText = document.getElementById('loading-text');
-            const loadBar = document.getElementById('loading-bar');
-            loadBar.style.width = '100%';
-            loadText.textContent = '✅ Ready in ' + elapsed + 's';
-            setTimeout(() => {{
-                overlay.classList.add('fade-out');
-                setTimeout(() => {{ overlay.style.display = 'none'; }}, 500);
-            }}, 800);
-        }}
+        // Loading overlay: real progress in /web/loading.js (ModelLoading.track)
 
         document.getElementById('model-select').addEventListener('change', async function() {{
             const model = this.value;
-
-            // Show loading overlay immediately
-            showLoadingOverlay(model);
             hideMaskOverlay();
             Flythrough.pause();
             MetadataLinks.close();
@@ -691,27 +666,23 @@ def build_viewer_html() -> str:
             // Notify backend of model switch (non-blocking)
             fetch('/load_model?model=' + model);
 
-            // Directly update iframe — SuperSplat fetches and renders client-side
+            // SuperSplat fetches and renders client-side; ModelLoading reports real download/build progress
             const iframe = document.getElementById('viewer-iframe');
-            const startTime = Date.now();
-            iframe.src = Flythrough.viewerSrc(model);
-
-            iframe.onload = function() {{
-                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                hideLoadingOverlay(elapsed);
-                currentModel = model;
-                refreshModels();
-                Flythrough.onViewerLoaded();
-            }};
+            iframe.onload = function() {{ Flythrough.onViewerLoaded(); }};
+            let orient = null;  // up-axis fix for PLYs without trained cameras (features/orientation.py)
+            try {{ orient = (await (await fetch('/flythrough/info/' + encodeURIComponent(model))).json()).orient; }} catch (e) {{}}
+            iframe.src = Flythrough.viewerSrc(model, undefined, orient);
+            await ModelLoading.track(model);
+            currentModel = model;
+            refreshModels();
         }});
 
-        // Hide initial loading overlay when first model loads
+        // Initial model: track its real load too
         document.getElementById('viewer-iframe').addEventListener('load', function handler() {{
-            const elapsed = '0';
-            hideLoadingOverlay(elapsed);
             this.removeEventListener('load', handler);
             Flythrough.onViewerLoaded();
         }});
+        ModelLoading.track(currentModel);
 
         // Upload with progress
         function uploadPlyFile(input) {{
@@ -786,7 +757,10 @@ def build_viewer_html() -> str:
             // Capture the iframe's WebGL canvas as base64 PNG
             const iframe = document.getElementById('viewer-iframe');
             const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-            const canvas = iframeDoc.getElementById('application-canvas');
+            // The viewer's render canvas (v1.37 creates it without the old 'application-canvas' id)
+            const app = iframe.contentWindow.app;
+            const canvas = (app && app.graphicsDevice && app.graphicsDevice.canvas)
+                || iframeDoc.getElementById('application-canvas') || iframeDoc.querySelector('canvas');
             if (!canvas) throw new Error('Viewer canvas not found');
             return canvas.toDataURL('image/png');
         }}
@@ -1044,6 +1018,7 @@ def build_viewer_html() -> str:
         // Init
         // ===================================================================
         Flythrough.render(document.getElementById('flythrough-section'));
+        Measure.render(document.getElementById('measure-section'));
         window.addEventListener('load', () => {{
             refreshModels();
         }});
@@ -1144,17 +1119,7 @@ async def delete_model(model: str = Query(...)):
 # ---------------------------------------------------------------------------
 # Routes: Serve model files for SuperSplat viewer
 # ---------------------------------------------------------------------------
-@app.get("/models/{filename}")
-async def serve_model_file(filename: str):
-    """Serve .ply model files to the SuperSplat viewer iframe."""
-    path = MODEL_DIR / filename
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Model file not found")
-    return FileResponse(
-        path,
-        media_type="application/octet-stream",
-        filename=filename
-    )
+# /models/{filename} (+ progress, caching): features/model_files.py
 
 
 # ---------------------------------------------------------------------------
@@ -1819,8 +1784,11 @@ def get_scene_state() -> Dict[str, Any]:
     }
 
 
+app.include_router(model_files.create_router(MODEL_DIR))
 app.include_router(flythrough.create_router(MODEL_DIR, OUTPUT_DIR))
-app.include_router(rag_metadata.create_router(get_scene_state))
+rag_router = rag_metadata.create_router(get_scene_state)
+app.include_router(rag_router)
+app.include_router(measure.create_router(MODEL_DIR, rag_router.measurement_sources))
 
 # Frontend modules for the features above (plain JS/CSS, no templating)
 WEB_DIR = Path(__file__).parent / "web"

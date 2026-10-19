@@ -25,6 +25,9 @@ from viewer_common.camera_path import (
 )
 from viewer_common.video import H264Writer
 
+from .orientation import DEFAULT as DEFAULT_R
+from .orientation import orientation
+
 logger = logging.getLogger("supersplat-viewer.flythrough")
 
 KEY_INTERVAL_S = 0.1        # animTrack keyframe spacing (viewer splines between keys)
@@ -93,13 +96,15 @@ def read_trained_cameras(path: Path):
     return {"c2w": c2w, "K": K, "sizes": sizes, "depths": tensor('median_depths')}
 
 
-def scene_bounds(path: Path, samples: int = 200_000):
-    """Robust (center, half-extent) of the gaussian means from a vertex subsample."""
+def scene_bounds(path: Path, samples: int = 200_000, R: np.ndarray | None = None):
+    """Robust (center, half-extent) of the gaussian means from a vertex subsample (in R's frame if given)."""
     arrays, _ = _read_elements(path)
     v = arrays['vertex']
     step = max(1, len(v) // samples)
     xyz = np.stack([np.asarray(v[k][::step], dtype=np.float64) for k in ('x', 'y', 'z')], axis=1)
     xyz = xyz[np.isfinite(xyz).all(axis=1)]
+    if R is not None:
+        xyz = xyz @ np.asarray(R).T
     lo, hi = np.percentile(xyz, 5, axis=0), np.percentile(xyz, 95, axis=0)
     return (lo + hi) / 2, (hi - lo) / 2
 
@@ -128,12 +133,17 @@ def _path_track(cams, duration):
     return positions, targets, fovs, times, 2 * duration, path["num_cameras"]
 
 
-def _orbit_track(model_path, duration, fov=60.0):
-    """One full orbit per `duration` for models without trained cameras."""
-    center, half = scene_bounds(model_path)
-    c = _to_viewer(center)
-    radius = float(np.linalg.norm(half)) * 1.6 or 1.0
-    elevation = math.radians(20)
+def _orbit_track(model_path, duration, fov=60.0, R=None):
+    """One full orbit per `duration` for models without trained cameras.
+
+    The orbit is built in the viewer frame (viewer = R @ ply; R from features.orientation, default the
+    viewer's (0, 0, 180)), around viewer +Y, framed by the horizontal extent so the scene fills the view."""
+    R = DEFAULT_R if R is None else np.asarray(R)
+    c, half = scene_bounds(model_path, R=R)
+    if not np.allclose(R, DEFAULT_R):  # re-oriented camera-less scene: frame it from the clearest side
+        return _arc_track(model_path, R, c, half, duration, fov)
+    radius = (float(np.hypot(half[0], half[2])) * 1.25 + float(half[1])) or 1.0
+    elevation = math.radians(25)
     keys = int(round(duration / KEY_INTERVAL_S))
     positions, targets, fovs, times = [], [], [], []
     for k in range(keys):
@@ -147,9 +157,82 @@ def _orbit_track(model_path, duration, fov=60.0):
     return positions, targets, fovs, times, duration, 0
 
 
+VIEW_AZIMUTHS = 24
+VIEW_ELEVATIONS_DEG = (20, 35, 50, 65, 80)
+ARC_HALF_DEG = 25.0
+
+
+def _clearest_view(model_path, R, c, half, fov):
+    """(azimuth, elevation, radius) whose view of the scene is least blocked by floaters.
+
+    Floaters = Gaussians outside the robust (5-95 %) bounds or with a large scale (top 10 %). For each
+    candidate camera on a sphere around the scene, count floaters inside the view cone that lie between
+    the camera and the scene centre. Measured 2026-10-18: Frankfurt has a shell of large floaters around the
+    street, so a fixed orbit looked through them from every side but a few."""
+    arrays, _ = _read_elements(model_path)
+    v = arrays['vertex']
+    step = max(1, len(v) // 200_000)
+    xyz = np.stack([np.asarray(v[k][::step], dtype=np.float64) for k in ('x', 'y', 'z')], axis=1) @ np.asarray(R).T
+    ok = np.isfinite(xyz).all(axis=1)
+    size = np.full(len(xyz), -np.inf)
+    if 'scale_0' in v.dtype.names:
+        size = np.max(np.stack([np.asarray(v[f'scale_{i}'][::step], dtype=np.float64) for i in range(3)], 1), axis=1)
+    big = size > np.percentile(size[ok], 90) if np.isfinite(size[ok]).any() else np.zeros(len(xyz), bool)
+    outside = ~np.all(np.abs(xyz - c) <= half, axis=1)
+    F = xyz[ok & (big | outside)]
+    radius = float(np.hypot(half[0], half[2])) * 1.25 + float(half[1]) or 1.0
+    cos_cone = math.cos(math.radians(fov / 2))
+    best = None
+    for e in VIEW_ELEVATIONS_DEG:
+        for k in range(VIEW_AZIMUTHS):
+            a = 2 * math.pi * k / VIEW_AZIMUTHS
+            d = np.array([math.cos(math.radians(e)) * math.sin(a), math.sin(math.radians(e)), math.cos(math.radians(e)) * math.cos(a)])
+            pos = c + radius * d
+            rel = F - pos
+            dist = np.linalg.norm(rel, axis=1)
+            along = rel @ (-d)
+            blocked = int(np.sum((along > 0) & (dist < radius) & (along >= cos_cone * dist)))
+            if best is None or blocked < best[0]:
+                best = (blocked, a, math.radians(e))
+    return best[1], best[2], radius, best[0]
+
+
+def _arc_track(model_path, R, c, half, duration, fov):
+    """Sweep +-ARC_HALF_DEG around the clearest view and back (seamless loop), looking at the scene centre."""
+    a0, elev, radius, blocked = _clearest_view(model_path, R, c, half, fov)
+    keys = int(round(2 * duration / KEY_INTERVAL_S))
+    positions, targets, fovs, times = [], [], [], []
+    for k in range(keys):
+        t = k * KEY_INTERVAL_S
+        u = ease_in_out(t / duration if t <= duration else 2 - t / duration)
+        a = a0 + math.radians(ARC_HALF_DEG) * (2 * u - 1)
+        positions += [c[0] + radius * math.cos(elev) * math.sin(a), c[1] + radius * math.sin(elev),
+                      c[2] + radius * math.cos(elev) * math.cos(a)]
+        targets += list(c)
+        fovs.append(fov)
+        times.append(t * TRACK_FRAME_RATE)
+    logger.info(f"Clearest view for {Path(model_path).name}: azimuth {math.degrees(a0):.0f} deg, elevation "
+                f"{math.degrees(elev):.0f} deg, {blocked} floaters in view")
+    return positions, targets, fovs, times, 2 * duration, 0
+
+
+def viewer_orientation(model_path: Path):
+    """Orientation for the viewer's ?orient= (None: viewer default) — PLYs without trained cameras only."""
+    try:
+        has_cameras = read_trained_cameras(model_path) is not None
+    except Exception:
+        has_cameras = False
+    try:
+        return orientation(model_path, has_cameras)
+    except Exception as e:
+        logger.warning(f"Orientation estimate failed for {model_path.name}: {e}")
+        return None
+
+
 def build_settings(model_path: Path, duration: float):
     """SuperSplat v2 settings whose first animTrack is the flythrough."""
     track = None
+    orient = None
     try:
         cams = read_trained_cameras(model_path)
         if cams is not None:
@@ -157,8 +240,10 @@ def build_settings(model_path: Path, duration: float):
     except Exception as e:
         logger.warning(f"Trained-camera path unavailable for {model_path.name}: {e}")
     if track is None:
+        orient = viewer_orientation(model_path)
         try:
-            track, mode = _orbit_track(model_path, duration), "orbit"
+            track = _orbit_track(model_path, duration, R=orient["matrix"] if orient else None)
+            mode = "arc" if track[4] == 2 * duration else "orbit"
         except Exception as e:
             logger.warning(f"Orbit path unavailable for {model_path.name}: {e}")
     settings = {
@@ -180,7 +265,7 @@ def build_settings(model_path: Path, duration: float):
     }
     if track is None:
         # The viewer generates its own orbit / figure-8 track when none is given
-        return settings, {"mode": "viewer_default", "num_cameras": 0, "duration": duration, "loop_duration": None}
+        return settings, {"mode": "viewer_default", "num_cameras": 0, "duration": duration, "loop_duration": None, "orient": None}
     positions, targets, fovs, times, track_len, n_cams = track
     settings["animTracks"] = [{
         "name": "flythrough",
@@ -193,7 +278,8 @@ def build_settings(model_path: Path, duration: float):
     }]
     settings["cameras"] = [{"initial": {"position": positions[:3], "target": targets[:3], "fov": fovs[0]}}]
     settings["startMode"] = "animTrack"
-    info = {"mode": mode, "num_cameras": n_cams, "duration": duration, "loop_duration": track_len}
+    info = {"mode": mode, "num_cameras": n_cams, "duration": duration, "loop_duration": track_len,
+            "orient": orient["quat"] if orient else None, "orientation": {k: v for k, v in (orient or {}).items() if k != "matrix"} or None}
     return settings, info
 
 

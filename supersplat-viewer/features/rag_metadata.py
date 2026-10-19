@@ -121,6 +121,28 @@ def create_router(get_scene_state: Callable[[], dict]) -> APIRouter:
         return {"items": [{"kind": k, "id": i, **_public(e)} for (k, i), e in items.items()
                           if not model or e["model"] in ("", model)]}
 
+    # ----- Measurement references for Cosmos 3 measuring (features/measure.py) -----
+    def measurement_sources(model: str) -> list:
+        """RAG material that may state real sizes: the model document plus object/extraction notes and files."""
+        out = []
+        summary = _model_summary(model, timeout=5) if model else {}
+        if summary.get("has_summary") and summary.get("summary"):
+            out.append({"source": "Upload Info (model document)", "text": summary["summary"][:200_000]})
+        for (kind, item_id), e in items.items():
+            if e["model"] and model and e["model"] != model:
+                continue
+            text = e["text"] or ""
+            for f in e["files"]:
+                doc = extract_file_text(f)
+                if doc:
+                    text += f"\n{doc}"
+            if text.strip() or e["label"]:
+                name = "SAM3 object" if kind == "object" else "3D extraction"
+                out.append({"source": f"{name} note '{e['label'] or item_id}'", "subject": e["label"] or None, "text": text[:200_000]})
+        return out
+
+    router.measurement_sources = measurement_sources
+
     # ----- RAG -----
     def _build_context(model: str) -> str:
         scene = get_scene_state()

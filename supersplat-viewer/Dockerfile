@@ -8,17 +8,41 @@
 # GPU: Requires NVIDIA GB10 (Blackwell sm_121) — uses PyTorch nightly + CUDA 13.0
 # Model downloads happen at BUILD time so containers start instantly.
 ###############################################################################
+# ---------------------------------------------------------------------------
+# Stage 1: build the SuperSplat viewer (Node 22; Ubuntu 24.04's apt nodejs is v18,
+# too old for viewer >= 1.30)
+# ---------------------------------------------------------------------------
+FROM node:22.23.3-slim AS viewer-build
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# SuperSplat viewer, pinned to v1.27.1+2 (e9fd177, PlayCanvas engine 2.20.6): the build that loads in the
+# users' browsers. v1.37.0 (cd0e316, engine 2.23.0) builds and passes the headless tests here but stayed
+# on its loading splash in macOS Chrome (2026-10-16); try it with
+#   --build-arg SUPERSPLAT_VIEWER_REF=cd0e316e397929ffa87abd4833f73f8a0bd1fd2b
+# patch_viewer.py supports both (getCameraMatrices in the bundle for v1.27, via window.app for >= v1.32,
+# plus ?orient= for PLYs without cameras).
+ARG SUPERSPLAT_VIEWER_REF=e9fd1775de56d3b96b38945fe21f9307c119b053
+RUN git clone https://github.com/playcanvas/supersplat-viewer.git /opt/supersplat-viewer && \
+    cd /opt/supersplat-viewer && \
+    git checkout ${SUPERSPLAT_VIEWER_REF} && \
+    npm ci --no-audit --no-fund && \
+    npm run build
+
+# ---------------------------------------------------------------------------
+# Stage 2: service image
+# ---------------------------------------------------------------------------
 FROM nvidia/cuda:12.6.3-devel-ubuntu24.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# System dependencies (includes build tools for pycocotools)
+# System dependencies (includes build tools for pycocotools). Node is only needed to build the
+# viewer, which now happens in stage 1.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3-pip python3.12-dev \
     build-essential \
     git curl wget ca-certificates \
-    nodejs npm \
     libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -42,19 +66,10 @@ ARG SAM3_REF=46957e47805eaa273f4aa7bbbd25a88bca9108ce
 RUN git clone https://github.com/facebookresearch/sam3.git /opt/sam3 && \
     cd /opt/sam3 && git checkout ${SAM3_REF} && pip install --no-cache-dir -e .
 
-# Build SuperSplat viewer from source, pinned to the release whose window.captureFrame /
-# window.scrubTo / animTrack settings API the flythrough + patch_viewer.py rely on (v1.27.1)
-ARG SUPERSPLAT_VIEWER_REF=e9fd1775de56d3b96b38945fe21f9307c119b053
-RUN git clone https://github.com/playcanvas/supersplat-viewer.git /opt/supersplat-viewer && \
-    cd /opt/supersplat-viewer && \
-    git checkout ${SUPERSPLAT_VIEWER_REF} && \
-    npm install && \
-    npm run build
-
-# Copy built viewer static files and apply patches
+# Copy the built viewer static files (stage 1) and apply patches
+COPY --from=viewer-build /opt/supersplat-viewer/public /app/static/viewer
 COPY patch_viewer.py /tmp/patch_viewer.py
-RUN mkdir -p /app/static/viewer && \
-    cp -r /opt/supersplat-viewer/public/* /app/static/viewer/ && \
+RUN rm -f /app/static/viewer/*.map && \
     python3 /tmp/patch_viewer.py /app/static/viewer && \
     rm /tmp/patch_viewer.py
 

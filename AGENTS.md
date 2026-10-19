@@ -15,8 +15,17 @@
   :8085 gets it from the host conda env (`/home/dwatkins3/miniforge3/envs/fvdb`, mounted as `/host-fvdb`);
   :8086 from its image (`supersplat-viewer/requirements.txt`).
 - :8086 relies on the SuperSplat viewer API (`window.scrubTo`, `window.captureFrame`, settings.json
-  `animTracks`) and on `patch_viewer.py` (`window.getCameraMatrices`) applied at image build.
-  The viewer git commit is pinned in `supersplat-viewer/Dockerfile`.
+  `animTracks`) and on `patch_viewer.py` (`window.getCameraMatrices`, `?orient=`) applied at image build.
+  The viewer is pinned in `supersplat-viewer/Dockerfile` to v1.27.1+2 (e9fd177); v1.37.0 stalled on its
+  loading splash in macOS Chrome (2026-10-16). It is built in a node:22 stage (apt nodejs is v18).
+- :8086 measurement (`features/measure.py`, `web/measure.js`): questions go to Splat Blueprints
+  (~/splat-blueprints) on the external `cosmos-shared` network as jobs; the bearer token is the compose secret
+  `blueprints_token` (~/splat-blueprints/secrets/viewer.token) and never reaches the browser. RAG material
+  (Upload Info + object notes/files) is sent as measurement references.
+- Model downloads (`features/model_files.py`) report progress (`/models-progress/<ply>`), log MB/s per client,
+  support Range resumes and browser caching. The Mac on Wi-Fi measured ~2 MB/s (2026-10-18).
+- PLYs without trained cameras get an up-axis estimate (`features/orientation.py`) passed as `?orient=` and a
+  sweep around the least floater-blocked view (`flythrough._arc_track`).
 - The fVDB PLYs store trained cameras as extra PLY elements (`camera_to_world_matrices`,
   `projection_matrices`, `image_sizes`, `median_depths`); `supersplat-viewer/features/flythrough.py` reads them with numpy.
   The SuperSplat viewer displays splats rotated (0, 0, 180): viewer = (-x, -y, z).

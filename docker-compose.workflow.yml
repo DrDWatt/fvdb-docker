@@ -318,6 +318,12 @@ services:
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_MODEL=nemotron-mini
       - HF_TOKEN=${HF_TOKEN:-}
+      # Cosmos 3 measurement: Splat Blueprints API on the cosmos-shared network (token = compose secret)
+      - BLUEPRINTS_URL=http://blueprints-api:8000
+      - BLUEPRINTS_PROJECT=peacock
+      - BLUEPRINTS_TOKEN_FILE=/run/secrets/blueprints_token
+    secrets:
+      - blueprints_token
     deploy:
       resources:
         reservations:
@@ -335,17 +341,24 @@ services:
     networks:
       - workflow-net
       - fvdb-workflow-net
+      - cosmos-shared
 
 networks:
   workflow-net:
     driver: bridge
   fvdb-workflow-net:
     external: true
+  # Shared with cosmos3-mcp and Splat Blueprints (created by ~/Cosms3-mcp/docker-compose.yml)
+  cosmos-shared:
+    external: true
 
 secrets:
   # Build-time Hugging Face token for the gated SAM3 download (from HF_TOKEN in .env)
   hf_token:
     environment: HF_TOKEN
+  # Splat Blueprints service token for the supersplat-viewer identity (generated, mode 600, not in git)
+  blueprints_token:
+    file: /home/dwatkins3/splat-blueprints/secrets/viewer.token
 
 volumes:
   colmap-data:
