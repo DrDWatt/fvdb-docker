@@ -18,6 +18,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from viewer_common.rag import build_system_prompt, extract_file_text, ollama_status, ollama_stream_sse
 
+from . import rag_crawl
+
 logger = logging.getLogger("supersplat-viewer.rag")
 
 MODEL_SERVICE_URL = os.environ.get("MODEL_SERVICE_URL", "http://rendering-service:8001")
@@ -122,8 +124,9 @@ def create_router(get_scene_state: Callable[[], dict]) -> APIRouter:
                           if not model or e["model"] in ("", model)]}
 
     # ----- Measurement references for Cosmos 3 measuring (features/measure.py) -----
-    def measurement_sources(model: str) -> list:
-        """RAG material that may state real sizes: the model document plus object/extraction notes and files."""
+    def measurement_sources(model: str, query: str | None = None) -> list:
+        """RAG material that may state real sizes: the model document, object/extraction notes and files, and the
+        crawled web pages that best match the question (features/rag_crawl.py)."""
         out = []
         summary = _model_summary(model, timeout=5) if model else {}
         if summary.get("has_summary") and summary.get("summary"):
@@ -139,12 +142,12 @@ def create_router(get_scene_state: Callable[[], dict]) -> APIRouter:
             if text.strip() or e["label"]:
                 name = "SAM3 object" if kind == "object" else "3D extraction"
                 out.append({"source": f"{name} note '{e['label'] or item_id}'", "subject": e["label"] or None, "text": text[:200_000]})
-        return out
+        return out + rag_crawl.web_sources(model, query)
 
     router.measurement_sources = measurement_sources
 
     # ----- RAG -----
-    def _build_context(model: str) -> str:
+    def _build_context(model: str, query: str | None = None) -> str:
         scene = get_scene_state()
         model = model or scene.get("model") or ""
         parts = []
@@ -176,6 +179,9 @@ def create_router(get_scene_state: Callable[[], dict]) -> APIRouter:
             summary = _model_summary(model, timeout=3)
             if summary.get("has_summary") and summary.get("summary"):
                 parts.append(f"Model document summary: {summary['summary'][:3000]}")
+            web = rag_crawl.web_context(model, query)
+            if web:
+                parts.append(f"Crawled web pages about this model (best matches for the question):\n{web}")
         return "\n".join(parts)
 
     @router.get("/rag/context")
@@ -193,6 +199,7 @@ def create_router(get_scene_state: Callable[[], dict]) -> APIRouter:
                                if k == "object" and e["label"] and e in linked],
             "extractions_count": len([x for x in scene.get("extractions", []) if x.get("model") in (None, model)]),
             "documents_count": sum(len(e["files"]) for e in linked),
+            "web_documents_count": rag_crawl._get_documents(model, "", 1).get("total", 0) if model else 0,
             "context_length": len(_build_context(model)),
         }
 
@@ -206,8 +213,8 @@ def create_router(get_scene_state: Callable[[], dict]) -> APIRouter:
         if not query:
             return JSONResponse({"error": "Empty query"}, status_code=400)
         system_msg = build_system_prompt(
-            _build_context(body.get("model")),
-            sources="SAM3 segmentation results, GARField 3D extractions",
+            _build_context(body.get("model"), query),
+            sources="SAM3 segmentation results, GARField 3D extractions, uploaded documents, crawled web pages",
             empty_hint="No context data available yet. Try: (1) Segment objects with SAM3, "
                        "(2) Extract 3D objects with GARField, (3) Upload documents via Upload Info.",
         )

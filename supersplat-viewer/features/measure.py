@@ -39,8 +39,8 @@ JOB_TTL_S = 3600
 IMPORT_TIMEOUT_S = 300.0  # first import downloads + parses the PLY
 
 
-def create_router(model_dir: Path, rag_sources=lambda model: []) -> APIRouter:
-    """rag_sources(model) -> [{source, subject?, text}]: the RAG material checked for real sizes."""
+def create_router(model_dir: Path, rag_sources=lambda model, query=None: []) -> APIRouter:
+    """rag_sources(model, question) -> [{source, subject?, text}]: the RAG material checked for real sizes."""
     router = APIRouter(prefix="/measure", tags=["measure"])
     scenes: dict[tuple, str] = {}  # (model, size, mtime_ns) -> blueprints scene_id
 
@@ -86,9 +86,9 @@ def create_router(model_dir: Path, rag_sources=lambda model: []) -> APIRouter:
         try:
             job["stage"] = "importing the splat into Blueprints (first time only)"
             scene_id = _scene_for(model)
-            job["stage"] = "gathering RAG references (Upload Info, object notes)"
+            job["stage"] = "gathering RAG references (Upload Info, object notes, crawled pages)"
             try:
-                sources = rag_sources(model)
+                sources = rag_sources(model, question)
             except Exception as exc:  # RAG is optional for measuring
                 logger.warning(f"RAG sources unavailable for {model}: {exc}")
                 sources = []

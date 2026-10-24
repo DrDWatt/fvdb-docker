@@ -49,3 +49,6 @@
 - Export (≥30 s, H.264 High yuv420p): `curl -X POST -o f.mp4 "localhost:8085/flythrough/export?duration=30&fps=30"`,
   then inspect with the bundled ffmpeg: `$(python -c "import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())") -i f.mp4`
 - RAG: `curl localhost:808{5,6}/rag/status`; Ollama model `nemotron-mini`.
+- :8086 Upload Info dialog has "Crawl a website" (`web/crawl.js`, `features/rag_crawl.py` -> Blueprints /rag/*).
+  Crawled pages that best match the question are added to Ask AI context (<= 6000 chars) and to the Cosmos 3
+  measurement references. Flip/rotate orientation: `web/orient.js`, `features/orient_override.py`.

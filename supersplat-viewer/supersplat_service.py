@@ -42,7 +42,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from features import flythrough, measure, model_files, orient_override, rag_metadata
+from features import flythrough, measure, model_files, orient_override, rag_crawl, rag_metadata
 from viewer_common.camera_path import MIN_VIDEO_SECONDS
 
 # ---------------------------------------------------------------------------
@@ -632,6 +632,7 @@ def build_viewer_html() -> str:
     <script src="/web/measure.js"></script>
     <script src="/web/loading.js"></script>
     <script src="/web/orient.js"></script>
+    <script src="/web/crawl.js"></script>
     <script>
         // ===================================================================
         // State
@@ -1799,6 +1800,7 @@ app.include_router(orient_override.create_router(MODEL_DIR, flythrough.has_train
 app.include_router(flythrough.create_router(MODEL_DIR, OUTPUT_DIR))
 rag_router = rag_metadata.create_router(get_scene_state)
 app.include_router(rag_router)
+app.include_router(rag_crawl.create_router())
 app.include_router(measure.create_router(MODEL_DIR, rag_router.measurement_sources))
 
 # Frontend modules for the features above (plain JS/CSS, no templating)
