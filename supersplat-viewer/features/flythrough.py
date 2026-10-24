@@ -25,6 +25,7 @@ from viewer_common.camera_path import (
 )
 from viewer_common.video import H264Writer
 
+from . import orient_override
 from .orientation import DEFAULT as DEFAULT_R
 from .orientation import orientation
 
@@ -137,11 +138,15 @@ def _orbit_track(model_path, duration, fov=60.0, R=None):
     """One full orbit per `duration` for models without trained cameras.
 
     The orbit is built in the viewer frame (viewer = R @ ply; R from features.orientation, default the
-    viewer's (0, 0, 180)), around viewer +Y, framed by the horizontal extent so the scene fills the view."""
+    viewer's (0, 0, 180)), around viewer +Y, framed by the horizontal extent so the scene fills the view.
+    Rooms get an interior pan instead, re-oriented open scenes a sweep around the clearest side.
+    Returns (track, mode)."""
     R = DEFAULT_R if R is None else np.asarray(R)
     c, half = scene_bounds(model_path, R=R)
+    if ceiling_coverage(model_path, R, c, half) >= INDOOR_COVERAGE:  # a room: pan around from inside
+        return _interior_track(c, half, duration, fov), "interior"
     if not np.allclose(R, DEFAULT_R):  # re-oriented camera-less scene: frame it from the clearest side
-        return _arc_track(model_path, R, c, half, duration, fov)
+        return _arc_track(model_path, R, c, half, duration, fov), "arc"
     radius = (float(np.hypot(half[0], half[2])) * 1.25 + float(half[1])) or 1.0
     elevation = math.radians(25)
     keys = int(round(duration / KEY_INTERVAL_S))
@@ -152,6 +157,47 @@ def _orbit_track(model_path, duration, fov=60.0, R=None):
                       c[1] + radius * math.sin(elevation),
                       c[2] + radius * math.cos(elevation) * math.cos(a)]
         targets += list(c)
+        fovs.append(fov)
+        times.append(k * KEY_INTERVAL_S * TRACK_FRAME_RATE)
+    return (positions, targets, fovs, times, duration, 0), "orbit"
+
+
+# Rooms: measured 2026-10-23 — area overhead covered by splats within 60 % of the smaller horizontal half-extent:
+# new_peacock 0.95 (an outside orbit looked through floaters at a blurred wall), Graz 0.00, Frankfurt 0.29.
+INDOOR_COVERAGE = 0.7
+COVER_GRID = 12
+
+
+def ceiling_coverage(model_path, R, c, half) -> float:
+    """Fraction of a disk around the scene centre with splats above it (upper part of the robust bounds)."""
+    arrays, _ = _read_elements(model_path)
+    v = arrays['vertex']
+    step = max(1, len(v) // 300_000)
+    xyz = np.stack([np.asarray(v[k][::step], dtype=np.float64) for k in ('x', 'y', 'z')], axis=1) @ np.asarray(R).T
+    rel = xyz[np.isfinite(xyz).all(axis=1)] - c
+    rel = rel[np.all(np.abs(rel) <= np.asarray(half) * 1.05, axis=1)]
+    r = 0.6 * float(min(half[0], half[2]))
+    above = rel[(rel[:, 0] ** 2 + rel[:, 2] ** 2 <= r * r) & (rel[:, 1] > 0.3 * half[1])]
+    if r <= 0 or not len(above):
+        return 0.0
+    ij = np.floor((above[:, [0, 2]] + r) / (2 * r / COVER_GRID)).astype(int)
+    ij = ij[(ij >= 0).all(axis=1) & (ij < COVER_GRID).all(axis=1)]
+    occ = np.zeros((COVER_GRID, COVER_GRID), bool)
+    occ[ij[:, 0], ij[:, 1]] = True
+    ii, jj = np.meshgrid(np.arange(COVER_GRID) + 0.5, np.arange(COVER_GRID) + 0.5, indexing="ij")
+    disk = (ii - COVER_GRID / 2) ** 2 + (jj - COVER_GRID / 2) ** 2 <= (COVER_GRID / 2) ** 2
+    return float(occ[disk].mean())
+
+
+def _interior_track(c, half, duration, fov):
+    """Stand at the room centre and pan once around (seamless loop), looking level at the walls."""
+    keys = int(round(duration / KEY_INTERVAL_S))
+    reach = float(min(half[0], half[2]))
+    positions, targets, fovs, times = [], [], [], []
+    for k in range(keys):
+        a = 2 * math.pi * k / keys
+        positions += [float(c[0]), float(c[1]), float(c[2])]
+        targets += [float(c[0] + reach * math.sin(a)), float(c[1]), float(c[2] + reach * math.cos(a))]
         fovs.append(fov)
         times.append(k * KEY_INTERVAL_S * TRACK_FRAME_RATE)
     return positions, targets, fovs, times, duration, 0
@@ -216,14 +262,25 @@ def _arc_track(model_path, R, c, half, duration, fov):
     return positions, targets, fovs, times, 2 * duration, 0
 
 
-def viewer_orientation(model_path: Path):
-    """Orientation for the viewer's ?orient= (None: viewer default) — PLYs without trained cameras only."""
+def has_trained_cameras(model_path: Path) -> bool:
     try:
-        has_cameras = read_trained_cameras(model_path) is not None
+        return read_trained_cameras(model_path) is not None
     except Exception:
-        has_cameras = False
+        return False
+
+
+def viewer_orientation(model_path: Path):
+    """Orientation for the viewer's ?orient= (None: viewer default) — PLYs without trained cameras only.
+    A user-saved orientation (features/orient_override.py) wins over the automatic estimate."""
+    if has_trained_cameras(model_path):
+        return None
+    saved = orient_override.saved_quat(model_path)
+    if saved is not None:
+        R = np.asarray(orient_override.matrix(saved))
+        return {"quat": saved, "matrix": R.tolist(), "up_ply": (R.T @ [0.0, 1.0, 0.0]).tolist(), "source": "saved"}
     try:
-        return orientation(model_path, has_cameras)
+        o = orientation(model_path, False)
+        return {**o, "source": "automatic"} if o else None
     except Exception as e:
         logger.warning(f"Orientation estimate failed for {model_path.name}: {e}")
         return None
@@ -242,8 +299,7 @@ def build_settings(model_path: Path, duration: float):
     if track is None:
         orient = viewer_orientation(model_path)
         try:
-            track = _orbit_track(model_path, duration, R=orient["matrix"] if orient else None)
-            mode = "arc" if track[4] == 2 * duration else "orbit"
+            track, mode = _orbit_track(model_path, duration, R=orient["matrix"] if orient else None)
         except Exception as e:
             logger.warning(f"Orbit path unavailable for {model_path.name}: {e}")
     settings = {
@@ -296,7 +352,8 @@ def create_router(model_dir: Path, output_dir: Path) -> APIRouter:
 
     def _settings(model: str, duration: float):
         path = _model_path(model)
-        key = (path.name, path.stat().st_mtime, duration)
+        saved = None if has_trained_cameras(path) else orient_override.saved_quat(path)
+        key = (path.name, path.stat().st_mtime, duration, tuple(saved) if saved else None)  # a new orientation rebuilds
         if key not in settings_cache:
             started = time.time()
             settings_cache.clear()  # keep only the current model in memory

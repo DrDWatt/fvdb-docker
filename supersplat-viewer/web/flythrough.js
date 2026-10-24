@@ -117,6 +117,7 @@
             $('fly-info').textContent = i.mode === 'camera_path'
                 ? `Smoothed path through ${i.num_cameras} trained cameras`
                 : i.mode === 'arc' ? 'Sweep around the clearest view (model has no trained cameras)'
+                : i.mode === 'interior' ? 'Pan around the room from its centre (model has no trained cameras)'
                 : i.mode === 'orbit' ? 'Orbit (model has no trained cameras)' : 'Viewer default camera motion';
         } catch (e) {
             $('fly-info').textContent = 'Flythrough info unavailable';

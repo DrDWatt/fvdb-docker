@@ -42,3 +42,31 @@ def test_fvdb_scenes_and_unflat_scenes_keep_the_viewer_default(ss):
     assert orientation(ss.MODEL_DIR / "cams.ply", True) is None and "&orient=" not in ss.viewer_src("cams.ply")
     write_splat_ply(ss.MODEL_DIR / "round.ply", points=grid_points(12))  # isotropic Gaussians: no surface cue
     assert orientation(ss.MODEL_DIR / "round.ply", False) is None
+
+
+def _room(n=40, w=6.0, h=3.0):
+    """SYNTHETIC closed room (viewer default frame, up = -y in the PLY): floor, ceiling and four walls."""
+    g = np.linspace(-w, w, n)
+    A, B = np.meshgrid(g, g)
+    floor = np.c_[A.ravel(), np.full(A.size, h), B.ravel()]       # PLY y = +h is the floor (viewer y = -h)
+    ceil = np.c_[A.ravel(), np.full(A.size, -h), B.ravel()]
+    gh = np.linspace(-h, h, n // 2)
+    W, H = np.meshgrid(g, gh)
+    walls = np.r_[np.c_[W.ravel(), H.ravel(), np.full(W.size, w)], np.c_[W.ravel(), H.ravel(), np.full(W.size, -w)],
+                  np.c_[np.full(W.size, w), H.ravel(), W.ravel()], np.c_[np.full(W.size, -w), H.ravel(), W.ravel()]]
+    return np.r_[floor, ceil, walls]
+
+
+def test_rooms_get_an_interior_pan_from_the_centre(ss, client):
+    """2026-10-23: new_peacock (a room) opened on an outside orbit looking through floaters at a blurred wall."""
+    from features import flythrough as fl
+    write_splat_ply(ss.MODEL_DIR / "room.ply", points=_room())
+    assert fl.ceiling_coverage(ss.MODEL_DIR / "room.ply", fl.DEFAULT_R, *fl.scene_bounds(ss.MODEL_DIR / "room.ply", R=fl.DEFAULT_R)) > 0.9
+    info = client.get("/flythrough/info/room.ply").json()
+    assert info["mode"] == "interior"
+    kf = client.get("/flythrough/settings/room.ply").json()["animTracks"][0]["keyframes"]["values"]
+    pos, tgt = np.asarray(kf["position"]).reshape(-1, 3), np.asarray(kf["target"]).reshape(-1, 3)
+    assert np.ptp(pos, axis=0).max() < 1e-9 and np.allclose(pos[0], [0, 0, 0], atol=0.5)  # stands still at the centre
+    assert np.allclose(tgt[:, 1], pos[0, 1]) and np.ptp(tgt[:, 0]) > 5                   # level gaze, all the way round
+    write_splat_ply(ss.MODEL_DIR / "ground.ply", points=grid_points(12, extent=2.0))      # open ground: no ceiling
+    assert client.get("/flythrough/info/ground.ply").json()["mode"] == "orbit"

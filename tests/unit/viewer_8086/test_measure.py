@@ -58,7 +58,7 @@ def bp(ss, monkeypatch, tmp_path):
     fake = FakeBlueprints()
     tok = tmp_path / "token"
     tok.write_text("tok-viewer\n")
-    monkeypatch.setattr(measure, "BLUEPRINTS_TOKEN_FILE", str(tok))
+    monkeypatch.setattr(measure.bp, "BLUEPRINTS_TOKEN_FILE", str(tok))
     real_client = httpx.Client
     monkeypatch.setattr(measure.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(fake), **kw))
     monkeypatch.setattr(measure.httpx, "get", lambda url, **kw: fake(httpx.Request("GET", url)))
@@ -114,7 +114,7 @@ def test_visual_answer_failures_overlay_and_validation(client, scene, bp):
 
 def test_not_configured_without_token(client, scene, monkeypatch):
     from features import measure
-    monkeypatch.setattr(measure, "BLUEPRINTS_TOKEN_FILE", "/nonexistent/token")
+    monkeypatch.setattr(measure.bp, "BLUEPRINTS_TOKEN_FILE", "/nonexistent/token")
     assert client.get("/measure/status").json()["configured"] is False
     r = client.post("/measure/ask", json={"model": scene, "question": "How wide is this doorway?", "camera": CAMERA})
     assert r.status_code == 503 and "not configured" in r.json()["detail"]

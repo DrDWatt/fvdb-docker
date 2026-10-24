@@ -18,7 +18,6 @@ is never sent to the browser. The viewer's PLY is imported into Blueprints by na
 PLY service (same /models directory); the scene id is cached per (model, size, mtime).
 """
 import logging
-import os
 import threading
 import time
 import uuid
@@ -28,27 +27,16 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
+from . import blueprints_client as bp
 from . import flythrough
+from .blueprints_client import BLUEPRINTS_PROJECT, BLUEPRINTS_URL
 
 logger = logging.getLogger("supersplat-viewer.measure")
 
-BLUEPRINTS_URL = os.environ.get("BLUEPRINTS_URL", "http://blueprints-api:8000").rstrip("/")
-BLUEPRINTS_TOKEN_FILE = os.environ.get("BLUEPRINTS_TOKEN_FILE", "/run/secrets/blueprints_token")
-BLUEPRINTS_PROJECT = os.environ.get("BLUEPRINTS_PROJECT", "peacock")
 ASK_TIMEOUT_S = 960.0  # Blueprints view job budget (900 s) + margin
 POLL_S = 2.0
 JOB_TTL_S = 3600
 IMPORT_TIMEOUT_S = 300.0  # first import downloads + parses the PLY
-
-
-def _token() -> str:
-    try:
-        tok = Path(BLUEPRINTS_TOKEN_FILE).read_text().strip()
-    except OSError:
-        tok = ""
-    if not tok:
-        raise HTTPException(status_code=503, detail="measurement service not configured (no Blueprints token)")
-    return tok
 
 
 def create_router(model_dir: Path, rag_sources=lambda model: []) -> APIRouter:
@@ -56,9 +44,7 @@ def create_router(model_dir: Path, rag_sources=lambda model: []) -> APIRouter:
     router = APIRouter(prefix="/measure", tags=["measure"])
     scenes: dict[tuple, str] = {}  # (model, size, mtime_ns) -> blueprints scene_id
 
-    def _client(timeout: float) -> httpx.Client:
-        return httpx.Client(base_url=BLUEPRINTS_URL, timeout=httpx.Timeout(timeout, connect=10),
-                            headers={"Authorization": f"Bearer {_token()}"})
+    _client = bp.client
 
     def _raise(resp: httpx.Response, what: str):
         if resp.status_code != 200:
@@ -85,7 +71,7 @@ def create_router(model_dir: Path, rag_sources=lambda model: []) -> APIRouter:
     @router.get("/status")
     def status():
         try:
-            tok_ok = bool(_token())
+            tok_ok = bool(bp.token())
         except HTTPException:
             return {"configured": False, "blueprints_url": BLUEPRINTS_URL}
         try:
@@ -149,7 +135,7 @@ def create_router(model_dir: Path, rag_sources=lambda model: []) -> APIRouter:
         path = model_dir / Path(model).name
         if path.suffix.lower() != ".ply" or not path.is_file():
             raise HTTPException(status_code=404, detail=f"Model {model} not found")
-        _token()  # fail fast (503) when not configured
+        bp.token()  # fail fast (503) when not configured
         now = time.time()
         for k in [k for k, j in jobs.items() if now - j["started_at"] > JOB_TTL_S]:
             jobs.pop(k)

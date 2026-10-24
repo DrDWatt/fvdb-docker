@@ -42,7 +42,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from features import flythrough, measure, model_files, rag_metadata
+from features import flythrough, measure, model_files, orient_override, rag_metadata
 from viewer_common.camera_path import MIN_VIDEO_SECONDS
 
 # ---------------------------------------------------------------------------
@@ -560,6 +560,13 @@ def build_viewer_html() -> str:
                 <button class="btn-purple" onclick="document.getElementById('ply-upload').click()">⬆️ Upload</button>
                 <button class="btn-danger" onclick="deleteModel()">🗑️ Delete</button>
             </div>
+            <div class="btn-row" title="Turn the model about your current view direction; saved for this file">
+                <button id="orient-flip" class="btn-purple">⤓ Flip</button>
+                <button id="orient-left" class="btn-purple">↺ 90°</button>
+                <button id="orient-right" class="btn-purple">↻ 90°</button>
+                <button id="orient-reset" class="btn-danger">Reset</button>
+            </div>
+            <p class="status-text" id="orient-status">Orientation…</p>
             <input type="file" id="ply-upload" accept=".ply" style="display:none" onchange="uploadPlyFile(this)"/>
             <div id="progress-container">
                 <div class="progress-bar-bg"><div class="progress-bar-fill" id="load-progress"></div></div>
@@ -624,6 +631,7 @@ def build_viewer_html() -> str:
     <script src="/web/rag.js"></script>
     <script src="/web/measure.js"></script>
     <script src="/web/loading.js"></script>
+    <script src="/web/orient.js"></script>
     <script>
         // ===================================================================
         // State
@@ -675,6 +683,7 @@ def build_viewer_html() -> str:
             await ModelLoading.track(model);
             currentModel = model;
             refreshModels();
+            Orient.refresh();
         }});
 
         // Initial model: track its real load too
@@ -682,7 +691,8 @@ def build_viewer_html() -> str:
             this.removeEventListener('load', handler);
             Flythrough.onViewerLoaded();
         }});
-        ModelLoading.track(currentModel);
+        Orient.init();
+        ModelLoading.track(currentModel).then(() => Orient.refresh());
 
         // Upload with progress
         function uploadPlyFile(input) {{
@@ -1785,6 +1795,7 @@ def get_scene_state() -> Dict[str, Any]:
 
 
 app.include_router(model_files.create_router(MODEL_DIR))
+app.include_router(orient_override.create_router(MODEL_DIR, flythrough.has_trained_cameras, flythrough.viewer_orientation))
 app.include_router(flythrough.create_router(MODEL_DIR, OUTPUT_DIR))
 rag_router = rag_metadata.create_router(get_scene_state)
 app.include_router(rag_router)

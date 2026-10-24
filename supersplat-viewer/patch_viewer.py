@@ -140,7 +140,8 @@ def patch_camera_bundle(viewer_dir: Path) -> None:
 
 
 ORIENT_ANCHOR = "entity.setLocalEulerAngles(0, 0, 180);"
-ORIENT_PATCH = ("{ const __o = new URL(location.href).searchParams.get('orient'); "
+ORIENT_PATCH = ("window.__splatEntity = entity; "  # web/orient.js flips/rotates it live (no 2.5 GB reload)
+                "{ const __o = new URL(location.href).searchParams.get('orient'); "
                 "const __q = __o ? __o.split(',').map(Number) : null; "
                 "if (__q && __q.length === 4 && __q.every(Number.isFinite)) entity.setLocalRotation(__q[0], __q[1], __q[2], __q[3]); "
                 "else entity.setLocalEulerAngles(0, 0, 180); }")
