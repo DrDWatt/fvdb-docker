@@ -93,19 +93,53 @@
                         <small>${esc((c.fields || {}).Dimensions || '')} ${esc((c.fields || {}).Wall ? '· ' + c.fields.Wall + ' wall' : '')}
                         ${esc((c.fields || {})['Shelf Number'] ? '· shelf ' + c.fields['Shelf Number'] : '')}</small>
                         <a href="${esc(c.url)}" target="_blank" rel="noopener">page ↗</a></div>
-                        <button class="btn-success" data-k="${k}">Use</button>
-                    </div>`).join('');
+                        <div class="meta-suggest-actions"><button class="btn-success" data-k="${k}">Use</button>
+                        ${(c.fields || {}).Dimensions ? `<button class="btn-purple" data-scale="${k}" title="Measure this object in 3D and use its catalogue height to scale the scene">📏 Use for scale</button>` : ''}</div>
+                    </div>`).join('') + '<p class="status-text" id="meta-scale-status"></p>';
             box.querySelectorAll('button[data-k]').forEach((b) => b.addEventListener('click', () => {
                 const c = out.candidates[Number(b.dataset.k)];
                 $('meta-label').value = c.name;
                 $('meta-text').value = describeCandidate(c);
                 box.querySelectorAll('.meta-suggest-item').forEach((el) => el.classList.remove('chosen'));
-                b.parentElement.classList.add('chosen');
+                b.closest('.meta-suggest-item').classList.add('chosen');
             }));
+            box.querySelectorAll('button[data-scale]').forEach((b) => b.addEventListener('click', () => linkScale(index, out.candidates[Number(b.dataset.scale)], b)));
         } catch (e) {
             box.innerHTML = `<p class="status-text" style="color:#dc3545;">❌ ${esc(e.message)}</p>`;
         }
     }
 
-    window.SegmentMatch = { offer, matchAll, showIn, _summary: summary, _describe: describeCandidate };
+    function scaleSummary(r) {
+        const loo = (r.leave_one_out || []).map((x) => `${x.name}: ${x.error_pct > 0 ? '+' : ''}${x.error_pct}%`).join(', ');
+        return `📏 Scene scale ${r.scale} from ${r.n} linked object(s) — ` +
+            (r.n < 2 ? 'single reference, unverified: link another object to check it'
+                : r.verified ? `verified (leave-one-out: ${loo})`
+                : `objects disagree (leave-one-out: ${loo}) — at least one link is the wrong catalogue object; no scale set`);
+    }
+
+    async function linkScale(index, cand, btn) {
+        const status = $('meta-scale-status');
+        btn.disabled = true;
+        status.textContent = '📏 Measuring this object in 3D…';
+        status.style.color = '#17a2b8';
+        try {
+            $('meta-label').value = cand.name;
+            $('meta-text').value = describeCandidate(cand);
+            const resp = await fetch(`/segment/${index}/link-scale`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: model(), candidate: cand }),
+            });
+            const r = await resp.json();
+            if (!resp.ok) throw new Error(r.detail || `HTTP ${resp.status}`);
+            status.textContent = scaleSummary(r) + (r.applied === false ? '' : ' — measurements now come out in m / cm.');
+            status.style.color = r.n >= 2 && !r.verified ? '#ffc107' : '#28a745';
+        } catch (e) {
+            status.textContent = `❌ ${e.message}`;
+            status.style.color = '#dc3545';
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    window.SegmentMatch = { offer, matchAll, showIn, linkScale, _summary: summary, _describe: describeCandidate, _scaleSummary: scaleSummary };
 })();

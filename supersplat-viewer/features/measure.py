@@ -68,6 +68,8 @@ def create_router(model_dir: Path, rag_sources=lambda model, query=None: []) -> 
             logger.info(f"Blueprints scene for {path.name}: {scenes[key]} (existing={r.json().get('existing')})")
         return scenes[key]
 
+    router.scene_for = _scene_for  # features/segment_match.py links catalogue objects to this scene
+
     @router.get("/status")
     def status():
         try:

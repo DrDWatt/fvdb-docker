@@ -1803,8 +1803,10 @@ app.include_router(flythrough.create_router(MODEL_DIR, OUTPUT_DIR))
 rag_router = rag_metadata.create_router(get_scene_state)
 app.include_router(rag_router)
 app.include_router(rag_crawl.create_router())
-app.include_router(segment_match.create_router(CACHE_DIR, lambda: last_segmentation.get("prompt", "")))
-app.include_router(measure.create_router(MODEL_DIR, rag_router.measurement_sources))
+measure_router = measure.create_router(MODEL_DIR, rag_router.measurement_sources)
+app.include_router(measure_router)
+app.include_router(segment_match.create_router(CACHE_DIR, lambda: last_segmentation.get("prompt", ""), MODEL_DIR,
+                                               measure_router.scene_for))
 
 # Frontend modules for the features above (plain JS/CSS, no templating)
 WEB_DIR = Path(__file__).parent / "web"

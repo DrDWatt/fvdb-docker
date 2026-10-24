@@ -114,3 +114,4 @@
 .meta-suggest-item.chosen { border-color: #28a745; }
 .meta-suggest-item a { color: #4da3ff; margin-left: 4px; }
 .seg-match { color: #9ad; }
+.meta-suggest-actions { display: flex; flex-direction: column; gap: 3px; }
