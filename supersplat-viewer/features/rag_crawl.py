@@ -6,8 +6,8 @@
   DELETE /rag/web-documents?model=  forget the crawled documents of a model
 
 web_sources(model, query) turns the best-matching crawled pages into RAG sources for Ask AI and for Cosmos 3
-measurements (labelled fields such as Object Name / Dimensions / Wall / Shelf Number, the description and
-the page's size statements, each cited by its URL).
+measurements (the page's labelled fields in whatever wording the site uses, its canonical name and size from
+Splat Blueprints, the description and size statements, each cited by its URL).
 """
 import logging
 import time
@@ -49,8 +49,10 @@ def web_sources(model: str, query: str | None = None, limit: int = 8) -> list[di
         if d.get("description"):
             lines.append(d["description"])
         lines += [s["sentence"] for s in d.get("statements") or []]
+        if d.get("dims_text"):
+            lines.append(f"{d.get('name') or 'Size'}: {d['dims_text']}")
         out.append({"source": f"web: {d.get('title', '')[:80]} ({d['url']})", "url": d["url"],
-                    "subject": fields.get("Object Name") or fields.get("Title") or None, "text": "\n".join(lines)[:6000]})
+                    "subject": d.get("name") or None, "text": "\n".join(lines)[:6000]})
     return out
 
 

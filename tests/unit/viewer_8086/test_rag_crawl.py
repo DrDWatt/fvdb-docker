@@ -6,7 +6,9 @@ import pytest
 
 DOC = {"url": "https://museum.example/items/show/1", "title": "The Peacock Room | Baluster vase", "description": "A vase",
        "fields": {"Object Name": "Vase", "Dimensions": "HxWxD: 40.3 x 13.0 x 13.0 cm", "Wall": "East"},
-       "statements": [{"sentence": "HxWxD: 40.3 x 13.0 x 13.0 cm", "subject": "Vase", "dims_m": {"height": 0.403}}], "images": []}
+       "statements": [{"sentence": "HxWxD: 40.3 x 13.0 x 13.0 cm", "subject": "Vase", "dims_m": {"height": 0.403}}], "images": [],
+       # canonical fields added by Splat Blueprints (any site's wording)
+       "name": "Baluster vase", "height_m": 0.403, "dims_text": "Dimensions: HxWxD: 40.3 x 13.0 x 13.0 cm"}
 
 
 @pytest.fixture
@@ -53,7 +55,7 @@ def test_crawl_proxy_progress_and_forget(client, blueprints):
 def test_crawled_pages_feed_ask_ai_and_measurements(blueprints):
     from features import rag_crawl
     src = rag_crawl.web_sources("room.ply", "How tall is the vase?")
-    assert src[0]["subject"] == "Vase" and src[0]["url"] == DOC["url"] and "Dimensions: HxWxD: 40.3 x 13.0 x 13.0 cm" in src[0]["text"]
+    assert src[0]["subject"] == "Baluster vase" and src[0]["url"] == DOC["url"] and "Dimensions: HxWxD: 40.3 x 13.0 x 13.0 cm" in src[0]["text"]
     assert any(c[1] == "/rag/documents" and c[2]["q"] == "How tall is the vase?" for c in blueprints)  # question-ranked
     ctx = rag_crawl.web_context("room.ply", "vase")
     assert "Wall: East" in ctx and DOC["url"] in ctx

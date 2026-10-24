@@ -39,7 +39,7 @@
     function summary(out) {
         const top = out.candidates && out.candidates[0];
         if (!top) return out.note || 'no match in RAG database';
-        const dims = top.fields && top.fields.Dimensions ? ` · ${top.fields.Dimensions}` : '';
+        const dims = top.dims_text ? ` · ${top.dims_text}` : '';
         return `→ ${top.name}${dims} (score ${top.score})`;
     }
 
@@ -67,11 +67,13 @@
         }
     }
 
+    // Any site's short fields (Splat Blueprints drops long prose), plus the size and the source page
     function describeCandidate(c) {
-        const f = c.fields || {};
-        const keys = ['Object Name', 'Title', 'Dimensions', 'Medium', 'Period', 'Dated', 'Wall', 'Shelf Number', 'Object Number'];
-        return keys.filter((k) => f[k]).map((k) => `${k}: ${f[k]}`).concat([`Source: ${c.url}`]).join('\n');
+        const lines = Object.entries(c.details || {}).map(([k, v]) => `${k}: ${v}`);
+        if (c.dims_text && !lines.some((l) => l.includes(c.dims_text.split(': ').pop()))) lines.push(`Size: ${c.dims_text}`);
+        return lines.concat([`Source: ${c.url}`]).join('\n');
     }
+    const where = (c) => Object.entries(c.location || {}).map(([k, v]) => `${k} ${v}`).join(' · ');
 
     // Object Metadata panel: suggestions for segment `index`
     async function showIn(containerId, index) {
@@ -90,11 +92,10 @@
                 out.candidates.map((c, k) => `
                     <div class="meta-suggest-item">
                         <div><b>${esc(c.name)}</b> <small>score ${c.score}${c.why.shape !== null ? ` · shape ${c.why.shape}` : ''}</small><br>
-                        <small>${esc((c.fields || {}).Dimensions || '')} ${esc((c.fields || {}).Wall ? '· ' + c.fields.Wall + ' wall' : '')}
-                        ${esc((c.fields || {})['Shelf Number'] ? '· shelf ' + c.fields['Shelf Number'] : '')}</small>
+                        <small>${esc(c.dims_text || '')}${where(c) ? ' · ' + esc(where(c)) : ''}</small>
                         <a href="${esc(c.url)}" target="_blank" rel="noopener">page ↗</a></div>
                         <div class="meta-suggest-actions"><button class="btn-success" data-k="${k}">Use</button>
-                        ${(c.fields || {}).Dimensions ? `<button class="btn-purple" data-scale="${k}" title="Measure this object in 3D and use its catalogue height to scale the scene">📏 Use for scale</button>` : ''}</div>
+                        ${c.height_m ? `<button class="btn-purple" data-scale="${k}" title="Measure this object in 3D and use its catalogue height to scale the scene">📏 Use for scale</button>` : ''}</div>
                     </div>`).join('') + '<p class="status-text" id="meta-scale-status"></p>';
             box.querySelectorAll('button[data-k]').forEach((b) => b.addEventListener('click', () => {
                 const c = out.candidates[Number(b.dataset.k)];

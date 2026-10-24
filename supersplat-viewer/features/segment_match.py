@@ -77,9 +77,10 @@ def create_router(cache_dir: Path, current_prompt, model_dir: Path | None = None
         """Measure segment `index` in 3D and link it to its catalogue size; Blueprints recalibrates the scene."""
         model = Path(str(body.get("model", ""))).name
         cand = body.get("candidate") or {}
-        dims = (cand.get("fields") or {}).get("Dimensions", "")
-        if not model or not cand.get("url") or not dims:
-            raise HTTPException(status_code=422, detail="model and a candidate with Dimensions are required")
+        height = cand.get("height_m")  # canonical size from Splat Blueprints, whatever the site called it
+        dims = cand.get("dims_text") or (cand.get("fields") or {}).get("Dimensions", "")
+        if not model or not cand.get("url") or not (height or dims):
+            raise HTTPException(status_code=422, detail="model and a candidate with a published height are required")
         frame_cam, mask_path = cache_dir / "camera.json", cache_dir / f"mask_{index}.npy"
         if not mask_path.is_file() or not frame_cam.is_file():
             raise HTTPException(status_code=404, detail=f"segment {index} or its camera not found (segment the view again)")
@@ -90,7 +91,7 @@ def create_router(cache_dir: Path, current_prompt, model_dir: Path | None = None
         except ValueError as e:
             raise HTTPException(status_code=422, detail=f"could not measure this object: {e}") from None
         link_id = hashlib.sha1(f"{model}|{current_prompt()}|{index}|{cand['url']}".encode()).hexdigest()[:16]
-        payload = {"link_id": link_id, "name": cand.get("name", ""), "url": cand["url"], "dimensions": dims,
+        payload = {"link_id": link_id, "name": cand.get("name", ""), "url": cand["url"], "dimensions": dims, "height_m": height,
                    "p": m["p"], "q": m["q"], "sigma_mu": m["sigma_mu"], "n_points": m["n_points"]}
         try:
             with bp.client(120) as c:

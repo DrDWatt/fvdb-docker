@@ -31,7 +31,12 @@ def measure(model_path, mask: np.ndarray, camera: dict) -> dict:
         raise ValueError("mask is empty")
     view, proj = _mat(camera["view"]), _mat(camera["proj"])
     model = _mat(camera["model"]) if camera.get("model") else np.eye(4)
-    v = _read_elements(model_path)[0]["vertex"]
+    try:
+        v = _read_elements(model_path)[0]["vertex"]
+    except (KeyError, ValueError) as e:  # e.g. SuperSplat compressed PLY (packed 'chunk' element, list properties)
+        raise ValueError(f"unsupported PLY layout for 3D measuring ({e}); use a standard 3DGS PLY") from None
+    if not {"x", "y", "z"} <= set(v.dtype.names or ()):
+        raise ValueError("PLY vertices have no x/y/z")
     P = np.stack([np.asarray(v[k], dtype=np.float64) for k in "xyz"], axis=1)
     op = 1 / (1 + np.exp(-np.asarray(v["opacity"], dtype=np.float64))) if "opacity" in v.dtype.names else np.ones(len(P))
     keep = np.isfinite(P).all(axis=1) & (op > 0.3)            # faint floaters do not define a silhouette

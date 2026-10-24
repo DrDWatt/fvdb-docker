@@ -95,10 +95,20 @@ def test_link_scale_measures_and_posts_to_the_scene(client, ss, monkeypatch, tmp
 
     real = httpx.Client
     monkeypatch.setattr(bp.httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
-    cand = {"name": "Baluster vase", "url": "https://m/items/show/3397", "fields": {"Dimensions": "HxWxD: 40.3 x 13.0 x 13.0 cm"}}
+    cand = {"name": "Baluster vase", "url": "https://m/items/show/3397", "height_m": 0.403,
+            "dims_text": "HxWxD: 40.3 x 13.0 x 13.0 cm", "fields": {"Dimensions": "HxWxD: 40.3 x 13.0 x 13.0 cm"}}
     out = client.post("/segment/0/link-scale", json={"model": "room.ply", "candidate": cand}).json()
     assert out["n"] == 1 and abs(out["measured"]["height_mu"] - 1.2) < 0.1
     path, body = sent[0]
     assert path == "/projects/peacock/scenes/splat-room/linked-objects"
-    assert body["dimensions"] == "HxWxD: 40.3 x 13.0 x 13.0 cm" and body["url"] == cand["url"] and len(body["p"]) == 3
+    assert body["dimensions"] == "HxWxD: 40.3 x 13.0 x 13.0 cm" and body["height_m"] == 0.403 and len(body["p"]) == 3
     assert client.post("/segment/0/link-scale", json={"model": "room.ply", "candidate": {"name": "x", "url": "u", "fields": {}}}).status_code == 422
+
+
+def test_unsupported_ply_layouts_give_a_clear_error(ss):
+    import pytest
+    from features.object_measure import measure
+    (ss.MODEL_DIR / "packed.ply").write_bytes(b"ply\nformat binary_little_endian 1.0\nelement chunk 1\n"
+                                              b"property list uchar float packed\nend_header\n\x00")
+    with pytest.raises(ValueError, match="unsupported PLY layout"):
+        measure(ss.MODEL_DIR / "packed.ply", np.ones((10, 10), np.float32), _cam_looking_down_minus_z())
