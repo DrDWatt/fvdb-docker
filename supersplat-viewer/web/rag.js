@@ -61,6 +61,7 @@
                 </div>
                 <input type="text" id="meta-label" placeholder="Label (e.g. Chair, Charger)">
                 <textarea id="meta-text" placeholder="Description / notes..."></textarea>
+                <div id="meta-suggest"></div>
                 <input type="file" id="meta-files" multiple accept=".pdf,.txt,.json,.md,.csv,.doc,.docx,.png,.jpg">
                 <ul id="meta-file-list"></ul>
                 <div id="meta-training" class="status-text">No documents linked</div>
@@ -213,7 +214,10 @@
         $('meta-label').value = defaultLabel || '';
         $('meta-text').value = '';
         renderMeta(null);
+        $('meta-suggest').innerHTML = '';
         $('meta-panel').classList.remove('hidden');
+        // SAM3 objects (id "model|prompt|index"): suggest the matching crawled catalogue page (web/segment_match.js)
+        if (kind === 'object' && window.SegmentMatch) SegmentMatch.showIn('meta-suggest', Number(String(id).split('|').pop()));
         try {
             const data = await (await fetch(metaUrl())).json();
             if (data.summary) {
