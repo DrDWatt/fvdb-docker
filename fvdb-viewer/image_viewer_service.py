@@ -689,16 +689,18 @@ def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx
             # Fallback: create synthetic camera looking at model center
             logger.warning("No camera matrices in metadata - using synthetic camera")
             means = gsplat.means
-            center = means.mean(dim=0)
-            # Compute scene radius from Gaussian spread
+            center = means.median(dim=0).values
+            # Nov 2 2026 (ArtiFixer3D PLYs, no stored cameras): frame the dense core (median radius), not r95 —
+            # background splats put r95 at ~68 units vs r50 ~7, which pushed the camera past the far plane.
             dists = (means - center).norm(dim=1)
-            scene_radius = dists.quantile(0.95).item()
-            cam_dist = scene_radius * 2.5 / max(zoom, 0.1)
+            core_radius = dists.quantile(0.5).item()
+            synthetic_far = max(100.0, dists.quantile(0.99).item() * 4)
+            cam_dist = core_radius * 2.5 / max(zoom, 0.1)
             
-            # Place camera along +Z, looking at center
+            # fVDB cameras are OpenCV (look along +Z): place the camera at -Z of the centre, looking at it
             c2w = torch.eye(4, device=device, dtype=torch.float32)
-            c2w[2, 3] = cam_dist  # camera at z = cam_dist
-            c2w[:3, 3] += center  # offset to scene center
+            c2w[:3, 3] = center
+            c2w[2, 3] -= cam_dist
             
             # Build simple perspective intrinsics
             focal = max(width, height) * 1.2
@@ -712,7 +714,9 @@ def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx
             sizes = None
             num_cams = 1
             cam_idx = 0
+            far_plane = synthetic_far
         else:
+            far_plane = 100.0
             num_cams = c2w_all.shape[0]
             cam_idx = cam_idx % num_cams
             c2w = c2w_all[cam_idx].to(device).clone()
@@ -779,11 +783,13 @@ def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx
         c2w = c2w.unsqueeze(0).contiguous()
         w2c = torch.inverse(c2w).contiguous()
         
-        # Scale projection matrix
-        orig_h, orig_w = sizes[cam_idx].tolist()
-        K = K_all[cam_idx:cam_idx+1].to(device).clone()
-        K[:, 0, :] *= width / orig_w
-        K[:, 1, :] *= height / orig_h
+        # Scale projection matrix (trained cameras only; the synthetic K is already built for width x height).
+        # Nov 2 2026: PLYs without stored cameras (e.g. ArtiFixer3D / 3DGRUT exports) crashed here with
+        # "'NoneType' object is not subscriptable" because sizes is None on the synthetic-camera path.
+        if sizes is not None:
+            orig_h, orig_w = sizes[cam_idx].tolist()
+            K[:, 0, :] *= width / orig_w
+            K[:, 1, :] *= height / orig_h
         K = K.contiguous()
         
         images, alpha = gsplat.render_images(
@@ -792,7 +798,7 @@ def render_view(width=800, height=600, azimuth=0, elevation=0, zoom=1.0, cam_idx
             image_width=width,
             image_height=height,
             near=0.01,
-            far=100.0
+            far=far_plane
         )
         
         img = images[0].clamp(0, 1).cpu().numpy()
