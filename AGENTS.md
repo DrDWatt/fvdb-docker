@@ -6,6 +6,8 @@
 | 8085 | `fvdb-viewer` | `fvdb-viewer/image_viewer_service.py` (server-rendered frames, fVDB) | `docker-compose.master.yml` |
 | 8086 | `supersplat-viewer` | `supersplat-viewer/supersplat_service.py` + `features/` (routers) + `web/` (JS/CSS) | `docker-compose.workflow.yml` |
 
+- Related (not in this repo): :8089 `artifixer-viewer` in `~/artifixer-service` (`viewer/`, its own docker-compose) plays
+  ArtiFixer3D+ comparison videos; its `service/publish.sh` copies ArtiFixer PLYs (with the fVDB cameras attached) into `./models`.
 - Code shared by both viewers lives in `shared/viewer_common/` (mounted at `/app/viewer_common`):
   `camera_path.py` (smoothed constant-speed flythrough path, `MIN_VIDEO_SECONDS = 30`),
   `video.py` (H.264 MP4 writer), `rag.py` (document text extraction + Ollama chat).
