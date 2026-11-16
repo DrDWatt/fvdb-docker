@@ -4,7 +4,9 @@
     const $ = (id) => document.getElementById(id);
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const POLL_MS = 10000;
-    const state = { timer: null, status: null, openLog: null };
+    const CLEAR_KEY = 'artifixer-cleared-at';
+    const store = () => { try { return window.localStorage; } catch (e) { return null; } };
+    const state = { timer: null, status: null, openLog: null, clearedAt: Number((store() && store().getItem(CLEAR_KEY)) || 0) };
 
     // Pure helpers (unit-tested in tests/js/artifixer.test.mjs)
     function canRun(model, kind) {
@@ -19,11 +21,20 @@
         const s = Math.round((job.finished || now) - job.started);
         return s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s >= 60 ? `${Math.round(s / 60)} min` : `${s} s`;
     }
+    // Nov 16 2026: the list got cluttered. "Clear" hides finished jobs in this browser (queued/running always stay);
+    // nothing is deleted on the server, "Show all" brings them back.
+    function visibleJobs(jobs, clearedAt) {
+        return jobs.filter((j) => ['queued', 'running'].includes(j.state) || (j.created || 0) > clearedAt);
+    }
     const ICON = { queued: '⏳', running: '🔄', done: '✅', failed: '❌', cancelled: '⏹', interrupted: '⚠️' };
 
-    function renderJobs(jobs, now) {
-        if (!jobs.length) return '<p class="status-text">No jobs yet.</p>';
-        return jobs.map((j) => {
+    function renderJobs(all, now) {
+        const jobs = visibleJobs(all, state.clearedAt), hidden = all.length - jobs.length;
+        const bar = `<div class="btn-row af-bar"><span class="status-text">${jobs.length} job(s)${hidden ? `, ${hidden} cleared` : ''}</span>
+            ${jobs.some((j) => !['queued', 'running'].includes(j.state)) ? '<button class="measure-chip" data-clear="1">Clear</button>' : ''}
+            ${hidden ? '<button class="measure-chip" data-showall="1">Show all</button>' : ''}</div>`;
+        if (!jobs.length) return bar + (all.length ? '' : '<p class="status-text">No jobs yet.</p>');
+        return bar + jobs.map((j) => {
             const res = j.results || {};
             const links = [res.viewer ? `<a href="${esc(res.viewer)}" target="_blank">View in :8089</a>` : '',
                 ...(res.plys || []).map((p) => `<span class="af-ply">${esc(p)}</span>`)].join(' ');
@@ -92,8 +103,16 @@
         refresh();
     }
 
+    function setCleared(ts) {
+        state.clearedAt = ts;
+        if (store()) store().setItem(CLEAR_KEY, String(ts));
+        if (state.status) $('af-jobs').innerHTML = renderJobs(state.status.jobs, Date.now() / 1000);
+    }
+
     async function onClick(ev) {
         const t = ev.target.dataset || {};
+        if (t.clear) { state.openLog = null; return setCleared(Date.now() / 1000); }
+        if (t.showall) return setCleared(0);
         if (t.cancel) { try { await api(`/artifixer/jobs/${t.cancel}/cancel`, { method: 'POST' }); } catch (e) { $('af-hint').textContent = e.message; } refresh(); }
         if (t.log) { state.openLog = state.openLog === t.log ? null : t.log; $('af-jobs').innerHTML = renderJobs(state.status.jobs, Date.now() / 1000); showLog(t.log); }
     }
@@ -117,5 +136,5 @@
         refresh();
     }
 
-    window.ArtiFixer = { render, refresh, canRun, duration, renderJobs, state };
+    window.ArtiFixer = { render, refresh, canRun, duration, renderJobs, visibleJobs, state };
 })();

@@ -50,3 +50,18 @@ test('ArtiFixer3D+ needs the capture; cleanup works on any listed PLY', () => {
     assert.match(a.renderJobs([{ _id: 'j1', state: 'running', ply: 'Car_model.ply', endpoint_name: 'Brev', step: 'steps 1-4', started: 0 }], 120),
         /data-cancel="j1"/);
 });
+
+test('Clear hides finished jobs and past calls, never active ones; Show all (0) restores', () => {
+    const { ArtiFixer: a } = load(AF);
+    const jobs = [{ _id: 'old', state: 'done', created: 100 }, { _id: 'run', state: 'running', created: 50 }, { _id: 'new', state: 'failed', created: 300 }];
+    assert.deepEqual(a.visibleJobs(jobs, 200).map((j) => j._id), ['run', 'new']);
+    assert.equal(a.visibleJobs(jobs, 0).length, 3);
+    a.state.clearedAt = 200;
+    assert.match(a.renderJobs(jobs, 400), /1 cleared/);
+    assert.match(a.renderJobs(jobs, 400), /data-showall="1"/);
+    const { CosmosActivity: c } = load(COSMOS);
+    const calls = [{ state: 'ok', started: 100, prompt: 'a', endpoint: 'brev' }, { state: 'running', started: 90, prompt: 'b', endpoint: 'brev' }];
+    assert.deepEqual(c.visibleCalls(calls, 150).map((x) => x.prompt), ['b']);
+    c.state.clearedAt = 150;
+    assert.match(c.renderCalls(calls, 200), /1 cleared/);
+});

@@ -7,7 +7,9 @@
     const $ = (id) => document.getElementById(id);
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const FAST_MS = 3000, SLOW_MS = 30000;
-    const state = { timer: null, last: null, open: false };
+    const CLEAR_KEY = 'cosmos-cleared-at';
+    const store = () => { try { return window.localStorage; } catch (e) { return null; } };
+    const state = { timer: null, last: null, open: false, clearedAt: Number((store() && store().getItem(CLEAR_KEY)) || 0) };
 
     // Pure helpers (unit-tested in tests/js/cosmos_activity.test.mjs)
     function brevBadge(brev) {
@@ -27,9 +29,16 @@
         return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
     }
 
-    function renderCalls(calls, now) {
-        if (!calls || !calls.length) return '<p class="status-text">No Cosmos calls since the server started.</p>';
-        return calls.map((c) => `
+    // Nov 16 2026: "Clear" hides past calls in this browser (a running call always stays); "Show all" undoes it.
+    function visibleCalls(calls, clearedAt) { return (calls || []).filter((c) => c.state === 'running' || c.started > clearedAt); }
+
+    function renderCalls(all, now) {
+        const calls = visibleCalls(all, state.clearedAt), hidden = (all || []).length - calls.length;
+        const bar = `<div class="btn-row af-bar"><span class="status-text">${calls.length} call(s)${hidden ? `, ${hidden} cleared` : ''}</span>
+            ${calls.length ? '<button class="measure-chip" data-cclear="1">Clear</button>' : ''}
+            ${hidden ? '<button class="measure-chip" data-cshowall="1">Show all</button>' : ''}</div>`;
+        if (!calls.length) return bar + (hidden ? '' : '<p class="status-text">No Cosmos calls since the server started.</p>');
+        return bar + calls.map((c) => `
             <details class="cosmos-call ${c.state}">
                 <summary>${c.state === 'ok' ? '✅' : c.state === 'running' ? '⏳' : '❌'} ${esc(ago(c.started, now))} · ${esc(c.endpoint)}
                     · ${c.seconds != null ? esc(c.seconds) + ' s' : 'running'} · ${esc(c.prompt.slice(0, 60))}${c.prompt.length > 60 ? '…' : ''}</summary>
@@ -65,6 +74,12 @@
         try { await fetch('/cosmos/check-brev', { method: 'POST' }); } finally { $('cosmos-recheck').disabled = false; refresh(); }
     }
 
+    function setCleared(ts) {
+        state.clearedAt = ts;
+        if (store()) store().setItem(CLEAR_KEY, String(ts));
+        if (state.last) $('cosmos-calls').innerHTML = renderCalls(state.last.calls, state.last.at || Date.now() / 1000);
+    }
+
     function render(container) {
         container.insertAdjacentHTML('beforeend', `
             <div class="cosmos-activity">
@@ -79,11 +94,16 @@
                     <p class="status-text"><a id="cosmos-swagger" target="_blank">Cosmos API (Swagger)</a></p></details>
             </div>`);
         $('cosmos-recheck').onclick = recheck;
+        $('cosmos-calls').onclick = (ev) => {
+            const t = ev.target.dataset || {};
+            if (t.cclear) setCleared(Date.now() / 1000);
+            if (t.cshowall) setCleared(0);
+        };
         refresh();
     }
 
     // A measurement just started: switch to fast polling right away
     function kick() { clearTimeout(state.timer); state.timer = setTimeout(refresh, 500); }
 
-    window.CosmosActivity = { render, refresh, kick, brevBadge, nimLine, busy, ago, renderCalls, state };
+    window.CosmosActivity = { render, refresh, kick, brevBadge, nimLine, busy, ago, renderCalls, visibleCalls, state };
 })();
