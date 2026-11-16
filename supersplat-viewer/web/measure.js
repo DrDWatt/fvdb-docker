@@ -74,6 +74,7 @@
         $('measure-ask').disabled = true;
         $('measure-result').innerHTML = '';
         setStatus('📐 Rendering this view, asking Cosmos 3 to locate the feature, measuring…', '#17a2b8');
+        if (window.CosmosActivity) CosmosActivity.kick();  // live Brev/NIM state + prompts below while this runs
         try {
             const resp = await fetch('/measure/ask', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },

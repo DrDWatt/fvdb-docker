@@ -42,7 +42,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from features import flythrough, measure, model_files, orient_override, rag_crawl, rag_metadata, segment_match
+from features import (artifixer_jobs, cosmos_activity, flythrough, measure, model_files, orient_override, rag_crawl,
+                      rag_metadata, segment_match)
 from viewer_common.camera_path import MIN_VIDEO_SECONDS
 
 # ---------------------------------------------------------------------------
@@ -578,8 +579,11 @@ def build_viewer_html() -> str:
             </div>
         </div>
 
-        <!-- Cosmos 3 equation-based measurement (rendered by /web/measure.js) -->
+        <!-- Cosmos 3 equation-based measurement (rendered by /web/measure.js; activity by /web/cosmos_activity.js) -->
         <div class="ctrl-section" id="measure-section"></div>
+
+        <!-- ArtiFixer3D+ jobs on the loaded PLY (rendered by /web/artifixer.js) -->
+        <div class="ctrl-section" id="artifixer-section"></div>
 
         <!-- Flythrough + MP4 export (rendered by /web/flythrough.js) -->
         <div class="ctrl-section" id="flythrough-section"></div>
@@ -630,6 +634,8 @@ def build_viewer_html() -> str:
     <script src="/web/flythrough.js"></script>
     <script src="/web/rag.js"></script>
     <script src="/web/measure.js"></script>
+    <script src="/web/cosmos_activity.js"></script>
+    <script src="/web/artifixer.js"></script>
     <script src="/web/loading.js"></script>
     <script src="/web/orient.js"></script>
     <script src="/web/crawl.js"></script>
@@ -1032,6 +1038,8 @@ def build_viewer_html() -> str:
         // ===================================================================
         Flythrough.render(document.getElementById('flythrough-section'));
         Measure.render(document.getElementById('measure-section'));
+        CosmosActivity.render(document.getElementById('measure-section'));
+        ArtiFixer.render(document.getElementById('artifixer-section'));
         window.addEventListener('load', () => {{
             refreshModels();
         }});
@@ -1805,6 +1813,8 @@ app.include_router(rag_router)
 app.include_router(rag_crawl.create_router())
 measure_router = measure.create_router(MODEL_DIR, rag_router.measurement_sources)
 app.include_router(measure_router)
+app.include_router(cosmos_activity.create_router())   # Nov 16 2026: Brev login, NIM state, prompts/responses
+app.include_router(artifixer_jobs.create_router())    # Nov 16 2026: run ArtiFixer3D+ / cleanup from :8086
 app.include_router(segment_match.create_router(CACHE_DIR, lambda: last_segmentation.get("prompt", ""), MODEL_DIR,
                                                measure_router.scene_for))
 

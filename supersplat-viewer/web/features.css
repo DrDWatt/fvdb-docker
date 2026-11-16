@@ -115,3 +115,15 @@
 .meta-suggest-item a { color: #4da3ff; margin-left: 4px; }
 .seg-match { color: #9ad; }
 .meta-suggest-actions { display: flex; flex-direction: column; gap: 3px; }
+
+/* Cosmos activity (web/cosmos_activity.js) and ArtiFixer3D+ jobs (web/artifixer.js), Nov 16 2026 */
+.cosmos-activity { margin-top: 8px; border-top: 1px solid #2a2f3d; padding-top: 6px; }
+.cosmos-call { margin: 4px 0; font-size: 11px; }
+.cosmos-call summary { cursor: pointer; color: #ccc; }
+.cosmos-call.error summary { color: #ff8a8a; }
+.cosmos-io pre, .af-log { white-space: pre-wrap; max-height: 180px; overflow: auto; background: #0d0f16; border: 1px solid #2a2f3d;
+    border-radius: 4px; padding: 4px 6px; font-size: 11px; margin: 2px 0 6px; }
+.cosmos-io pre.err { color: #ff8a8a; }
+.af-job { border: 1px solid #2a2f3d; border-radius: 6px; padding: 5px 7px; margin: 5px 0; font-size: 12px; }
+.af-job a { color: #76b900; }
+.af-ply { font-size: 10px; color: #9aa3b5; display: block; }

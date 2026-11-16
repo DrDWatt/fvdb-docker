@@ -8,6 +8,11 @@
 
 - Related (not in this repo): :8089 `artifixer-viewer` in `~/artifixer-service` (`viewer/`, its own docker-compose) plays
   ArtiFixer3D+ comparison videos; its `service/publish.sh` copies ArtiFixer PLYs (with the fVDB cameras attached) into `./models`.
+- :8086 Cosmos activity + ArtiFixer panels (2026-11-16): `features/cosmos_activity.py` (`/cosmos/activity`, from the Cosmos
+  gateway `http://cosmos-gateway:8093` on cosmos-shared: Brev login, NIM state, recent prompts/responses) + `web/cosmos_activity.js`
+  under Measure; `features/artifixer_jobs.py` (`/artifixer/*`, proxy to the ArtiFixer controller `http://100.105.59.33:8092`) +
+  `web/artifixer.js` (run ArtiFixer3D+ / quick cleanup on the loaded PLY, jobs, logs). Swagger: :8093/docs (Cosmos), :8092/docs
+  (ArtiFixer, MCP at :8092/mcp). Measurement timeouts on Nov 12 + Nov 16 = expired Brev CLI login (`~/.local/bin/brev login`).
 - Code shared by both viewers lives in `shared/viewer_common/` (mounted at `/app/viewer_common`):
   `camera_path.py` (smoothed constant-speed flythrough path, `MIN_VIDEO_SECONDS = 30`),
   `video.py` (H.264 MP4 writer), `rag.py` (document text extraction + Ollama chat).
