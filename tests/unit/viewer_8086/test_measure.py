@@ -3,6 +3,7 @@
 Blueprints is replaced by an in-memory test double (httpx.MockTransport) that records every call.
 """
 import json
+import time
 
 import httpx
 import pytest
@@ -131,3 +132,35 @@ def test_rag_notes_are_sent_as_measurement_references(client, scene, bp):
     assert job["state"] == "completed"
     sent = [c for c in bp.calls if c[1].endswith("/ask-view")][-1][2]["rag_sources"]
     assert {"source": "SAM3 object note 'front door'", "subject": "front door", "text": "The front door is 36 inches wide."} in sent
+
+
+def test_measurement_warms_cosmos_first_and_reports_its_progress(client, scene, bp, monkeypatch):
+    """Nov 16 2026: an H100 cold start took 761 s; the measurement now waits for the warm-up with a visible stage."""
+    from features import measure
+    states = iter([{"state": "starting", "detail": "brev instance"}, {"state": "starting", "detail": "loading the model"},
+                   {"state": "ready", "detail": "cold start 761s"}])
+    monkeypatch.setattr(measure, "WARM_POLL_S", 0.01)
+    monkeypatch.setattr(measure.httpx, "post", lambda url, **kw: httpx.Response(200, json=next(states), request=httpx.Request("POST", url)))
+    real_get = measure.httpx.get
+    monkeypatch.setattr(measure.httpx, "get", lambda url, **kw: httpx.Response(200, json=next(states), request=httpx.Request("GET", url))
+                        if "/api/lifecycle" in url else real_get(url, **kw))
+    job = client.post("/measure/ask", json={"model": scene, "question": "How wide is this doorway?", "camera": CAMERA}).json()
+    for _ in range(300):
+        st = client.get(f"/measure/jobs/{job['job_id']}").json()
+        if st["state"] != "running":
+            break
+        time.sleep(0.01)
+    assert st["state"] == "completed"
+
+
+def test_cosmos_unavailable_fails_the_measurement_with_the_reason(client, scene, bp, monkeypatch):
+    from features import measure
+    monkeypatch.setattr(measure.httpx, "post", lambda url, **kw: httpx.Response(
+        200, json={"state": "error", "detail": "brev CLI is logged out"}, request=httpx.Request("POST", url)))
+    job = client.post("/measure/ask", json={"model": scene, "question": "How wide is this doorway?", "camera": CAMERA}).json()
+    for _ in range(300):
+        st = client.get(f"/measure/jobs/{job['job_id']}").json()
+        if st["state"] != "running":
+            break
+        time.sleep(0.01)
+    assert st["state"] == "failed" and "brev CLI is logged out" in st["error"]

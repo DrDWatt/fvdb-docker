@@ -30,9 +30,12 @@ from fastapi.responses import Response
 from . import blueprints_client as bp
 from . import flythrough
 from .blueprints_client import BLUEPRINTS_PROJECT, BLUEPRINTS_URL
+from .cosmos_activity import COSMOS_GATEWAY_URL
 
 logger = logging.getLogger("supersplat-viewer.measure")
 
+WARM_TIMEOUT_S = 1500.0  # Nov 16 2026: an H100 cold start (Brev ~8.5 min + model ~2.5 min) took 761 s
+WARM_POLL_S = 5.0
 ASK_TIMEOUT_S = 960.0  # Blueprints view job budget (900 s) + margin
 POLL_S = 2.0
 JOB_TTL_S = 3600
@@ -84,6 +87,27 @@ def create_router(model_dir: Path, rag_sources=lambda model, query=None: []) -> 
 
     jobs: dict[str, dict] = {}
 
+    def _warm_cosmos(job: dict) -> None:
+        """Start the on-demand Cosmos NIM (Brev H100) before the measurement, showing its progress, so the long cold
+        start does not eat the Blueprints view-job budget (Nov 16 2026). Skipped silently if the gateway is down."""
+        try:
+            lc = httpx.post(f"{COSMOS_GATEWAY_URL}/api/lifecycle/start", timeout=30).json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning(f"Cosmos warm-up skipped: {exc}")
+            return
+        t0 = time.time()
+        while lc.get("state") != "ready" and time.time() - t0 < WARM_TIMEOUT_S:
+            if lc.get("state") == "error":
+                raise HTTPException(status_code=503, detail=f"Cosmos on Brev unavailable: {lc.get('detail')}")
+            job["stage"] = f"starting Cosmos 3 on Brev ({lc.get('detail') or lc.get('state')}; cold start ~13 min) · {int(time.time() - t0)} s"
+            time.sleep(WARM_POLL_S)
+            try:
+                lc = httpx.get(f"{COSMOS_GATEWAY_URL}/api/lifecycle", timeout=30).json()
+            except (httpx.HTTPError, ValueError):
+                continue
+        if lc.get("state") != "ready":
+            raise HTTPException(status_code=504, detail=f"Cosmos did not start within {int(WARM_TIMEOUT_S)} s")
+
     def _run_job(job: dict, model: str, question: str, camera: dict) -> None:
         try:
             job["stage"] = "importing the splat into Blueprints (first time only)"
@@ -95,6 +119,7 @@ def create_router(model_dir: Path, rag_sources=lambda model, query=None: []) -> 
                 logger.warning(f"RAG sources unavailable for {model}: {exc}")
                 sources = []
             orient = flythrough.viewer_orientation(model_dir / model)  # up axis for PLYs without cameras
+            _warm_cosmos(job)
             job["stage"] = "starting the Cosmos 3 measurement"
             with _client(60) as c:
                 r = c.post(f"/projects/{BLUEPRINTS_PROJECT}/scenes/{scene_id}/ask-view",
