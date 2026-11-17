@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image
 from fastapi import (
     FastAPI, File, UploadFile, Form, Query,
-    HTTPException, BackgroundTasks
+    HTTPException, BackgroundTasks, Request
 )
 from fastapi.responses import (
     JSONResponse, Response, FileResponse, HTMLResponse
@@ -1698,7 +1698,7 @@ async def garfield_clear():
 # Routes: TRELLIS.2 Reconstruction proxy
 # ---------------------------------------------------------------------------
 @app.post("/trellis/reconstruct")
-async def trellis_reconstruct(body: dict):
+async def trellis_reconstruct(body: dict, request: Request):
     """Proxy reconstruction request to TRELLIS.2 service."""
     import httpx
 
@@ -1761,11 +1761,13 @@ async def trellis_reconstruct(body: dict):
 
             if resp.status_code == 200:
                 data = resp.json()
-                trellis_host = TRELLIS_URL.replace("http://trellis-reconstructor", "http://localhost")
+                # Nov 16 2026: the "new tab" link pointed at http://localhost:8013 (unreachable from the Mac); use the
+                # host the browser used for :8086 (e.g. the Tailscale address 100.105.59.33) with TRELLIS's port
+                trellis_port = os.environ.get("TRELLIS_PUBLIC_PORT", "8013")
                 return {
                     "status": "ok",
                     "job_id": data.get("job_id", job_id),
-                    "viewer_url": f"{trellis_host}/viewer/{data.get('job_id', job_id)}"
+                    "viewer_url": f"{request.url.scheme}://{request.url.hostname}:{trellis_port}/viewer/{data.get('job_id', job_id)}"
                 }
             else:
                 return {"status": "error", "error": f"TRELLIS returned HTTP {resp.status_code}"}

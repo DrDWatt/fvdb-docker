@@ -124,9 +124,10 @@ def test_extraction_status_download_and_clear(client, ss, sam3, scene):
 def test_trellis_receives_the_cropped_object_and_returns_viewer_link(client, sam3, scene, services):
     segment(client)
     job_id, _ = extract(client, scene)
-    data = client.post("/trellis/reconstruct", json={"job_id": job_id}).json()
+    # Nov 16 2026: the link must use the host the browser used (Tailscale IP), not localhost
+    data = client.post("/trellis/reconstruct", json={"job_id": job_id}, headers={"host": "100.105.59.33:8086"}).json()
     assert data["status"] == "ok" and data["job_id"] == "trellis1"
-    assert data["viewer_url"] == "http://localhost:8013/viewer/trellis1"
+    assert data["viewer_url"] == "http://100.105.59.33:8013/viewer/trellis1"
     assert services.trellis_jobs[0]["name"] == f"extraction_{job_id}.png"
     assert services.trellis_jobs[0]["bytes"] > 100
 
